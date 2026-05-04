@@ -88,6 +88,7 @@ class QueryPlan:
     keyword_sample: tuple[str, ...]
     keyword_count_total: int
     prompt_text: str
+    voice_names: tuple[str, ...] = ()  # non-empty only for voice-anchored plans
 
 
 # --- Helpers ------------------------------------------------------------
@@ -223,6 +224,16 @@ _PROMPT_TEMPLATE = (
     "M&A, and substantive policy news. Skip listicles and opinion pieces unless from a tier-1 voice."
 )
 
+_VOICE_PROMPT_TEMPLATE = (
+    "Substantive posts, articles, podcasts, or interviews published in the last 24 hours by "
+    "these tier-1 healthcare voices in {geo_label}: {voices}.\n"
+    "Look across LinkedIn, X, Substacks, podcasts, op-eds, and media columns where applicable.\n"
+    "For each item include: voice name, headline or topic, source URL, publication date, "
+    "and a 2-sentence summary.\n"
+    "Skip routine reposts, brief congratulatory replies, and short reactions. Focus on original "
+    "takes, announcements, and substantive analysis."
+)
+
 
 def build_query_plans() -> list[QueryPlan]:
     rows = load_keywords()
@@ -270,7 +281,40 @@ def build_query_plans() -> list[QueryPlan]:
             keyword_count_total=len(krows),
             prompt_text=prompt,
         ))
+
+    plans.extend(_build_voice_plans())
     return plans
+
+
+def _build_voice_plans() -> list[QueryPlan]:
+    """One voice-anchored Perplexity query per geography, naming tier-1 voices.
+
+    Tier-1 voices mostly publish on LinkedIn / X — RSS won't reach them. These
+    queries close that coverage gap. Tier 2-4 are too numerous to name in a
+    single prompt without diluting signal; they ride along with bucket sweeps.
+    """
+    voices = load_voices()
+    out: list[QueryPlan] = []
+    for geo in ("India", "US"):
+        tier1 = [v for v in voices if v.tier == 1 and v.geography == geo]
+        if not tier1:
+            continue
+        names = tuple(v.name for v in tier1)
+        prompt = _VOICE_PROMPT_TEMPLATE.format(
+            geo_label=_GEO_LABEL[geo],
+            voices=", ".join(names),
+        )
+        out.append(QueryPlan(
+            id=f"{geo.lower()}__tier1_voices",
+            geography=geo,
+            bucket="Tier-1 voices",
+            sub_buckets=(),
+            keyword_sample=(),
+            keyword_count_total=0,
+            prompt_text=prompt,
+            voice_names=names,
+        ))
+    return out
 
 
 if __name__ == "__main__":

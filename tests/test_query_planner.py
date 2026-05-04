@@ -101,10 +101,33 @@ class QueryPlansTest(unittest.TestCase):
         }
         for p in self.plans:
             with self.subTest(p=p.id):
-                self.assertGreater(len(p.sub_buckets), 0)
-                self.assertGreater(len(p.keyword_sample), 0)
-                self.assertIn(p.bucket, p.prompt_text)
+                self.assertTrue(p.prompt_text)
                 self.assertIn(geo_to_label_substring[p.geography], p.prompt_text)
+                if p.voice_names:
+                    # Voice-anchored plan: no buckets/keywords; first voice name in prompt.
+                    self.assertEqual(p.sub_buckets, ())
+                    self.assertEqual(p.keyword_sample, ())
+                    self.assertEqual(p.keyword_count_total, 0)
+                    self.assertIn(p.voice_names[0], p.prompt_text)
+                else:
+                    self.assertGreater(len(p.sub_buckets), 0)
+                    self.assertGreater(len(p.keyword_sample), 0)
+                    self.assertIn(p.bucket, p.prompt_text)
+
+    def test_voice_plans_present(self) -> None:
+        ids = {p.id for p in self.plans}
+        self.assertIn("india__tier1_voices", ids)
+        self.assertIn("us__tier1_voices", ids)
+
+    def test_voice_plans_have_named_voices(self) -> None:
+        by_id = {p.id: p for p in self.plans}
+        india_voices = by_id["india__tier1_voices"].voice_names
+        us_voices = by_id["us__tier1_voices"].voice_names
+        # Per inspection: 12 India tier-1, 18 US tier-1.
+        self.assertEqual(len(india_voices), 12)
+        self.assertEqual(len(us_voices), 18)
+        for n in india_voices + us_voices:
+            self.assertTrue(n.strip())
 
     def test_determinism(self) -> None:
         # Build twice; ids and prompt_texts should be byte-identical.
