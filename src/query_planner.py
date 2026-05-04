@@ -219,19 +219,30 @@ _PROMPT_TEMPLATE = (
     "Healthcare news from the last 24 hours from {geo_label}, focused on {bucket}.\n"
     "Sub-themes to consider: {sub_buckets}.\n"
     "Representative keywords: {keyword_sample}.\n"
-    "For each story include: headline, source URL, publication date, 2-sentence summary.\n"
     "Prioritize: funding rounds, regulatory actions, product launches, leadership moves, "
-    "M&A, and substantive policy news. Skip listicles and opinion pieces unless from a tier-1 voice."
+    "M&A, and substantive policy news. Skip listicles and opinion pieces unless from a tier-1 voice.\n"
+    "Return ONLY a JSON object (no markdown fences, no preamble):\n"
+    "{{\n"
+    '  "stories": [\n'
+    '    {{"title": "headline", "url": "source URL", '
+    '"published": "ISO 8601 datetime or null", "summary": "2-sentence summary"}}\n'
+    "  ]\n"
+    "}}"
 )
 
 _VOICE_PROMPT_TEMPLATE = (
     "Substantive posts, articles, podcasts, or interviews published in the last 24 hours by "
     "these tier-1 healthcare voices in {geo_label}: {voices}.\n"
     "Look across LinkedIn, X, Substacks, podcasts, op-eds, and media columns where applicable.\n"
-    "For each item include: voice name, headline or topic, source URL, publication date, "
-    "and a 2-sentence summary.\n"
     "Skip routine reposts, brief congratulatory replies, and short reactions. Focus on original "
-    "takes, announcements, and substantive analysis."
+    "takes, announcements, and substantive analysis.\n"
+    "Return ONLY a JSON object (no markdown fences, no preamble):\n"
+    "{{\n"
+    '  "stories": [\n'
+    '    {{"title": "voice name + topic", "url": "source URL", '
+    '"published": "ISO 8601 datetime or null", "summary": "2-sentence summary"}}\n'
+    "  ]\n"
+    "}}"
 )
 
 
