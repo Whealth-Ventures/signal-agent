@@ -280,6 +280,7 @@ def rank_stories(
         "model": response.model, "cost_usd": response.estimated_cost_usd,
         "latency_ms": int(elapsed * 1000),
         "ranked_ids": [r.story.id for r in ranked],
+        "response_text": response.text[:2000],
     })
 
     return RankingResult(
