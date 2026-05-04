@@ -1,0 +1,295 @@
+"""Layer 3: dedupe + relevance scoring.
+
+Pulls unscored signals from storage, drops URLs sent in the last 7 days,
+clusters near-duplicates by embedding cosine similarity, scores each cluster
+against the firm's content corpus + deterministic boosters, then upserts
+Stories and links signals to them.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+import chromadb
+
+import config
+import storage
+from content_indexer import Embedder, ScoredChunk, query_similar
+from models import Signal, Story, signal_id, story_id
+from query_planner import load_voices
+
+SIMILARITY_THRESHOLD = 0.85
+TOP_K_FOR_CONTENT_SIMILARITY = 5
+SUMMARY_TRUNCATE_FOR_EMBED = 400
+
+# Booster table — tunable in one place. The "tier1_voice" entry is special-cased
+# (matched against a name set, not a regex).
+BOOSTERS: dict[str, tuple[float, re.Pattern | None]] = {
+    "tier1_voice": (0.10, None),
+    "funding":    (0.05, re.compile(r"\b(raises?|series [a-d]|seed round|funding)\b", re.IGNORECASE)),
+    "m_and_a":    (0.05, re.compile(r"\b(acquires?|acquisition|merges? with|m&a)\b", re.IGNORECASE)),
+    "regulatory": (0.05, re.compile(r"\b(fda|cdsco|ema|approved|cleared)\b", re.IGNORECASE)),
+    "product":    (0.03, re.compile(r"\b(launches?|unveils?|debuts?)\b", re.IGNORECASE)),
+    "leadership": (0.03, re.compile(r"\b(appoints?|named|joins|hires?)\b", re.IGNORECASE)),
+    "listicle":   (-0.10, re.compile(r"^\s*\d+\s+(best|top|essential|reasons|tips|ways)\b", re.IGNORECASE)),
+    "opinion":    (-0.05, re.compile(r"^\s*(opinion|perspective|column):", re.IGNORECASE)),
+}
+
+
+@dataclass(frozen=True)
+class ScoreBreakdown:
+    content_similarity: float
+    booster_total: float
+    boosters: dict[str, float]
+    final: float
+
+
+@dataclass(frozen=True)
+class ScoringStats:
+    signals_in: int
+    signals_filtered_recent: int
+    stories_created: int
+    elapsed_seconds: float
+
+
+# --- Helpers ------------------------------------------------------------
+
+def _signal_text(s: Signal) -> str:
+    summary = (s.summary or "")[:SUMMARY_TRUNCATE_FOR_EMBED]
+    return f"{s.title} — {summary}".strip()
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _mean_vec(vecs: list[list[float]]) -> list[float]:
+    n = len(vecs)
+    if n == 0:
+        return []
+    dim = len(vecs[0])
+    out = [0.0] * dim
+    for v in vecs:
+        for i, x in enumerate(v):
+            out[i] += x
+    return [x / n for x in out]
+
+
+def _tier1_voice_names() -> set[str]:
+    return {v.name for v in load_voices() if v.tier == 1 and v.name}
+
+
+# --- Pure functions -----------------------------------------------------
+
+def cluster_signals(
+    embeddings: list[list[float]],
+    threshold: float = SIMILARITY_THRESHOLD,
+) -> list[list[int]]:
+    """Greedy clustering: returns list of clusters, each a list of indices.
+
+    A signal joins the existing cluster whose centroid has the highest cosine
+    similarity above threshold; otherwise it starts a new cluster. Centroid is
+    a running mean of member vectors.
+    """
+    clusters: list[dict] = []
+    for i, emb in enumerate(embeddings):
+        best_j = -1
+        best_sim = threshold
+        for j, c in enumerate(clusters):
+            sim = _cosine(emb, c["centroid"])
+            if sim > best_sim:
+                best_sim = sim
+                best_j = j
+        if best_j == -1:
+            clusters.append({"members": [i], "vecs": [emb], "centroid": list(emb)})
+        else:
+            c = clusters[best_j]
+            c["members"].append(i)
+            c["vecs"].append(emb)
+            c["centroid"] = _mean_vec(c["vecs"])
+    return [c["members"] for c in clusters]
+
+
+def pick_canonical_idx(signals: list[Signal]) -> int:
+    """Longest summary wins; tie-break by earliest published_at, then (source, title)."""
+    if not signals:
+        raise ValueError("pick_canonical_idx: empty list")
+    return min(
+        range(len(signals)),
+        key=lambda i: (
+            -len(signals[i].summary or ""),
+            signals[i].published_at,
+            signals[i].source,
+            signals[i].title,
+        ),
+    )
+
+
+def pick_canonical(signals: list[Signal]) -> Signal:
+    return signals[pick_canonical_idx(signals)]
+
+
+def compute_boosters(signal: Signal, tier1_voice_names: set[str]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    text = f"{signal.title} {signal.summary or ''}"
+    for name, (delta, pattern) in BOOSTERS.items():
+        if name == "tier1_voice":
+            for v in tier1_voice_names:
+                if v and v in text:
+                    out[name] = delta
+                    break
+        else:
+            if pattern is not None and pattern.search(text):
+                out[name] = delta
+    return out
+
+
+def score_story(
+    content_chunks: list[ScoredChunk],
+    boosters: dict[str, float],
+) -> ScoreBreakdown:
+    if not content_chunks:
+        content_sim = 0.0
+    else:
+        top = content_chunks[:TOP_K_FOR_CONTENT_SIMILARITY]
+        # Chroma's cosine distance is 1 - cosine_similarity for normalized vecs.
+        sims = [max(0.0, 1.0 - c.distance) for c in top]
+        content_sim = sum(sims) / len(sims)
+    booster_total = sum(boosters.values())
+    final = max(0.0, min(1.0, content_sim + booster_total))
+    return ScoreBreakdown(
+        content_similarity=round(content_sim, 4),
+        booster_total=round(booster_total, 4),
+        boosters=dict(boosters),
+        final=round(final, 4),
+    )
+
+
+# --- Logging ------------------------------------------------------------
+
+def _today_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _log_path() -> Path:
+    return config.LOGS_DIR / f"scorer_{_today_str()}.jsonl"
+
+
+def _log(rec: dict) -> None:
+    rec.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+    with _log_path().open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, default=str) + "\n")
+
+
+# --- Orchestrator -------------------------------------------------------
+
+def run_scoring(
+    *,
+    conn: sqlite3.Connection | None = None,
+    chroma_client: chromadb.api.ClientAPI | None = None,
+    embedder: Embedder | None = None,
+    similarity_threshold: float = SIMILARITY_THRESHOLD,
+    voice_names: set[str] | None = None,
+) -> ScoringStats:
+    start = time.monotonic()
+    own_conn = conn is None
+    if own_conn:
+        conn = storage.connect()
+
+    try:
+        signals_all = storage.list_unscored_signals(conn=conn)
+        sent_urls = storage.recently_sent_urls(within_days=7, conn=conn)
+        signals = [s for s in signals_all if s.url not in sent_urls]
+        filtered = len(signals_all) - len(signals)
+
+        if not signals:
+            stats = ScoringStats(
+                signals_in=len(signals_all),
+                signals_filtered_recent=filtered,
+                stories_created=0,
+                elapsed_seconds=round(time.monotonic() - start, 3),
+            )
+            _log({"summary": True, **stats.__dict__})
+            if own_conn:
+                conn.commit()
+            return stats
+
+        signals.sort(key=lambda s: (-s.published_at.timestamp(), s.source, s.title))
+
+        if embedder is None:
+            from content_indexer import _make_openai_embedder
+            embedder, _calls = _make_openai_embedder(api_key=config.OPENAI_API_KEY)
+
+        texts = [_signal_text(s) for s in signals]
+        embeddings, _tokens = embedder(texts)
+
+        clusters = cluster_signals(embeddings, threshold=similarity_threshold)
+        names = voice_names if voice_names is not None else _tier1_voice_names()
+
+        stories_created = 0
+        for cluster in clusters:
+            cs = [signals[i] for i in cluster]
+            local_idx = pick_canonical_idx(cs)
+            canonical = cs[local_idx]
+            canonical_emb = embeddings[cluster[local_idx]]
+
+            content_chunks = query_similar(
+                k=TOP_K_FOR_CONTENT_SIMILARITY * 2,
+                embedding=canonical_emb,
+                chroma_client=chroma_client,
+                embedder=embedder,
+            )
+            boosters = compute_boosters(canonical, names)
+            breakdown = score_story(content_chunks, boosters)
+
+            sid = story_id(canonical.url)
+            story = Story(
+                id=sid,
+                canonical_url=canonical.url,
+                canonical_title=canonical.title,
+                canonical_summary=canonical.summary,
+                published_at=canonical.published_at,
+                relevance_score=breakdown.final,
+                signal_ids=tuple(signal_id(s.source, s.url) for s in cs),
+            )
+            storage.upsert_story(story, conn=conn)
+            for s in cs:
+                storage.assign_signal_to_story(
+                    signal_id(s.source, s.url), sid, conn=conn,
+                )
+
+            stories_created += 1
+            _log({
+                "story_id": sid,
+                "canonical_url": canonical.url,
+                "cluster_size": len(cs),
+                "content_similarity": breakdown.content_similarity,
+                "boosters": breakdown.boosters,
+                "booster_total": breakdown.booster_total,
+                "final_score": breakdown.final,
+            })
+
+        if own_conn:
+            conn.commit()
+
+        stats = ScoringStats(
+            signals_in=len(signals_all),
+            signals_filtered_recent=filtered,
+            stories_created=stories_created,
+            elapsed_seconds=round(time.monotonic() - start, 3),
+        )
+        _log({"summary": True, **stats.__dict__})
+        return stats
+    finally:
+        if own_conn and conn is not None:
+            conn.close()

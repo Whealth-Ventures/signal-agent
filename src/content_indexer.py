@@ -348,21 +348,26 @@ def reindex_content_dir(
 
 
 def query_similar(
-    text: str,
+    text: str | None = None,
     k: int = 10,
     *,
+    embedding: list[float] | None = None,
     chroma_client: chromadb.api.ClientAPI | None = None,
     embedder: Embedder | None = None,
 ) -> list[ScoredChunk]:
     client = chroma_client or _default_chroma_client()
     collection = _get_or_create_collection(client)
 
-    if embedder is None:
-        embedder, _ = _make_openai_embedder(api_key=config.OPENAI_API_KEY)
-    embeddings, _tokens = embedder([text])
+    if embedding is None:
+        if text is None:
+            raise ValueError("query_similar requires either text or embedding")
+        if embedder is None:
+            embedder, _ = _make_openai_embedder(api_key=config.OPENAI_API_KEY)
+        embeddings_, _tokens = embedder([text])
+        embedding = embeddings_[0]
 
     res = collection.query(
-        query_embeddings=embeddings,
+        query_embeddings=[embedding],
         n_results=k,
         include=["documents", "metadatas", "distances"],
     )
