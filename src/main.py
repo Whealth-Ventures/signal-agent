@@ -6,6 +6,7 @@ email was sent, 1 otherwise.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import sys
@@ -221,6 +222,9 @@ def run_pipeline(
     http_client: httpx.Client | None = None,
     skip_url_validation: bool = False,
     skip_content_indexing: bool = False,
+    max_plans: int | None = None,
+    skip_rss: bool = False,
+    dry_run: bool = False,
 ) -> PipelineStats:
     start = time.monotonic()
     digest_date = digest_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -238,6 +242,8 @@ def run_pipeline(
 
         # 1) Perplexity sweep
         plans = build_query_plans()
+        if max_plans is not None:
+            plans = plans[:max_plans]
         if perplexity_client is None:
             perplexity_client = PerplexityClient()
         t0 = time.monotonic()
@@ -252,12 +258,16 @@ def run_pipeline(
 
         # 2) RSS sweep
         t0 = time.monotonic()
-        rss_signals = fetch_all_newsletters(http=http_client)
-        _log({
-            "step": "rss_fetch_done",
-            "signals_collected": len(rss_signals),
-            "elapsed_seconds": round(time.monotonic() - t0, 2),
-        })
+        if skip_rss:
+            rss_signals = []
+            _log({"step": "rss_fetch_skipped"})
+        else:
+            rss_signals = fetch_all_newsletters(http=http_client)
+            _log({
+                "step": "rss_fetch_done",
+                "signals_collected": len(rss_signals),
+                "elapsed_seconds": round(time.monotonic() - t0, 2),
+            })
 
         # 3) Persist signals
         all_signals = perp_signals + rss_signals
@@ -288,41 +298,53 @@ def run_pipeline(
         # 6) Console
         print_top_5_to_console(ranking, digest_date)
 
-        # 7) Persist digest header + story rows
-        digest_id = storage.create_digest(
-            digest_date, config.DIGEST_RECIPIENTS, conn=conn,
-        )
-        for r in ranking.ranked:
-            storage.add_story_to_digest(
-                digest_id, r.story.id, r.rank, r.reasoning, conn=conn,
+        # 7+8) Dry-run vs full path
+        if dry_run:
+            html, _text = emailer.render_digest(
+                ranking.ranked, digest_date=digest_date,
             )
-        if own_conn:
-            conn.commit()
-
-        # 8) Email
-        email_result = emailer.send_digest(
-            ranking.ranked,
-            digest_date=digest_date,
-            smtp_factory=smtp_factory,
-            http=http_client,
-            skip_url_validation=skip_url_validation,
-        )
-        if email_result.sent:
-            storage.mark_digest_sent(digest_id, conn=conn)
+            out = config.LOGS_DIR / f"dry_run_digest_{digest_date}.html"
+            out.write_text(html, encoding="utf-8")
+            print(f"\n[dry-run] Rendered digest written to: {out}")
+            print("[dry-run] No digest record created, no email sent.")
+            email_sent = False
+            _log({"step": "dry_run_complete", "html_path": str(out)})
         else:
-            storage.mark_digest_failed(
-                digest_id, email_result.error or "unknown", conn=conn,
+            digest_id = storage.create_digest(
+                digest_date, config.DIGEST_RECIPIENTS, conn=conn,
             )
-        if own_conn:
-            conn.commit()
-        _log({
-            "step": "email_done",
-            "sent": email_result.sent,
-            "stories_sent": email_result.stories_sent,
-            "stories_dropped_invalid_url": email_result.stories_dropped_invalid_url,
-            "error": email_result.error,
-            "elapsed_seconds": email_result.elapsed_seconds,
-        })
+            for r in ranking.ranked:
+                storage.add_story_to_digest(
+                    digest_id, r.story.id, r.rank, r.reasoning, conn=conn,
+                )
+            if own_conn:
+                conn.commit()
+
+            email_result = emailer.send_digest(
+                ranking.ranked,
+                digest_date=digest_date,
+                smtp_factory=smtp_factory,
+                http=http_client,
+                skip_url_validation=skip_url_validation,
+            )
+            if email_result.sent:
+                storage.mark_digest_sent(digest_id, conn=conn)
+            else:
+                storage.mark_digest_failed(
+                    digest_id, email_result.error or "unknown", conn=conn,
+                )
+            if own_conn:
+                conn.commit()
+            _log({
+                "step": "email_done",
+                "sent": email_result.sent,
+                "stories_sent": email_result.stories_sent,
+                "stories_dropped_invalid_url":
+                    email_result.stories_dropped_invalid_url,
+                "error": email_result.error,
+                "elapsed_seconds": email_result.elapsed_seconds,
+            })
+            email_sent = email_result.sent
 
         elapsed = round(time.monotonic() - start, 3)
         stats = PipelineStats(
@@ -331,7 +353,7 @@ def run_pipeline(
             signals_saved=n_saved,
             stories_created=scoring_stats.stories_created,
             ranked_count=len(ranking.ranked),
-            digest_sent=email_result.sent,
+            digest_sent=email_sent,
             elapsed_seconds=elapsed,
         )
         _log({"summary": True, **asdict(stats)})
@@ -342,8 +364,27 @@ def run_pipeline(
 
 
 def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Daily healthcare signal pipeline.")
+    p.add_argument("--max-plans", type=int, default=None,
+                   help="Cap Perplexity plans (e.g. --max-plans 3 for a quick test).")
+    p.add_argument("--skip-rss", action="store_true",
+                   help="Skip RSS fetch (saves ~60 newsletter HTTP requests).")
+    p.add_argument("--skip-content-index", action="store_true",
+                   help="Skip the auto content-corpus indexing check on startup.")
+    p.add_argument("--skip-url-validation", action="store_true",
+                   help="Skip HEAD-validating story URLs before email.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Render the digest HTML to a file but don't persist or email.")
+    args = p.parse_args(argv)
+
     config.check_env()
-    stats = run_pipeline()
+    stats = run_pipeline(
+        max_plans=args.max_plans,
+        skip_rss=args.skip_rss,
+        skip_content_indexing=args.skip_content_index,
+        skip_url_validation=args.skip_url_validation,
+        dry_run=args.dry_run,
+    )
     print()
     print(
         f"perplexity={stats.perplexity_signals}  rss={stats.rss_signals}  "
@@ -351,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         f"ranked={stats.ranked_count}  sent={stats.digest_sent}  "
         f"elapsed={stats.elapsed_seconds:.1f}s"
     )
+    if args.dry_run:
+        return 0
     return 0 if stats.digest_sent else 1
 
 
