@@ -6,6 +6,7 @@ module boundaries.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -28,3 +29,29 @@ class Signal:
     published_at: datetime
     summary: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Story:
+    """A deduped/clustered story — possibly aggregating multiple Signals.
+
+    `signal_ids` is the set of Signal ids (from `signal_id()`) that this story
+    represents. `relevance_score` is set by scorer.py.
+    """
+    id: str
+    canonical_url: str
+    canonical_title: str
+    canonical_summary: str
+    published_at: datetime
+    relevance_score: float
+    signal_ids: tuple[str, ...] = ()
+
+
+def signal_id(source: str, url: str) -> str:
+    """Deterministic id for a signal — same (source, url) → same id."""
+    return hashlib.sha256(f"{source}|{url}".encode("utf-8")).hexdigest()[:16]
+
+
+def story_id(canonical_url: str) -> str:
+    """Deterministic id for a story — same canonical_url → same id."""
+    return hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()[:16]
