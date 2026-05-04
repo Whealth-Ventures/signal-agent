@@ -202,6 +202,7 @@ class PerplexityClient:
         attempts = 0
         last_exc: BaseException | None = None
         last_status = 0
+        last_body = ""
         response: httpx.Response | None = None
         start = time.monotonic()
 
@@ -225,6 +226,10 @@ class PerplexityClient:
         except httpx.HTTPStatusError as e:
             last_exc = e
             last_status = e.response.status_code
+            try:
+                last_body = e.response.text[:600]
+            except Exception:
+                last_body = ""
         except Exception as e:  # network errors after retries
             last_exc = e
             last_status = 0
@@ -232,6 +237,9 @@ class PerplexityClient:
         latency_ms = int((time.monotonic() - start) * 1000)
 
         if response is None or response.status_code != 200:
+            err_str = str(last_exc) if last_exc else "no response"
+            if last_body:
+                err_str = f"{err_str} | body: {last_body}"
             self._log_call(
                 model=model,
                 query_id=query_id,
@@ -242,10 +250,12 @@ class PerplexityClient:
                 citations=0,
                 cost_usd=0.0,
                 attempts=attempts,
-                error=str(last_exc) if last_exc else "no response",
+                error=err_str,
             )
             raise PerplexityCallFailed(
-                f"Perplexity call failed after {attempts} attempt(s): {last_exc}"
+                f"Perplexity call failed (model={model}, query_id={query_id}) "
+                f"after {attempts} attempt(s): HTTP {last_status} — "
+                f"{last_body or last_exc}"
             ) from last_exc
 
         data = response.json()
