@@ -1,0 +1,76 @@
+name: Daily Digest
+
+# 10:00 IST = 04:30 UTC. GitHub Actions cron can be delayed 5-15 min at peak;
+# off-the-hour slots are more reliable than :00.
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Prevent overlap between a scheduled run and a manual trigger.
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Restore SQLite + Chroma from the previous run. On first ever run the
+      # cache will miss and the pipeline will initialise both from scratch
+      # (storage.init_db + reindex_content_dir over the committed content/).
+      - name: Restore state cache
+        id: state-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/db
+            data/vector_store
+          key: signal-agent-state-${{ github.run_id }}
+          restore-keys: |
+            signal-agent-state-
+
+      - name: Run daily pipeline
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL_LABEL: ${{ vars.SLACK_CHANNEL_LABEL }}
+        run: python src/main.py
+
+      # Save even on failure so a partially-indexed Chroma store or a
+      # half-written SQLite row doesn't get thrown away.
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/db
+            data/vector_store
+          key: signal-agent-state-${{ github.run_id }}
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: data/logs/
+          retention-days: 14
+          if-no-files-found: ignore
