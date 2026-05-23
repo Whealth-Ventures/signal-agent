@@ -44,19 +44,14 @@ def _env_int(name: str) -> int:
     return int(v) if v else 0
 
 
-def _parse_recipients(s: str) -> tuple[str, ...]:
-    return tuple(addr.strip() for addr in s.split(",") if addr.strip())
-
-
 OPENAI_API_KEY = _env("OPENAI_API_KEY")
 PERPLEXITY_API_KEY = _env("PERPLEXITY_API_KEY")
 
-SMTP_HOST = _env("SMTP_HOST")
-SMTP_PORT = _env_int("SMTP_PORT")
-SMTP_USER = _env("SMTP_USER")
-SMTP_PASSWORD = _env("SMTP_PASSWORD")
-SMTP_FROM = _env("SMTP_FROM")
-DIGEST_RECIPIENTS: tuple[str, ...] = _parse_recipients(_env("DIGEST_RECIPIENTS"))
+SLACK_WEBHOOK_URL = _env("SLACK_WEBHOOK_URL")
+# Human-readable channel label, e.g. "#healthcare-signal". Optional — used only
+# in the digests.recipients audit column and in logs; the webhook URL already
+# pins which channel actually receives the post.
+SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
 
 
 # --- Constants ----------------------------------------------------------
@@ -64,12 +59,12 @@ DIGEST_RECIPIENTS: tuple[str, ...] = _parse_recipients(_env("DIGEST_RECIPIENTS")
 # Budget / dedupe
 MAX_PERPLEXITY_CALLS_PER_DAY = 60
 DEDUPE_LOOKBACK_DAYS = 7
-DIGEST_TOP_N = 5
+DIGEST_TOP_N = 10
 DAILY_BUDGET_USD = 3.0
 
 # Perplexity
 PERPLEXITY_MODEL_FETCH = "sonar-pro"
-PERPLEXITY_MODEL_RANK = "sonar-reasoning"
+PERPLEXITY_MODEL_RANK = "sonar-reasoning-pro"
 PERPLEXITY_RECENCY = "day"
 
 # Embeddings
@@ -77,6 +72,9 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 
 # HTTP
 HTTP_TIMEOUT_S = 30
+# sonar-reasoning-pro does extended chain-of-thought; 30s is too tight when the
+# candidate prompt is large (timed out 4× in a row on --max-plans 20).
+HTTP_TIMEOUT_RANK_S = 120
 HTTP_MAX_RETRIES = 4
 URL_VALIDATION_TIMEOUT_S = 10
 
@@ -90,12 +88,7 @@ DIGEST_HOUR_LOCAL = 10
 REQUIRED_ENV = (
     "OPENAI_API_KEY",
     "PERPLEXITY_API_KEY",
-    "SMTP_HOST",
-    "SMTP_PORT",
-    "SMTP_USER",
-    "SMTP_PASSWORD",
-    "SMTP_FROM",
-    "DIGEST_RECIPIENTS",
+    "SLACK_WEBHOOK_URL",
 )
 
 

@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import chromadb
 
@@ -21,16 +22,18 @@ import config
 import storage
 from content_indexer import Embedder, ScoredChunk, query_similar
 from models import Signal, Story, signal_id, story_id
-from query_planner import load_voices
+from query_planner import load_newsletters, load_voices
 
 SIMILARITY_THRESHOLD = 0.85
 TOP_K_FOR_CONTENT_SIMILARITY = 5
 SUMMARY_TRUNCATE_FOR_EMBED = 400
+TRUSTED_PUBLICATION_BOOST = 0.08
 
-# Booster table — tunable in one place. The "tier1_voice" entry is special-cased
-# (matched against a name set, not a regex).
+# Booster table — tunable in one place. The "tier1_voice" and
+# "trusted_publication" entries are special-cased (matched against sets, not regex).
 BOOSTERS: dict[str, tuple[float, re.Pattern | None]] = {
-    "tier1_voice": (0.10, None),
+    "tier1_voice":         (0.10, None),
+    "trusted_publication": (TRUSTED_PUBLICATION_BOOST, None),
     "funding":    (0.05, re.compile(r"\b(raises?|series [a-d]|seed round|funding)\b", re.IGNORECASE)),
     "m_and_a":    (0.05, re.compile(r"\b(acquires?|acquisition|merges? with|m&a)\b", re.IGNORECASE)),
     "regulatory": (0.05, re.compile(r"\b(fda|cdsco|ema|approved|cleared)\b", re.IGNORECASE)),
@@ -89,6 +92,48 @@ def _tier1_voice_names() -> set[str]:
     return {v.name for v in load_voices() if v.tier == 1 and v.name}
 
 
+def _normalize_host(host: str) -> str:
+    h = host.lower().strip()
+    if h.startswith("www."):
+        h = h[4:]
+    return h
+
+
+def _trusted_publication_hosts() -> set[str]:
+    """Hostnames of newsletters/publications curated in voices.xlsx.
+
+    Story URLs whose host matches (or is a subdomain of) one of these gets a
+    boost — operationalizes the "trusted sources first" feedback.
+    """
+    hosts: set[str] = set()
+    for nl in load_newsletters():
+        if not nl.url:
+            continue
+        try:
+            host = urlparse(nl.url).netloc
+        except Exception:
+            continue
+        if host:
+            hosts.add(_normalize_host(host))
+    return hosts
+
+
+def _matches_trusted_host(url: str, trusted: set[str]) -> bool:
+    if not trusted:
+        return False
+    try:
+        host = _normalize_host(urlparse(url).netloc)
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in trusted:
+        return True
+    # Subdomain match: e.g. newsletter publishes at substack.com/p/...
+    # and a story comes in via author.substack.com.
+    return any(host.endswith("." + t) for t in trusted)
+
+
 # --- Pure functions -----------------------------------------------------
 
 def cluster_signals(
@@ -139,15 +184,23 @@ def pick_canonical(signals: list[Signal]) -> Signal:
     return signals[pick_canonical_idx(signals)]
 
 
-def compute_boosters(signal: Signal, tier1_voice_names: set[str]) -> dict[str, float]:
+def compute_boosters(
+    signal: Signal,
+    tier1_voice_names: set[str],
+    trusted_hosts: set[str] | None = None,
+) -> dict[str, float]:
     out: dict[str, float] = {}
     text = f"{signal.title} {signal.summary or ''}"
+    trusted_hosts = trusted_hosts or set()
     for name, (delta, pattern) in BOOSTERS.items():
         if name == "tier1_voice":
             for v in tier1_voice_names:
                 if v and v in text:
                     out[name] = delta
                     break
+        elif name == "trusted_publication":
+            if _matches_trusted_host(signal.url, trusted_hosts):
+                out[name] = delta
         else:
             if pattern is not None and pattern.search(text):
                 out[name] = delta
@@ -200,6 +253,7 @@ def run_scoring(
     embedder: Embedder | None = None,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
     voice_names: set[str] | None = None,
+    trusted_hosts: set[str] | None = None,
 ) -> ScoringStats:
     start = time.monotonic()
     own_conn = conn is None
@@ -235,6 +289,10 @@ def run_scoring(
 
         clusters = cluster_signals(embeddings, threshold=similarity_threshold)
         names = voice_names if voice_names is not None else _tier1_voice_names()
+        hosts = (
+            trusted_hosts if trusted_hosts is not None
+            else _trusted_publication_hosts()
+        )
 
         stories_created = 0
         for cluster in clusters:
@@ -249,7 +307,7 @@ def run_scoring(
                 chroma_client=chroma_client,
                 embedder=embedder,
             )
-            boosters = compute_boosters(canonical, names)
+            boosters = compute_boosters(canonical, names, hosts)
             breakdown = score_story(content_chunks, boosters)
 
             sid = story_id(canonical.url)

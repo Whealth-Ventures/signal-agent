@@ -14,16 +14,15 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 from urllib.parse import urlparse
 
 import chromadb
 import httpx
 
 import config
-import emailer
 import ranker
 import scorer
+import slack_client
 import storage
 from content_indexer import (
     COLLECTION_NAME,
@@ -69,6 +68,11 @@ def _log(rec: dict) -> None:
     rec.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
     with _log_path().open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, default=str) + "\n")
+
+
+def _progress(msg: str) -> None:
+    """Print a live progress line to stderr (won't pollute stdout digest output)."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 # --- Helpers ------------------------------------------------------------
@@ -140,7 +144,9 @@ def fetch_perplexity(
     later in the pipeline still has budget.
     """
     out: list[Signal] = []
-    for plan in plans:
+    n = len(plans)
+    width = len(str(n))
+    for i, plan in enumerate(plans, start=1):
         if client.remaining_today <= headroom:
             _log({
                 "step": "perplexity_fetch_capped",
@@ -148,17 +154,30 @@ def fetch_perplexity(
                 "headroom": headroom,
                 "skipped_plan": plan.id,
             })
+            _progress(
+                f"  [{i:>{width}}/{n}] {plan.id:<40}  capped (remaining<={headroom})"
+            )
             break
         try:
+            t0 = time.monotonic()
             resp = client.search_recent(plan)
-            out.extend(parse_perplexity_response(plan, resp))
+            signals = parse_perplexity_response(plan, resp)
+            out.extend(signals)
+            _progress(
+                f"  [{i:>{width}}/{n}] {plan.id:<40}  "
+                f"{len(signals):>2} stories  {int((time.monotonic() - t0) * 1000):>5}ms"
+            )
         except RateLimitExceeded as e:
             _log({"step": "perplexity_fetch_rate_limit",
                   "plan": plan.id, "error": str(e)})
+            _progress(f"  [{i:>{width}}/{n}] {plan.id:<40}  rate-limited, stopping")
             break
         except Exception as e:
             _log({"step": "perplexity_fetch_plan_failed",
                   "plan": plan.id, "error": f"{type(e).__name__}: {e}"})
+            _progress(
+                f"  [{i:>{width}}/{n}] {plan.id:<40}  FAILED ({type(e).__name__})"
+            )
             continue
     return out
 
@@ -189,7 +208,8 @@ def ensure_content_indexed(
         _log({"step": "content_index_done", **asdict(stats)})
 
 
-def print_top_5_to_console(ranking: ranker.RankingResult, digest_date: str) -> None:
+def print_digest_to_console(ranking: ranker.RankingResult, digest_date: str) -> None:
+    """Mirror the email layout: grouped by domain, one-liners, source host."""
     bar = "=" * 72
     print()
     print(bar)
@@ -197,13 +217,24 @@ def print_top_5_to_console(ranking: ranker.RankingResult, digest_date: str) -> N
     print(bar)
     if not ranking.ranked:
         print("(no stories qualified today)")
+        return
+
+    grouped: dict[str, list[ranker.RankedStory]] = {}
+    order: list[str] = []
     for r in ranking.ranked:
-        host = urlparse(r.story.canonical_url).netloc or r.story.canonical_url
-        print(f"\n#{r.rank}  {host}")
-        print(f"    {r.story.canonical_title}")
-        print(f"    {r.story.canonical_url}")
-        if r.reasoning:
-            print(f"    Why: {r.reasoning}")
+        domain = (r.domain or "Other").strip() or "Other"
+        if domain not in grouped:
+            grouped[domain] = []
+            order.append(domain)
+        grouped[domain].append(r)
+
+    for domain in order:
+        print(f"\n[{domain.upper()}]")
+        for r in grouped[domain]:
+            host = urlparse(r.story.canonical_url).netloc or r.story.canonical_url
+            one_liner = r.one_liner or r.story.canonical_title
+            print(f"  • {one_liner}")
+            print(f"    {host} · {r.story.canonical_url}")
     print()
     if ranking.used_fallback:
         print("(used score-based fallback for some slots)")
@@ -217,7 +248,6 @@ def run_pipeline(
     conn: sqlite3.Connection | None = None,
     chroma_client: chromadb.api.ClientAPI | None = None,
     perplexity_client: PerplexityClient | None = None,
-    smtp_factory: Callable | None = None,
     embedder: Embedder | None = None,
     http_client: httpx.Client | None = None,
     skip_url_validation: bool = False,
@@ -238,6 +268,7 @@ def run_pipeline(
             conn.commit()
 
         if not skip_content_indexing:
+            _progress("[0/5] Content corpus check…")
             ensure_content_indexed(chroma_client=chroma_client, embedder=embedder)
 
         # 1) Perplexity sweep
@@ -246,8 +277,19 @@ def run_pipeline(
             plans = plans[:max_plans]
         if perplexity_client is None:
             perplexity_client = PerplexityClient()
+        _progress(
+            f"[1/5] Perplexity sweep: {len(plans)} plans  "
+            f"({perplexity_client.remaining_today} of "
+            f"{config.MAX_PERPLEXITY_CALLS_PER_DAY} calls remaining today)"
+        )
         t0 = time.monotonic()
         perp_signals = fetch_perplexity(perplexity_client, plans)
+        _progress(
+            f"      done: {len(perp_signals)} signals in "
+            f"{time.monotonic() - t0:.1f}s  "
+            f"({perplexity_client.calls_today}/"
+            f"{config.MAX_PERPLEXITY_CALLS_PER_DAY} calls used)"
+        )
         _log({
             "step": "perplexity_fetch_done",
             "plans_total": len(plans),
@@ -260,9 +302,15 @@ def run_pipeline(
         t0 = time.monotonic()
         if skip_rss:
             rss_signals = []
+            _progress("[2/5] RSS sweep: skipped (--skip-rss)")
             _log({"step": "rss_fetch_skipped"})
         else:
+            _progress("[2/5] RSS sweep: fetching newsletters…")
             rss_signals = fetch_all_newsletters(http=http_client)
+            _progress(
+                f"      done: {len(rss_signals)} signals in "
+                f"{time.monotonic() - t0:.1f}s"
+            )
             _log({
                 "step": "rss_fetch_done",
                 "signals_collected": len(rss_signals),
@@ -277,15 +325,34 @@ def run_pipeline(
         _log({"step": "signals_saved", "n": n_saved, "input_count": len(all_signals)})
 
         # 4) Score & cluster
+        _progress(
+            f"[3/5] Scoring & dedupe: {len(all_signals)} signals "
+            f"({n_saved} new)…"
+        )
+        t0 = time.monotonic()
         scoring_stats = scorer.run_scoring(
             conn=conn, chroma_client=chroma_client, embedder=embedder,
         )
         if own_conn:
             conn.commit()
+        _progress(
+            f"      done: {scoring_stats.stories_created} stories in "
+            f"{time.monotonic() - t0:.1f}s"
+        )
         _log({"step": "scoring_done", **asdict(scoring_stats)})
 
         # 5) Rank
+        _progress(
+            f"[4/5] Ranking: sonar-reasoning-pro "
+            f"(timeout {config.HTTP_TIMEOUT_RANK_S}s)…"
+        )
         ranking = ranker.rank_stories(conn=conn, client=perplexity_client)
+        _progress(
+            f"      done: {len(ranking.ranked)} ranked in "
+            f"{ranking.elapsed_seconds:.1f}s  "
+            f"(fallback={ranking.used_fallback}, "
+            f"cost=${ranking.cost_usd:.4f})"
+        )
         _log({
             "step": "ranking_done",
             "ranked_count": len(ranking.ranked),
@@ -296,55 +363,70 @@ def run_pipeline(
         })
 
         # 6) Console
-        print_top_5_to_console(ranking, digest_date)
+        print_digest_to_console(ranking, digest_date)
 
         # 7+8) Dry-run vs full path
         if dry_run:
-            html, _text = emailer.render_digest(
+            _progress("[5/5] Dry-run: rendering blocks to disk (no Slack post)…")
+            blocks = slack_client.build_blocks(
                 ranking.ranked, digest_date=digest_date,
             )
-            out = config.LOGS_DIR / f"dry_run_digest_{digest_date}.html"
-            out.write_text(html, encoding="utf-8")
-            print(f"\n[dry-run] Rendered digest written to: {out}")
-            print("[dry-run] No digest record created, no email sent.")
-            email_sent = False
-            _log({"step": "dry_run_complete", "html_path": str(out)})
+            payload = {
+                "text": f"Daily Healthcare Signal — {digest_date}",
+                "blocks": blocks,
+            }
+            out = config.LOGS_DIR / f"dry_run_digest_{digest_date}.json"
+            out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            print(f"\n[dry-run] Block Kit payload written to: {out}")
+            print("[dry-run] No digest record created, no Slack post sent.")
+            digest_sent = False
+            _log({"step": "dry_run_complete", "payload_path": str(out)})
         else:
+            _progress(
+                f"[5/5] Slack: validating {len(ranking.ranked)} URLs and posting…"
+            )
             digest_id = storage.create_digest(
-                digest_date, config.DIGEST_RECIPIENTS, conn=conn,
+                digest_date, (config.SLACK_CHANNEL_LABEL,), conn=conn,
             )
             for r in ranking.ranked:
                 storage.add_story_to_digest(
-                    digest_id, r.story.id, r.rank, r.reasoning, conn=conn,
+                    digest_id, r.story.id, r.rank, r.one_liner, r.domain,
+                    conn=conn,
                 )
             if own_conn:
                 conn.commit()
 
-            email_result = emailer.send_digest(
+            slack_result = slack_client.post_digest(
                 ranking.ranked,
                 digest_date=digest_date,
-                smtp_factory=smtp_factory,
                 http=http_client,
                 skip_url_validation=skip_url_validation,
             )
-            if email_result.sent:
+            if slack_result.sent:
                 storage.mark_digest_sent(digest_id, conn=conn)
             else:
                 storage.mark_digest_failed(
-                    digest_id, email_result.error or "unknown", conn=conn,
+                    digest_id, slack_result.error or "unknown", conn=conn,
                 )
             if own_conn:
                 conn.commit()
+            _progress(
+                f"      done: sent={slack_result.sent}, "
+                f"stories_sent={slack_result.stories_sent}, "
+                f"dropped={slack_result.stories_dropped_invalid_url}  "
+                f"({slack_result.elapsed_seconds:.1f}s)"
+            )
             _log({
-                "step": "email_done",
-                "sent": email_result.sent,
-                "stories_sent": email_result.stories_sent,
+                "step": "slack_done",
+                "sent": slack_result.sent,
+                "stories_sent": slack_result.stories_sent,
                 "stories_dropped_invalid_url":
-                    email_result.stories_dropped_invalid_url,
-                "error": email_result.error,
-                "elapsed_seconds": email_result.elapsed_seconds,
+                    slack_result.stories_dropped_invalid_url,
+                "status_code": slack_result.status_code,
+                "error": slack_result.error,
+                "elapsed_seconds": slack_result.elapsed_seconds,
             })
-            email_sent = email_result.sent
+            digest_sent = slack_result.sent
 
         elapsed = round(time.monotonic() - start, 3)
         stats = PipelineStats(
@@ -353,7 +435,7 @@ def run_pipeline(
             signals_saved=n_saved,
             stories_created=scoring_stats.stories_created,
             ranked_count=len(ranking.ranked),
-            digest_sent=email_sent,
+            digest_sent=digest_sent,
             elapsed_seconds=elapsed,
         )
         _log({"summary": True, **asdict(stats)})

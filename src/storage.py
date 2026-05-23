@@ -72,10 +72,19 @@ _SCHEMA_SQL = [
         story_id  TEXT NOT NULL REFERENCES stories(id),
         rank INTEGER NOT NULL,
         reasoning TEXT,
+        domain TEXT,
         PRIMARY KEY (digest_id, story_id)
     )
     """,
 ]
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Idempotent ALTER TABLE migrations for pre-existing databases."""
+    cur = c.execute("PRAGMA table_info(digest_stories)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "domain" not in cols:
+        c.execute("ALTER TABLE digest_stories ADD COLUMN domain TEXT")
 
 
 # --- Connection management ---------------------------------------------
@@ -107,6 +116,7 @@ def init_db(*, conn: sqlite3.Connection | None = None) -> None:
     with _maybe_own(conn) as c:
         for stmt in _SCHEMA_SQL:
             c.execute(stmt)
+        _migrate(c)
         if conn is not None:
             c.commit()
 
@@ -300,14 +310,15 @@ def add_story_to_digest(
     story_id_: str,
     rank: int,
     reasoning: str = "",
+    domain: str = "",
     *,
     conn: sqlite3.Connection | None = None,
 ) -> None:
     with _maybe_own(conn) as c:
         c.execute(
-            """INSERT INTO digest_stories (digest_id, story_id, rank, reasoning)
-               VALUES (?, ?, ?, ?)""",
-            (digest_id, story_id_, rank, reasoning),
+            """INSERT INTO digest_stories (digest_id, story_id, rank, reasoning, domain)
+               VALUES (?, ?, ?, ?, ?)""",
+            (digest_id, story_id_, rank, reasoning, domain),
         )
 
 

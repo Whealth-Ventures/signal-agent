@@ -2,7 +2,7 @@
 
 ## What this is
 A daily healthcare news digest agent for a VC firm (W Health Ventures / 2070 Health).
-Runs autonomously, delivers top 5 stories to email at 10am IST every day.
+Runs autonomously, delivers top 5 stories to a Slack channel at 10am IST every day.
 
 ## Inputs (already in place)
 - `inputs/keywords.xlsx` — 3 tabs (India, US, Cross-Cutting), ~2,280 keywords across buckets/sub-buckets
@@ -24,13 +24,13 @@ Runs autonomously, delivers top 5 stories to email at 10am IST every day.
 6. `src/storage.py` — SQLite schema (signals, stories, digests tables)
 7. `src/scorer.py` — dedupe via embeddings + relevance scoring
 8. `src/ranker.py` — Perplexity API call for final top 5
-9. `src/emailer.py` — HTML email formatter + SMTP sender
+9. `src/slack_client.py` — Block Kit formatter + Slack Incoming Webhook poster
 10. `src/main.py` — orchestrator (this is what cron triggers)
 
 ## Key constraints
 - Total Perplexity calls per day must stay under 60
 - Must NOT repeat stories sent in the last 7 days (check `digests` table)
-- Validate every URL with HEAD request before it ships in email
+- Validate every URL with HEAD request before it ships in the Slack post
 - Log every API call to `data/logs/` with timestamps and costs
 - All state in SQLite at `data/db/agent.db` — no external DB
 
@@ -41,7 +41,7 @@ Runs autonomously, delivers top 5 stories to email at 10am IST every day.
 - chromadb for vector store (local, no cloud)
 - OpenAI text-embedding-3-small for embeddings (cheapest, good enough)
 - SQLite + sqlite3 stdlib (no ORM)
-- Jinja2 for email templates
+- Slack Incoming Webhook (modern, provisioned via a Slack App — not the legacy custom integration) for delivery
 - python-dotenv for config
 
 ## What "done" looks like for v1
@@ -50,12 +50,12 @@ Running `python src/main.py` end-to-end:
 - Hits Perplexity ~30-40 times
 - Pulls RSS from voices file
 - Stores everything in SQLite
-- Outputs top 5 to console AND sends email
+- Outputs top 5 to console AND posts to Slack
 - Completes in under 15 minutes
 - Costs under $3 per run
 
 ## What to defer to v2
 - n8n integration (run locally first)
-- Feedback loop (thumbs up/down)
+- Feedback loop (thumbs up/down via Slack reactions)
 - Web dashboard
-- Multi-recipient support
+- Multi-channel support

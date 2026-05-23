@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import smtplib
 import sys
 import tempfile
 import unittest
@@ -192,21 +191,31 @@ class _PipelineBase(unittest.TestCase):
 
         self._patches = [
             mock.patch.object(config, "LOGS_DIR", Path(self.tmp.name)),
-            mock.patch.object(config, "DIGEST_RECIPIENTS", ("test@example.com",)),
-            mock.patch.object(config, "SMTP_HOST", "smtp.example.com"),
-            mock.patch.object(config, "SMTP_PORT", 587),
-            mock.patch.object(config, "SMTP_USER", "user@example.com"),
-            mock.patch.object(config, "SMTP_PASSWORD", "pw"),
-            mock.patch.object(config, "SMTP_FROM", "user@example.com"),
+            mock.patch.object(
+                config, "SLACK_WEBHOOK_URL",
+                "https://hooks.slack.com/services/T000/B000/xxx",
+            ),
+            mock.patch.object(config, "SLACK_CHANNEL_LABEL", "#test-channel"),
         ]
         for p in self._patches:
             p.start()
 
         self.chroma = chromadb.PersistentClient(path=str(Path(self.tmp.name) / "chroma"))
-        # MockTransport returning 404 — RSS finds no feeds → 0 RSS signals
+        # MockTransport: Slack POSTs → 200 ok; everything else (RSS, URL
+        # validation HEADs) → 404 so RSS finds no feeds.
+        self.slack_posts: list[dict] = []
         self.http = httpx.Client(transport=httpx.MockTransport(
-            lambda req: httpx.Response(404, text="not found"),
+            self._route,
         ))
+
+    def _route(self, req: httpx.Request) -> httpx.Response:
+        if req.method == "POST" and "hooks.slack.com" in str(req.url):
+            try:
+                self.slack_posts.append(json.loads(req.content))
+            except json.JSONDecodeError:
+                self.slack_posts.append({"_raw": req.content.decode(errors="replace")})
+            return httpx.Response(200, text="ok")
+        return httpx.Response(404, text="not found")
 
     def tearDown(self) -> None:
         for p in self._patches:
@@ -235,21 +244,20 @@ class HappyPathTest(_PipelineBase):
         }
         ranker_resp = {"ranked": [
             {"story_id": story_id("https://e.example/acme"),
-             "rank": 1, "reasoning": "Most relevant funding"},
+             "rank": 1, "domain": "Funding & M&A",
+             "one_liner": "Acme raises Series B."},
             {"story_id": story_id("https://e.example/wing"),
-             "rank": 2, "reasoning": "Local development"},
+             "rank": 2, "domain": "Care Delivery",
+             "one_liner": "Hospital opens new wing."},
         ]}
         client = FakePerplexityClient(
             response_per_plan=responses, ranker_response=ranker_resp,
         )
 
-        smtp_mock = mock.MagicMock(spec=smtplib.SMTP)
-        factory = mock.MagicMock(return_value=smtp_mock)
-
         stats = main_module.run_pipeline(
             digest_date="2026-05-05",
             conn=self.conn, chroma_client=self.chroma,
-            perplexity_client=client, smtp_factory=factory,
+            perplexity_client=client,
             embedder=_stub_embedder(), http_client=self.http,
             skip_url_validation=True, skip_content_indexing=True,
         )
@@ -263,8 +271,11 @@ class HappyPathTest(_PipelineBase):
         self.assertGreaterEqual(stats.ranked_count, 2)
         self.assertTrue(stats.digest_sent)
 
-        # SMTP was called
-        smtp_mock.send_message.assert_called_once()
+        # Slack was POSTed to exactly once
+        self.assertEqual(len(self.slack_posts), 1)
+        flat = json.dumps(self.slack_posts[0]["blocks"])
+        self.assertIn("https://e.example/acme", flat)
+        self.assertIn("https://e.example/wing", flat)
 
         # Digest persisted with status='sent'
         rows = self.conn.execute("SELECT status FROM digests").fetchall()
@@ -276,7 +287,7 @@ class HappyPathTest(_PipelineBase):
         self.assertEqual(ds["c"], 2)
 
 
-class SmtpFailureTest(_PipelineBase):
+class SlackFailureTest(_PipelineBase):
     def test_marks_digest_failed_and_returns_false(self) -> None:
         responses = {
             "india__1_care_delivery_models": {"stories": [
@@ -287,22 +298,28 @@ class SmtpFailureTest(_PipelineBase):
             ]},
         }
         ranker_resp = {"ranked": [
-            {"story_id": story_id("https://e.example/acme"), "rank": 1, "reasoning": "x"},
+            {"story_id": story_id("https://e.example/acme"),
+             "rank": 1, "domain": "Funding & M&A", "one_liner": "x"},
         ]}
         client = FakePerplexityClient(response_per_plan=responses,
                                        ranker_response=ranker_resp)
 
-        smtp_mock = mock.MagicMock(spec=smtplib.SMTP)
-        smtp_mock.send_message.side_effect = smtplib.SMTPException("auth failed")
-        factory = mock.MagicMock(return_value=smtp_mock)
-
-        stats = main_module.run_pipeline(
-            digest_date="2026-05-05",
-            conn=self.conn, chroma_client=self.chroma,
-            perplexity_client=client, smtp_factory=factory,
-            embedder=_stub_embedder(), http_client=self.http,
-            skip_url_validation=True, skip_content_indexing=True,
-        )
+        # Override the http transport so Slack POSTs fail with 403.
+        bad_http = httpx.Client(transport=httpx.MockTransport(
+            lambda req: httpx.Response(403, text="invalid_token")
+            if req.method == "POST" and "hooks.slack.com" in str(req.url)
+            else httpx.Response(404, text="not found"),
+        ))
+        try:
+            stats = main_module.run_pipeline(
+                digest_date="2026-05-05",
+                conn=self.conn, chroma_client=self.chroma,
+                perplexity_client=client,
+                embedder=_stub_embedder(), http_client=bad_http,
+                skip_url_validation=True, skip_content_indexing=True,
+            )
+        finally:
+            bad_http.close()
         self.conn.commit()
 
         self.assertFalse(stats.digest_sent)
@@ -310,20 +327,18 @@ class SmtpFailureTest(_PipelineBase):
             "SELECT status, error FROM digests"
         ).fetchall()
         self.assertEqual(rows[0]["status"], "failed")
-        self.assertIn("SMTPException", rows[0]["error"] or "")
+        self.assertIn("invalid_token", rows[0]["error"] or "")
 
 
 class CapHitTest(_PipelineBase):
     def test_pipeline_still_completes_when_perplexity_capped(self) -> None:
         # cap = headroom → fetch_perplexity yields 0 signals, ranker also blocked
         client = FakePerplexityClient(cap=main_module.PERPLEXITY_HEADROOM)
-        smtp_mock = mock.MagicMock(spec=smtplib.SMTP)
-        factory = mock.MagicMock(return_value=smtp_mock)
 
         stats = main_module.run_pipeline(
             digest_date="2026-05-05",
             conn=self.conn, chroma_client=self.chroma,
-            perplexity_client=client, smtp_factory=factory,
+            perplexity_client=client,
             embedder=_stub_embedder(), http_client=self.http,
             skip_url_validation=True, skip_content_indexing=True,
         )
@@ -335,6 +350,7 @@ class CapHitTest(_PipelineBase):
         # Ranker should be the short-circuit path (0 candidates) and not call complete()
         self.assertEqual(client.calls_today, 0)
         self.assertTrue(stats.digest_sent)  # empty digest still ships
+        self.assertEqual(len(self.slack_posts), 1)
 
 
 if __name__ == "__main__":

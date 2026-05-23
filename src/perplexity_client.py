@@ -187,6 +187,7 @@ class PerplexityClient:
         recency: str | None = None,
         query_id: str = "ad-hoc",
         system: str | None = None,
+        timeout: float | None = None,
     ) -> ChatResponse:
         self._check_cap()
         self._polite_throttle()
@@ -222,7 +223,7 @@ class PerplexityClient:
             for attempt in retryer:
                 with attempt:
                     attempts += 1
-                    response = self._do_post(body)
+                    response = self._do_post(body, timeout=timeout)
         except httpx.HTTPStatusError as e:
             last_exc = e
             last_status = e.response.status_code
@@ -301,8 +302,11 @@ class PerplexityClient:
 
     # --- internals ---
 
-    def _do_post(self, body: dict) -> httpx.Response:
-        r = self._http.post(PERPLEXITY_URL, json=body)
+    def _do_post(self, body: dict, *, timeout: float | None = None) -> httpx.Response:
+        if timeout is not None:
+            r = self._http.post(PERPLEXITY_URL, json=body, timeout=timeout)
+        else:
+            r = self._http.post(PERPLEXITY_URL, json=body)
         if r.status_code == 200:
             return r
         # raise_for_status() raises HTTPStatusError for any 4xx/5xx; tenacity's

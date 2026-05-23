@@ -35,13 +35,13 @@ class ConfigPathsTest(unittest.TestCase):
 class ConfigConstantsTest(unittest.TestCase):
     def test_perplexity_models(self) -> None:
         self.assertEqual(config.PERPLEXITY_MODEL_FETCH, "sonar-pro")
-        self.assertEqual(config.PERPLEXITY_MODEL_RANK, "sonar-reasoning")
+        self.assertEqual(config.PERPLEXITY_MODEL_RANK, "sonar-reasoning-pro")
         self.assertEqual(config.PERPLEXITY_RECENCY, "day")
 
     def test_budget_constants(self) -> None:
         self.assertEqual(config.MAX_PERPLEXITY_CALLS_PER_DAY, 60)
         self.assertEqual(config.DEDUPE_LOOKBACK_DAYS, 7)
-        self.assertEqual(config.DIGEST_TOP_N, 5)
+        self.assertEqual(config.DIGEST_TOP_N, 10)
 
     def test_embedding_model(self) -> None:
         self.assertEqual(config.EMBEDDING_MODEL, "text-embedding-3-small")
@@ -52,11 +52,20 @@ class ConfigConstantsTest(unittest.TestCase):
 
 
 class ConfigEnvTest(unittest.TestCase):
-    def test_recipients_parsed_as_tuple(self) -> None:
-        self.assertIsInstance(config.DIGEST_RECIPIENTS, tuple)
-        for addr in config.DIGEST_RECIPIENTS:
-            self.assertIn("@", addr)
-            self.assertEqual(addr, addr.strip())
+    def test_slack_webhook_url_loaded(self) -> None:
+        self.assertIsInstance(config.SLACK_WEBHOOK_URL, str)
+        # Real .env should have a Slack webhook URL configured.
+        self.assertTrue(
+            config.SLACK_WEBHOOK_URL.startswith("https://hooks.slack.com/"),
+            f"SLACK_WEBHOOK_URL doesn't look like a Slack hook: "
+            f"{config.SLACK_WEBHOOK_URL!r}",
+        )
+
+    def test_channel_label_has_default(self) -> None:
+        # Optional; falls back to "(slack)" so the digest record always has
+        # something to display.
+        self.assertIsInstance(config.SLACK_CHANNEL_LABEL, str)
+        self.assertTrue(config.SLACK_CHANNEL_LABEL)
 
     def test_check_env_passes_with_real_dotenv(self) -> None:
         # The .env in the repo is the source of truth for this run; if it's

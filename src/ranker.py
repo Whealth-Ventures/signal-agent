@@ -22,16 +22,41 @@ from typing import Any, Protocol
 import config
 import storage
 from models import Story
-from perplexity_client import ChatResponse, PerplexityClient
+from perplexity_client import (
+    ChatResponse,
+    PerplexityCallFailed,
+    PerplexityClient,
+    RateLimitExceeded,
+)
 
-CANDIDATE_POOL_SIZE = 25
+CANDIDATE_POOL_SIZE = 35
 SUMMARY_MAX_CHARS_IN_PROMPT = 200
-REASONING_MAX_CHARS = 280
+ONE_LINER_MAX_CHARS = 160
+DOMAIN_MAX_CHARS = 40
+DEFAULT_DOMAIN = "Other"
+
+# Suggested clinical / business domains. The LLM may pick from these OR coin a
+# tighter label (e.g. "Oncology — China"); we just want consistent grouping.
+SUGGESTED_DOMAINS = (
+    "Oncology",
+    "Cardiology",
+    "Mental Health",
+    "Digital Health",
+    "Pharma & Biotech",
+    "Care Delivery",
+    "Payers & Insurance",
+    "Diagnostics",
+    "Med Devices",
+    "Policy & Regulation",
+    "Funding & M&A",
+)
 
 _SYSTEM_PROMPT = (
-    "You are an editor curating a daily healthcare news digest for an Indian and "
-    "US healthcare VC firm. You will not search the web for this task — reason only "
-    "over the candidate stories provided. Output JSON only, no preamble."
+    "You are an editor curating a scannable daily healthcare news digest for an "
+    "Indian and US healthcare VC firm. The digest is an 'attention router' — "
+    "short one-liners grouped by domain, NOT an in-depth research document. "
+    "You will not search the web for this task — reason only over the candidate "
+    "stories provided. Output JSON only, no preamble."
 )
 
 
@@ -51,7 +76,8 @@ class _RankerClient(Protocol):
 class RankedStory:
     story: Story
     rank: int
-    reasoning: str
+    one_liner: str
+    domain: str = DEFAULT_DOMAIN
 
 
 @dataclass(frozen=True)
@@ -74,17 +100,29 @@ def _trim_summary(s: str) -> str:
 
 def build_prompt(candidates: list[Story], top_n: int) -> str:
     lines = [
-        f"Pick the TOP {top_n} stories that should appear in today's digest. Consider:",
+        f"Pick the TOP {top_n} stories that should appear in today's digest. Selection:",
         "- Genuine newsworthiness (funding rounds, launches, regulatory, M&A, policy)",
         "- Avoid near-duplicates",
         "- Mix India + US + cross-cutting themes if possible",
         "- Skip listicles, hot takes, and opinion pieces",
+        "- Aim for breadth across domains so the digest covers multiple areas",
+        "",
+        "For EACH selected story produce:",
+        "- A `domain` label for grouping (clinical specialty or business area). "
+        "Prefer one of: " + ", ".join(SUGGESTED_DOMAINS) + ". You may also coin a "
+        "tighter label (e.g. 'Oncology — China'). Use the same exact label for "
+        "stories that belong together so they group cleanly.",
+        f"- A `one_liner` — a single scannable sentence (max ~{ONE_LINER_MAX_CHARS} "
+        "chars). State the WHAT in a punchy newsroom-headline style; do not "
+        "editorialize, do not say 'this matters because…'. Think Axios PM or "
+        "Morning Brew — bullet, not paragraph.",
         "",
         "Return ONLY a JSON object with this exact structure (no markdown fences):",
         "{",
         '  "ranked": [',
         '    {"story_id": "<id from candidates below>", "rank": 1,',
-        '     "reasoning": "One sentence explaining why this matters."},',
+        '     "domain": "Oncology",',
+        '     "one_liner": "FDA clears AstraZeneca\'s Truqap for metastatic breast cancer subset."},',
         "    ...",
         "  ]",
         "}",
@@ -131,6 +169,14 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _fallback_one_liner(story: Story) -> str:
+    """Use the canonical title (trimmed) as the one-liner when the LLM didn't supply one."""
+    title = (story.canonical_title or "").strip().replace("\n", " ")
+    if len(title) > ONE_LINER_MAX_CHARS:
+        title = title[:ONE_LINER_MAX_CHARS - 1].rstrip() + "…"
+    return title
+
+
 def parse_ranked(
     response_text: str,
     candidates_by_id: dict[str, Story],
@@ -139,7 +185,8 @@ def parse_ranked(
     """Returns (ranked_list, used_fallback). Fills empty slots from score order."""
     parsed = _extract_json(response_text)
     chosen_ids: list[str] = []
-    reasonings: dict[str, str] = {}
+    one_liners: dict[str, str] = {}
+    domains: dict[str, str] = {}
     fallback = False
 
     if parsed and isinstance(parsed.get("ranked"), list):
@@ -152,8 +199,15 @@ def parse_ranked(
             if sid in chosen_ids:
                 continue
             chosen_ids.append(sid)
-            reasoning = str(entry.get("reasoning") or "").strip()
-            reasonings[sid] = reasoning[:REASONING_MAX_CHARS]
+            ol = str(entry.get("one_liner") or "").strip().replace("\n", " ")
+            if not ol:
+                # legacy field name from older prompts
+                ol = str(entry.get("reasoning") or "").strip().replace("\n", " ")
+            if not ol:
+                ol = _fallback_one_liner(candidates_by_id[sid])
+            one_liners[sid] = ol[:ONE_LINER_MAX_CHARS]
+            dom = str(entry.get("domain") or "").strip()
+            domains[sid] = (dom or DEFAULT_DOMAIN)[:DOMAIN_MAX_CHARS]
             if len(chosen_ids) >= top_n:
                 break
     else:
@@ -163,6 +217,7 @@ def parse_ranked(
     if len(chosen_ids) < top_n:
         if not fallback and len(chosen_ids) == 0:
             fallback = True
+        had_partial = len(chosen_ids) > 0 and len(chosen_ids) < top_n
         ordered = sorted(
             candidates_by_id.values(),
             key=lambda s: -s.relevance_score,
@@ -171,15 +226,11 @@ def parse_ranked(
             if st.id in chosen_ids:
                 continue
             chosen_ids.append(st.id)
-            reasonings.setdefault(
-                st.id,
-                f"Fallback: relevance score {st.relevance_score:.2f}.",
-            )
+            one_liners.setdefault(st.id, _fallback_one_liner(st))
+            domains.setdefault(st.id, DEFAULT_DOMAIN)
             if len(chosen_ids) >= top_n:
                 break
-        if not fallback and any(
-            r.startswith("Fallback:") for r in reasonings.values()
-        ):
+        if had_partial:
             # We had to fill slots → mark as fallback for transparency
             fallback = True
 
@@ -187,7 +238,8 @@ def parse_ranked(
         RankedStory(
             story=candidates_by_id[sid],
             rank=i + 1,
-            reasoning=reasonings.get(sid, ""),
+            one_liner=one_liners.get(sid, _fallback_one_liner(candidates_by_id[sid])),
+            domain=domains.get(sid, DEFAULT_DOMAIN),
         )
         for i, sid in enumerate(chosen_ids[:top_n])
     ]
@@ -241,7 +293,8 @@ def rank_stories(
             RankedStory(
                 story=st,
                 rank=i + 1,
-                reasoning=f"Auto-selected (≤{top_n} candidates).",
+                one_liner=_fallback_one_liner(st),
+                domain=DEFAULT_DOMAIN,
             )
             for i, st in enumerate(
                 sorted(candidates, key=lambda s: -s.relevance_score)
@@ -263,30 +316,45 @@ def rank_stories(
     if client is None:
         client = PerplexityClient()
     prompt = build_prompt(candidates, top_n)
-    response = client.complete(
-        prompt,
-        model=config.PERPLEXITY_MODEL_RANK,
-        query_id="rank",
-        system=_SYSTEM_PROMPT,
-    )
+
+    response_text = ""
+    response_model: str | None = None
+    response_cost = 0.0
+    call_error: str | None = None
+    try:
+        response = client.complete(
+            prompt,
+            model=config.PERPLEXITY_MODEL_RANK,
+            query_id="rank",
+            system=_SYSTEM_PROMPT,
+            timeout=config.HTTP_TIMEOUT_RANK_S,
+        )
+        response_text = response.text
+        response_model = response.model
+        response_cost = response.estimated_cost_usd
+    except (PerplexityCallFailed, RateLimitExceeded) as e:
+        # Transport failure / cap hit — fall through to score-order fallback so
+        # the pipeline ships a digest instead of crashing.
+        call_error = f"{type(e).__name__}: {e}"
 
     by_id = {st.id: st for st in candidates}
-    ranked, used_fallback = parse_ranked(response.text, by_id, top_n)
+    ranked, used_fallback = parse_ranked(response_text, by_id, top_n)
     elapsed = round(time.monotonic() - start, 3)
 
     _log({
         "candidates_count": len(candidates), "top_n": top_n,
         "used_fallback": used_fallback,
-        "model": response.model, "cost_usd": response.estimated_cost_usd,
+        "model": response_model, "cost_usd": response_cost,
         "latency_ms": int(elapsed * 1000),
         "ranked_ids": [r.story.id for r in ranked],
-        "response_text": response.text[:2000],
+        "response_text": response_text[:2000],
+        "call_error": call_error,
     })
 
     return RankingResult(
         ranked=ranked,
         candidates_count=len(candidates),
         used_fallback=used_fallback,
-        cost_usd=response.estimated_cost_usd,
+        cost_usd=response_cost,
         elapsed_seconds=elapsed,
     )

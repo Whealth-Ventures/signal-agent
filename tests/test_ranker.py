@@ -44,10 +44,11 @@ class FakePerplexityClient:
         self.calls: list[dict] = []
 
     def complete(self, prompt: str, *, model: str = "", recency: str | None = None,
-                 query_id: str = "", system: str | None = None) -> ChatResponse:
+                 query_id: str = "", system: str | None = None,
+                 timeout: float | None = None) -> ChatResponse:
         self.calls.append({
             "prompt": prompt, "model": model, "query_id": query_id,
-            "system": system,
+            "system": system, "timeout": timeout,
         })
         return ChatResponse(
             text=self.response_text, citations=(),
@@ -110,19 +111,22 @@ class ParseRankedTest(unittest.TestCase):
     def test_well_formed_json(self) -> None:
         a, b, c = self.stories[0], self.stories[1], self.stories[2]
         text = json.dumps({"ranked": [
-            {"story_id": b.id, "rank": 1, "reasoning": "Most important"},
-            {"story_id": a.id, "rank": 2, "reasoning": "Solid"},
+            {"story_id": b.id, "rank": 1,
+             "domain": "Oncology", "one_liner": "Most important"},
+            {"story_id": a.id, "rank": 2,
+             "domain": "Cardiology", "one_liner": "Solid"},
         ]})
         ranked, fallback = ranker.parse_ranked(text, self.by_id, top_n=2)
         self.assertFalse(fallback)
         self.assertEqual([r.story.id for r in ranked], [b.id, a.id])
-        self.assertEqual(ranked[0].reasoning, "Most important")
+        self.assertEqual(ranked[0].one_liner, "Most important")
+        self.assertEqual(ranked[0].domain, "Oncology")
 
     def test_unknown_id_dropped_then_filled_from_score(self) -> None:
         a = self.stories[0]
         text = json.dumps({"ranked": [
-            {"story_id": "definitely_not_an_id", "rank": 1, "reasoning": "x"},
-            {"story_id": a.id, "rank": 2, "reasoning": "fine"},
+            {"story_id": "definitely_not_an_id", "rank": 1, "one_liner": "x"},
+            {"story_id": a.id, "rank": 2, "one_liner": "fine"},
         ]})
         ranked, fallback = ranker.parse_ranked(text, self.by_id, top_n=3)
         # Unknown id dropped; remaining slots filled from score order
@@ -195,7 +199,9 @@ class FullPathTest(_OrchestratorBase):
         # Pick stories b, d, f, h, a in that order (mix of low + high scores)
         chosen = [stories[1], stories[3], stories[5], stories[7], stories[0]]
         text = json.dumps({"ranked": [
-            {"story_id": s.id, "rank": i + 1, "reasoning": f"reason for {s.canonical_url[-1]}"}
+            {"story_id": s.id, "rank": i + 1,
+             "domain": "Oncology",
+             "one_liner": f"one-liner for {s.canonical_url[-1]}"}
             for i, s in enumerate(chosen)
         ]})
         client = FakePerplexityClient(text)
