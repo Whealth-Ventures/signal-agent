@@ -294,6 +294,7 @@ def run_pipeline(
     max_plans: int | None = None,
     skip_rss: bool = False,
     dry_run: bool = False,
+    test_mode: bool = False,
 ) -> PipelineStats:
     start = time.monotonic()
     digest_date = digest_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -407,7 +408,7 @@ def run_pipeline(
         # 6) Console
         print_digest_to_console(ranking, digest_date)
 
-        # 7+8) Dry-run vs full path
+        # 7+8) Dry-run vs test vs full path
         if dry_run:
             _progress("[5/5] Dry-run: rendering blocks to disk (no Slack post)…")
             blocks = slack_client.build_blocks(
@@ -423,6 +424,38 @@ def run_pipeline(
             print("[dry-run] No digest record created, no Slack post sent.")
             digest_sent = False
             _log({"step": "dry_run_complete", "payload_path": str(out)})
+        elif test_mode:
+            # Like a real run for Slack, but no digest row in the DB → the
+            # URLs we post here won't enter the 30-day dedup window and
+            # squeeze out tomorrow's real digest.
+            _progress(
+                f"[5/5] Test post: validating {len(ranking.flat)} URLs and "
+                f"posting to Slack with [TEST] marker…"
+            )
+            slack_result = slack_client.post_digest(
+                ranking,
+                digest_date=digest_date,
+                http=http_client,
+                skip_url_validation=skip_url_validation,
+                test_mode=True,
+            )
+            _progress(
+                f"      done: sent={slack_result.sent}, "
+                f"stories_sent={slack_result.stories_sent}, "
+                f"dropped={slack_result.stories_dropped_invalid_url}  "
+                f"({slack_result.elapsed_seconds:.1f}s)"
+            )
+            _log({
+                "step": "test_post_done",
+                "sent": slack_result.sent,
+                "stories_sent": slack_result.stories_sent,
+                "stories_dropped_invalid_url":
+                    slack_result.stories_dropped_invalid_url,
+                "status_code": slack_result.status_code,
+                "error": slack_result.error,
+                "elapsed_seconds": slack_result.elapsed_seconds,
+            })
+            digest_sent = slack_result.sent
         else:
             _progress(
                 f"[5/5] Slack: validating {len(ranking.flat)} URLs and posting…"
@@ -501,8 +534,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="Skip the auto content-corpus indexing check on startup.")
     p.add_argument("--skip-url-validation", action="store_true",
                    help="Skip HEAD-validating story URLs before email.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Render the digest HTML to a file but don't persist or email.")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true",
+                      help="Render the digest blocks to disk but don't persist "
+                           "or post to Slack.")
+    mode.add_argument("--test", action="store_true",
+                      help="Run the full pipeline and post to Slack with a "
+                           "[TEST] marker. Does NOT write a digest row to the "
+                           "DB, so the test URLs don't enter the dedup window.")
     args = p.parse_args(argv)
 
     config.check_env()
@@ -512,6 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_content_indexing=args.skip_content_index,
         skip_url_validation=args.skip_url_validation,
         dry_run=args.dry_run,
+        test_mode=args.test,
     )
     print()
     print(

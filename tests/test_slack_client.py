@@ -237,6 +237,28 @@ class BuildBlocksTest(unittest.TestCase):
         self.assertIn("0 stories", flat)
         self.assertIn("No stories", flat)
 
+    def test_test_mode_prefixes_header(self) -> None:
+        ranking = _mk_ranking(
+            top_summary=[_mk_ranked("a", geo="US")],
+        )
+        blocks = slack_client.build_blocks(
+            ranking, digest_date="2026-05-27", test_mode=True,
+        )
+        # Header is the first section's text
+        first_text = blocks[0]["text"]["text"]
+        self.assertIn("[TEST]", first_text)
+        self.assertIn("Daily Healthcare Signal", first_text)
+        # Marker is in the bold portion (before the closing `*`)
+        self.assertTrue(first_text.startswith("*[TEST] Daily"),
+                        f"unexpected header: {first_text!r}")
+
+    def test_default_has_no_test_marker(self) -> None:
+        ranking = _mk_ranking(
+            top_summary=[_mk_ranked("a", geo="US")],
+        )
+        blocks = slack_client.build_blocks(ranking, digest_date="2026-05-27")
+        self.assertNotIn("[TEST]", json.dumps(blocks))
+
     def test_one_liner_escapes_mrkdwn_specials(self) -> None:
         ranking = _mk_ranking(
             top_summary=[_mk_ranked("x", one_liner="<script>alert(1)</script> & co", geo="US")],
@@ -263,6 +285,30 @@ class _PostTestBase(unittest.TestCase):
         for p in self._patches:
             p.stop()
         self.tmp.cleanup()
+
+
+class PostTestModeTest(_PostTestBase):
+    def test_test_mode_payload_carries_marker(self) -> None:
+        seen: dict = {}
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.method == "POST" and "hooks.slack.com" in str(req.url):
+                seen["body"] = json.loads(req.content)
+                return httpx.Response(200, text="ok")
+            return httpx.Response(200)
+        http = _http_with_routes(handler)
+        ranking = _mk_ranking(
+            top_summary=[_mk_ranked("a", one_liner="a", geo="US")],
+        )
+        result = slack_client.post_digest(
+            ranking, digest_date="2026-05-27", http=http, test_mode=True,
+        )
+        self.assertTrue(result.sent)
+        # Fallback text (shown in notifications) carries the marker
+        self.assertTrue(seen["body"]["text"].startswith("[TEST] "),
+                        f"fallback text missing marker: {seen['body']['text']!r}")
+        # And the in-channel header has it too
+        header = seen["body"]["blocks"][0]["text"]["text"]
+        self.assertIn("[TEST]", header)
 
 
 class PostHappyPathTest(_PostTestBase):

@@ -149,8 +149,13 @@ def build_blocks(
     ranking: RankingResult,
     *,
     digest_date: str,
+    test_mode: bool = False,
 ) -> list[dict]:
-    """Build the Block Kit payload from a RankingResult."""
+    """Build the Block Kit payload from a RankingResult.
+
+    `test_mode` prepends `[TEST]` to the header so an operator can run a live
+    Slack post without the channel mistaking it for the day's real digest.
+    """
     total = (
         len(ranking.top_summary)
         + sum(len(v) for v in ranking.by_priority.values())
@@ -158,9 +163,11 @@ def build_blocks(
     )
     plural = "story" if total == 1 else "stories"
 
+    title_prefix = "[TEST] " if test_mode else ""
     blocks: list[dict] = [
         _section(
-            f"*Daily Healthcare Signal — {_escape_mrkdwn(digest_date)}*"
+            f"*{title_prefix}Daily Healthcare Signal — "
+            f"{_escape_mrkdwn(digest_date)}*"
             f"  ·  {total} {plural}"
         ),
     ]
@@ -255,6 +262,7 @@ def post_digest(
     webhook_url: str | None = None,
     http: httpx.Client | None = None,
     skip_url_validation: bool = False,
+    test_mode: bool = False,
 ) -> SlackResult:
     start = time.monotonic()
     url = webhook_url if webhook_url is not None else config.SLACK_WEBHOOK_URL
@@ -285,9 +293,10 @@ def post_digest(
             + sum(len(v) for v in filtered.by_priority.values())
             + len(filtered.other)
         )
-        blocks = build_blocks(filtered, digest_date=digest_date)
+        blocks = build_blocks(filtered, digest_date=digest_date, test_mode=test_mode)
+        text_prefix = "[TEST] " if test_mode else ""
         payload = {
-            "text": f"Daily Healthcare Signal — {digest_date}",
+            "text": f"{text_prefix}Daily Healthcare Signal — {digest_date}",
             "blocks": blocks,
         }
         try:
