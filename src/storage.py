@@ -41,7 +41,9 @@ _SCHEMA_SQL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_stories_score ON stories(relevance_score DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_stories_priority_bucket ON stories(priority_bucket)",
+    # idx_stories_priority_bucket is created in _migrate() *after* the column
+    # has been ensured to exist — keeping it here breaks startup on any DB that
+    # predates the priority_bucket column (CREATE INDEX runs before ALTER TABLE).
     """
     CREATE TABLE IF NOT EXISTS signals (
         id TEXT PRIMARY KEY,
@@ -95,14 +97,17 @@ def _migrate(c: sqlite3.Connection) -> None:
     cols = {row["name"] for row in cur.fetchall()}
     if "priority_bucket" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN priority_bucket TEXT")
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_stories_priority_bucket "
-            "ON stories(priority_bucket)"
-        )
     if "geo" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN geo TEXT")
     if "embedding" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN embedding BLOB")
+    # Create indexes for migration-added columns AFTER the columns exist.
+    # Idempotent so it's fine to also run on fresh DBs where CREATE TABLE
+    # already produced the column.
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stories_priority_bucket "
+        "ON stories(priority_bucket)"
+    )
 
 
 # --- Connection management ---------------------------------------------
