@@ -30,6 +30,12 @@ SUMMARY_TRUNCATE_FOR_EMBED = 400
 TRUSTED_PUBLICATION_BOOST = 0.08
 FIRM_MENTION_BOOST = 0.08
 
+# Cross-day dedup. Looser than the within-day cluster threshold because
+# different outlets covering the same event use different wording.
+HISTORICAL_DEDUP_THRESHOLD = 0.80
+HISTORICAL_DEDUP_WINDOW_DAYS = 30
+URL_DEDUP_WINDOW_DAYS = 30
+
 # Booster table — tunable in one place. The "tier1_voice", "trusted_publication",
 # and "firm_mention" entries are special-cased (matched against sets, not regex).
 BOOSTERS: dict[str, tuple[float, re.Pattern | None]] = {
@@ -58,6 +64,7 @@ class ScoreBreakdown:
 class ScoringStats:
     signals_in: int
     signals_filtered_recent: int
+    clusters_filtered_historical: int
     stories_created: int
     elapsed_seconds: float
 
@@ -76,6 +83,20 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return dot / (na * nb)
+
+
+def _max_similarity(
+    embedding: list[float],
+    historical: list[tuple[str, list[float]]],
+) -> tuple[float, str | None]:
+    best_sim = 0.0
+    best_id: str | None = None
+    for sid, vec in historical:
+        sim = _cosine(embedding, vec)
+        if sim > best_sim:
+            best_sim = sim
+            best_id = sid
+    return best_sim, best_id
 
 
 def _mean_vec(vecs: list[list[float]]) -> list[float]:
@@ -315,6 +336,9 @@ def run_scoring(
     chroma_client: chromadb.api.ClientAPI | None = None,
     embedder: Embedder | None = None,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
+    historical_dedup_threshold: float = HISTORICAL_DEDUP_THRESHOLD,
+    historical_dedup_window_days: int = HISTORICAL_DEDUP_WINDOW_DAYS,
+    url_dedup_window_days: int = URL_DEDUP_WINDOW_DAYS,
     voice_names: set[str] | None = None,
     trusted_hosts: set[str] | None = None,
     firm_names: set[str] | None = None,
@@ -326,7 +350,9 @@ def run_scoring(
 
     try:
         signals_all = storage.list_unscored_signals(conn=conn)
-        sent_urls = storage.recently_sent_urls(within_days=7, conn=conn)
+        sent_urls = storage.recently_sent_urls(
+            within_days=url_dedup_window_days, conn=conn,
+        )
         signals = [s for s in signals_all if s.url not in sent_urls]
         filtered = len(signals_all) - len(signals)
 
@@ -334,6 +360,7 @@ def run_scoring(
             stats = ScoringStats(
                 signals_in=len(signals_all),
                 signals_filtered_recent=filtered,
+                clusters_filtered_historical=0,
                 stories_created=0,
                 elapsed_seconds=round(time.monotonic() - start, 3),
             )
@@ -359,12 +386,33 @@ def run_scoring(
         )
         firms = firm_names if firm_names is not None else _firm_names()
 
+        # Load historical embeddings once. Empty list on first ever run.
+        historical = storage.recent_story_embeddings(
+            within_days=historical_dedup_window_days, conn=conn,
+        )
+
         stories_created = 0
+        clusters_filtered_historical = 0
         for cluster in clusters:
             cs = [signals[i] for i in cluster]
             local_idx = pick_canonical_idx(cs)
             canonical = cs[local_idx]
             canonical_emb = embeddings[cluster[local_idx]]
+
+            # Cross-day dedup: if any recently-sent story has a near-identical
+            # embedding, drop this cluster before paying tokens to rank it.
+            best_sim, best_id = _max_similarity(canonical_emb, historical)
+            if best_sim >= historical_dedup_threshold:
+                clusters_filtered_historical += 1
+                _log({
+                    "step": "cluster_filtered_historical_dup",
+                    "canonical_url": canonical.url,
+                    "matched_story_id": best_id,
+                    "similarity": round(best_sim, 4),
+                    "threshold": historical_dedup_threshold,
+                    "cluster_size": len(cs),
+                })
+                continue
 
             content_chunks = query_similar(
                 k=TOP_K_FOR_CONTENT_SIMILARITY * 2,
@@ -389,11 +437,17 @@ def run_scoring(
                 priority_bucket=priority_bucket,
                 geo=geo,
             )
-            storage.upsert_story(story, conn=conn)
+            storage.upsert_story(story, embedding=canonical_emb, conn=conn)
             for s in cs:
                 storage.assign_signal_to_story(
                     signal_id(s.source, s.url), sid, conn=conn,
                 )
+
+            # Newly-stored embedding becomes available for the rest of this run,
+            # so two clusters from today's batch can't both survive if they'd
+            # match each other across days. (Within-day dedup is the clustering
+            # step above, but it uses a tighter threshold.)
+            historical.append((sid, canonical_emb))
 
             stories_created += 1
             _log({
@@ -414,6 +468,7 @@ def run_scoring(
         stats = ScoringStats(
             signals_in=len(signals_all),
             signals_filtered_recent=filtered,
+            clusters_filtered_historical=clusters_filtered_historical,
             stories_created=stories_created,
             elapsed_seconds=round(time.monotonic() - start, 3),
         )

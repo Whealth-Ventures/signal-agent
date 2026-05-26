@@ -367,18 +367,29 @@ def _log(rec: dict) -> None:
 
 # --- Orchestrator -------------------------------------------------------
 
+RECENT_SENT_WINDOW_DAYS = 30
+
+
 def rank_stories(
     *,
     max_total: int = config.MAX_DIGEST_ITEMS,
     top_summary_size: int = config.TOP_SUMMARY_SIZE,
     min_score: float = MIN_CANDIDATE_SCORE,
     candidate_pool_size: int = 200,
+    recent_sent_window_days: int = RECENT_SENT_WINDOW_DAYS,
     conn: sqlite3.Connection | None = None,
     client: _RankerClient | None = None,
 ) -> RankingResult:
     start = time.monotonic()
+    # Exclude stories already shipped in the last N days — otherwise high-
+    # scoring evergreens keep winning the candidate pool and the digest
+    # repeats itself.
+    sent_urls = storage.recently_sent_urls(
+        within_days=recent_sent_window_days, conn=conn,
+    )
     candidates = storage.list_stories(
-        min_score=min_score, limit=candidate_pool_size, conn=conn,
+        min_score=min_score, limit=candidate_pool_size,
+        exclude_urls=sent_urls, conn=conn,
     )
     if not candidates:
         return _empty_result(start)

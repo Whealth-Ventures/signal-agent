@@ -6,7 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -351,6 +351,28 @@ class FullPathTest(_OrchestratorBase):
         self.assertTrue(result.used_fallback)
         # Fallback treats everything as Tier A and applies normal selection.
         self.assertGreater(len(result.flat), 0)
+
+
+class ExcludeRecentlySentTest(_OrchestratorBase):
+    def test_sent_stories_excluded_from_candidates(self) -> None:
+        """High-scoring stories already shipped in a recent digest must not
+        reach the ranker — otherwise evergreens win the candidate pool forever."""
+        now = _utcnow()
+        old_hi = _mk_story("old_hi", score=0.95, priority_bucket="venture_ipo")
+        new_hi = _mk_story("new_hi", score=0.60, priority_bucket="venture_ipo")
+        for s in (old_hi, new_hi):
+            storage.upsert_story(s, conn=self.conn)
+        did = storage.create_digest("2026-05-20", ["x"], conn=self.conn)
+        storage.add_story_to_digest(did, old_hi.id, rank=1, conn=self.conn)
+        storage.mark_digest_sent(did, now - timedelta(days=5), conn=self.conn)
+        self.conn.commit()
+
+        client = FakePerplexityClient('{"stories":[]}')
+        result = ranker.rank_stories(conn=self.conn, client=client)
+
+        self.assertEqual(result.candidates_count, 1)
+        all_ids = {r.story.id for r in result.flat}
+        self.assertNotIn(old_hi.id, all_ids)
 
 
 class LoggingTest(_OrchestratorBase):

@@ -246,6 +246,59 @@ class RunScoringTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(canonical_row["canonical_url"], "https://e.example/a")
 
+    def test_historical_dup_filtered(self) -> None:
+        """A new signal whose embedding matches a story sent in a prior digest
+        should be dropped before scoring (not turn into a Story)."""
+        from models import Story
+        now = _utcnow()
+
+        # Pretend we sent a story two days ago with embedding [1.0, 0.0].
+        old_vec = [1.0, 0.0]
+        old_url = "https://historical.example/a"
+        old_sid = story_id(old_url)
+        storage.upsert_story(
+            Story(id=old_sid, canonical_url=old_url, canonical_title="Acme Series B",
+                  canonical_summary="", published_at=now - timedelta(days=2),
+                  relevance_score=0.7),
+            embedding=old_vec, conn=self.conn,
+        )
+        did = storage.create_digest("2026-05-03", ["a@x.com"], conn=self.conn)
+        storage.add_story_to_digest(did, old_sid, rank=1, conn=self.conn)
+        storage.mark_digest_sent(did, now - timedelta(days=2), conn=self.conn)
+        self.conn.commit()
+
+        # Today's signal: different URL (so URL filter doesn't catch it) but
+        # near-identical embedding to the historical story.
+        new_sig = Signal(
+            source="OtherOutlet", source_type="rss",
+            title="Acme closes Series B round",
+            url="https://newoutlet.example/acme-b",
+            published_at=now - timedelta(hours=1),
+            summary="Different wording, same event.",
+        )
+        storage.save_signals([new_sig], conn=self.conn)
+        self.conn.commit()
+
+        embedder = ControlledEmbedder({
+            scorer._signal_text(new_sig): [0.99, 0.02],  # cos vs old_vec ≈ 0.9998
+        })
+
+        stats = scorer.run_scoring(
+            conn=self.conn,
+            chroma_client=self.chroma,
+            embedder=embedder,
+            voice_names=set(),
+            firm_names=set(),
+        )
+        self.conn.commit()
+
+        self.assertEqual(stats.clusters_filtered_historical, 1)
+        self.assertEqual(stats.stories_created, 0)
+
+        # The new signal stays unscored (story_id still NULL).
+        unscored = storage.list_unscored_signals(conn=self.conn)
+        self.assertIn(new_sig.url, {s.url for s in unscored})
+
 
 if __name__ == "__main__":
     unittest.main()

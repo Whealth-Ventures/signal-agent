@@ -197,6 +197,88 @@ class DigestLifecycleTest(_DBTestBase):
         self.assertEqual(row["error"], "SMTP timeout")
 
 
+class StoryEmbeddingTest(_DBTestBase):
+    def test_round_trip(self) -> None:
+        vec = [0.1, -0.2, 0.5, 0.0, 1.0]
+        url = "https://emb.example/a"
+        st = Story(
+            id=story_id(url), canonical_url=url, canonical_title="t",
+            canonical_summary="", published_at=_utcnow(), relevance_score=0.5,
+        )
+        storage.upsert_story(st, embedding=vec, conn=self.conn)
+        self.conn.commit()
+
+        row = self.conn.execute(
+            "SELECT embedding FROM stories WHERE id = ?", (st.id,)
+        ).fetchone()
+        self.assertIsNotNone(row["embedding"])
+        loaded = storage._blob_to_embedding(row["embedding"])
+        self.assertEqual(len(loaded), len(vec))
+        for a, b in zip(loaded, vec):
+            self.assertAlmostEqual(a, b, places=5)
+
+    def test_reupsert_without_embedding_preserves_existing(self) -> None:
+        vec = [0.3, 0.7]
+        url = "https://emb.example/preserve"
+        st = Story(
+            id=story_id(url), canonical_url=url, canonical_title="t",
+            canonical_summary="", published_at=_utcnow(), relevance_score=0.5,
+        )
+        storage.upsert_story(st, embedding=vec, conn=self.conn)
+        # Re-upsert with no embedding kwarg — must NOT blank the column.
+        storage.upsert_story(st, conn=self.conn)
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT embedding FROM stories WHERE id = ?", (st.id,)
+        ).fetchone()
+        self.assertIsNotNone(row["embedding"])
+
+
+class RecentStoryEmbeddingsTest(_DBTestBase):
+    def _make_sent(
+        self,
+        url: str,
+        sent_at: datetime,
+        embedding: list[float] | None,
+    ) -> str:
+        sid = story_id(url)
+        storage.upsert_story(
+            Story(id=sid, canonical_url=url, canonical_title="t",
+                  canonical_summary="", published_at=_utcnow(),
+                  relevance_score=0.5),
+            embedding=embedding, conn=self.conn,
+        )
+        did = storage.create_digest("2026-05-05", ["a@x.com"], conn=self.conn)
+        storage.add_story_to_digest(did, sid, rank=1, conn=self.conn)
+        storage.mark_digest_sent(did, sent_at, conn=self.conn)
+        return sid
+
+    def test_within_window_returned(self) -> None:
+        sid = self._make_sent(
+            "https://rs.example/a", _utcnow() - timedelta(days=3), [1.0, 0.0],
+        )
+        self.conn.commit()
+        out = storage.recent_story_embeddings(within_days=30, conn=self.conn)
+        ids = {s for s, _ in out}
+        self.assertIn(sid, ids)
+
+    def test_outside_window_excluded(self) -> None:
+        self._make_sent(
+            "https://rs.example/old", _utcnow() - timedelta(days=45), [0.0, 1.0],
+        )
+        self.conn.commit()
+        out = storage.recent_story_embeddings(within_days=30, conn=self.conn)
+        self.assertEqual(out, [])
+
+    def test_null_embedding_excluded(self) -> None:
+        self._make_sent(
+            "https://rs.example/null", _utcnow() - timedelta(days=2), None,
+        )
+        self.conn.commit()
+        out = storage.recent_story_embeddings(within_days=30, conn=self.conn)
+        self.assertEqual(out, [])
+
+
 class RecentlySentUrlsTest(_DBTestBase):
     def _setup(self, url: str, sent_at: datetime | None, status: str = "sent") -> None:
         sid = story_id(url)

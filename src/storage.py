@@ -9,6 +9,7 @@ to config.DB_PATH and closes it.
 """
 from __future__ import annotations
 
+import array
 import json
 import sqlite3
 import uuid
@@ -35,7 +36,8 @@ _SCHEMA_SQL = [
         relevance_score REAL NOT NULL,
         created_at TEXT NOT NULL,
         priority_bucket TEXT,
-        geo TEXT
+        geo TEXT,
+        embedding BLOB
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_stories_score ON stories(relevance_score DESC)",
@@ -99,6 +101,8 @@ def _migrate(c: sqlite3.Connection) -> None:
         )
     if "geo" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN geo TEXT")
+    if "embedding" not in cols:
+        c.execute("ALTER TABLE stories ADD COLUMN embedding BLOB")
 
 
 # --- Connection management ---------------------------------------------
@@ -168,6 +172,16 @@ def _signal_from_row(row: sqlite3.Row) -> Signal:
         summary=row["summary"] or "",
         raw=raw,
     )
+
+
+def _embedding_to_blob(vec: list[float]) -> bytes:
+    return array.array("f", vec).tobytes()
+
+
+def _blob_to_embedding(blob: bytes) -> list[float]:
+    a = array.array("f")
+    a.frombytes(blob)
+    return list(a)
 
 
 def _story_from_row(row: sqlite3.Row) -> Story:
@@ -242,13 +256,20 @@ def list_signals_since(
 
 # --- Stories ------------------------------------------------------------
 
-def upsert_story(story: Story, *, conn: sqlite3.Connection | None = None) -> None:
+def upsert_story(
+    story: Story,
+    *,
+    embedding: list[float] | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    emb_blob = _embedding_to_blob(embedding) if embedding else None
     with _maybe_own(conn) as c:
         c.execute(
             """INSERT INTO stories
                (id, canonical_url, canonical_title, canonical_summary,
-                published_at, relevance_score, created_at, priority_bucket, geo)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                published_at, relevance_score, created_at, priority_bucket,
+                geo, embedding)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  canonical_url     = excluded.canonical_url,
                  canonical_title   = excluded.canonical_title,
@@ -256,12 +277,13 @@ def upsert_story(story: Story, *, conn: sqlite3.Connection | None = None) -> Non
                  published_at      = excluded.published_at,
                  relevance_score   = excluded.relevance_score,
                  priority_bucket   = excluded.priority_bucket,
-                 geo               = excluded.geo""",
+                 geo               = excluded.geo,
+                 embedding         = COALESCE(excluded.embedding, stories.embedding)""",
             (
                 story.id, story.canonical_url, story.canonical_title,
                 story.canonical_summary, _iso(story.published_at),
                 story.relevance_score, _iso(_utcnow()),
-                story.priority_bucket, story.geo,
+                story.priority_bucket, story.geo, emb_blob,
             ),
         )
 
@@ -294,16 +316,26 @@ def list_stories(
     *,
     min_score: float = 0.0,
     limit: int = 100,
+    exclude_urls: Iterable[str] | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> list[Story]:
+    """Top stories by relevance_score.
+
+    `exclude_urls` is the dedup escape hatch the ranker uses to keep already-
+    sent stories out of its candidate pool — without it, high-scoring
+    evergreens from previous digests outcompete today's fresh stories.
+    """
+    excluded = tuple(exclude_urls) if exclude_urls else ()
+    params: list = [min_score]
+    sql = "SELECT * FROM stories WHERE relevance_score >= ?"
+    if excluded:
+        placeholders = ",".join("?" * len(excluded))
+        sql += f" AND canonical_url NOT IN ({placeholders})"
+        params.extend(excluded)
+    sql += " ORDER BY relevance_score DESC LIMIT ?"
+    params.append(limit)
     with _maybe_own(conn) as c:
-        rows = c.execute(
-            """SELECT * FROM stories
-               WHERE relevance_score >= ?
-               ORDER BY relevance_score DESC
-               LIMIT ?""",
-            (min_score, limit),
-        ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     return [_story_from_row(r) for r in rows]
 
 
@@ -371,10 +403,10 @@ def mark_digest_failed(
         )
 
 
-# --- 7-day no-repeat check (CLAUDE.md key constraint) ------------------
+# --- No-repeat checks (CLAUDE.md key constraint) -----------------------
 
 def recently_sent_urls(
-    within_days: int = 7,
+    within_days: int = 30,
     *,
     conn: sqlite3.Connection | None = None,
     now: datetime | None = None,
@@ -390,3 +422,30 @@ def recently_sent_urls(
             (_iso(cutoff),),
         ).fetchall()
     return {r["canonical_url"] for r in rows}
+
+
+def recent_story_embeddings(
+    within_days: int = 30,
+    *,
+    conn: sqlite3.Connection | None = None,
+    now: datetime | None = None,
+) -> list[tuple[str, list[float]]]:
+    """Embeddings of stories sent in any digest within the last N days.
+
+    Returns (story_id, embedding) pairs. Stories with NULL embeddings (rows
+    written before the embedding column existed, or written without one) are
+    excluded — they simply can't participate in similarity checks.
+    """
+    cutoff = (now or _utcnow()) - timedelta(days=within_days)
+    with _maybe_own(conn) as c:
+        rows = c.execute(
+            """SELECT DISTINCT s.id, s.embedding
+               FROM digest_stories ds
+               JOIN digests d ON d.id = ds.digest_id
+               JOIN stories s ON s.id = ds.story_id
+               WHERE d.status = 'sent'
+                 AND d.sent_at >= ?
+                 AND s.embedding IS NOT NULL""",
+            (_iso(cutoff),),
+        ).fetchall()
+    return [(r["id"], _blob_to_embedding(r["embedding"])) for r in rows]
