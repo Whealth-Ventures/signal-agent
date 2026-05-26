@@ -1,9 +1,26 @@
 """Layer 4: Slack Block Kit digest formatter and webhook poster.
 
-Validates each story URL (HEAD with GET fallback for sites that 405/403 HEAD),
-drops invalid URLs, builds a Block Kit payload, POSTs to the configured Slack
-Incoming Webhook. Returns a SlackResult; doesn't persist — main.py wraps with
-storage.mark_digest_sent / mark_digest_failed.
+Consumes a ranker.RankingResult and produces the locked daily format:
+
+  *Daily Healthcare Signal — Wed, 27 May 2026*  ·  22 stories
+
+  *Today's biggest stories*
+    • [IND] one-liner (Link)
+    • [US]  one-liner (Link)
+    ...
+
+  *Venture & IPO* (2)
+    • [IND] one-liner (Link)
+    • [US]  one-liner (Link)
+
+  ... (per-priority sections; hidden if empty after the top-5 promotion)
+
+  *Other healthcare news* (5)
+    • [US]  one-liner (Link)
+    ...
+
+Validates each story URL (HEAD with GET fallback) before posting; drops stories
+with invalid URLs rather than shipping broken links.
 """
 from __future__ import annotations
 
@@ -12,12 +29,22 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
 import config
-from ranker import RankedStory
+from ranker import RankedStory, RankingResult
+
+# Slack Block Kit limits — keep us well clear of them.
+MAX_BLOCKS = 48
+MAX_SECTION_CHARS = 2900     # actual limit is 3000; small headroom
+
+# Geo tag prefixes used in bullets. Empty string for global / unknown — per
+# user instruction, only India and US get explicit tags.
+_GEO_TAG: dict[str, str] = {
+    "India": "[IND] ",
+    "US":    "[US]  ",
+}
 
 
 # --- Public API ---------------------------------------------------------
@@ -32,13 +59,6 @@ class SlackResult:
     error: str | None = None
     blocks: list[dict] | None = None
     status_code: int | None = None
-
-
-def _host(url: str) -> str:
-    try:
-        return urlparse(url).netloc or url
-    except Exception:
-        return url
 
 
 def _make_default_http() -> httpx.Client:
@@ -70,97 +90,166 @@ def validate_url(url: str, *, http: httpx.Client | None = None) -> bool:
             http.close()
 
 
+# --- Formatting --------------------------------------------------------
+
 def _escape_mrkdwn(s: str) -> str:
-    """Escape Slack mrkdwn special chars in untrusted text (one-liners, domain
-    headers). Order matters: '&' must be replaced first."""
+    """Escape Slack mrkdwn special chars in untrusted text. Order matters:
+    '&' must be replaced first."""
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _group_by_domain(ranked: list[RankedStory]) -> list[dict]:
-    """Group ranked stories by domain, preserving the order each domain first
-    appears (which is overall rank order). Stories within a group keep rank order."""
-    bucket_order: list[str] = []
-    buckets: dict[str, list[dict]] = {}
-    for r in ranked:
-        domain = (r.domain or "Other").strip() or "Other"
-        if domain not in buckets:
-            buckets[domain] = []
-            bucket_order.append(domain)
-        buckets[domain].append({
-            "rank": r.rank,
-            "story": r.story,
-            "one_liner": r.one_liner or r.story.canonical_title,
-            "host": _host(r.story.canonical_url),
-        })
-    return [{"domain": d, "stories": buckets[d]} for d in bucket_order]
+def _geo_tag(geo: str | None) -> str:
+    return _GEO_TAG.get(geo or "", "")
 
 
-def build_blocks(
-    ranked: list[RankedStory],
-    *,
-    digest_date: str,
-    generated_at: datetime | None = None,
-) -> list[dict]:
-    gen = (generated_at or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M")
-    blocks: list[dict] = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"Daily Healthcare Signal — {digest_date}",
-                "emoji": True,
-            },
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": "_A scannable snapshot — tap any line to dig in._"},
-            ],
-        },
-    ]
+def _bullet(r: RankedStory) -> str:
+    """Render one bullet: `• [GEO] one_liner (Link)`. No source name shown;
+    only the (Link) text is hyperlinked."""
+    tag = _geo_tag(r.story.geo)
+    text = _escape_mrkdwn(r.one_liner or r.story.canonical_title)
+    url = r.story.canonical_url
+    return f"• {tag}{text} (<{url}|Link>)"
 
-    if not ranked:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "No stories made the cut today. The agent ran without errors but had no qualifying signals.",
-            },
-        })
-    else:
-        for group in _group_by_domain(ranked):
-            lines = [f"*{_escape_mrkdwn(group['domain'].upper())}*"]
-            for s in group["stories"]:
-                title = _escape_mrkdwn(s["one_liner"])
-                url = s["story"].canonical_url
-                host = _escape_mrkdwn(s["host"])
-                lines.append(f"• <{url}|{title}>")
-                lines.append(f"   _{host}_")
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "\n".join(lines)},
-            })
 
-    total = len(ranked)
-    blocks.append({"type": "divider"})
-    blocks.append({
-        "type": "context",
-        "elements": [
-            {
-                "type": "mrkdwn",
-                "text": (
-                    f"Generated {gen} UTC · {total} "
-                    f"{'story' if total == 1 else 'stories'} · "
-                    "Signal Agent · 2070 Health"
-                ),
-            },
-        ],
-    })
+def _priority_display(key: str) -> str:
+    for b in config.PRIORITY_BUCKETS:
+        if b.key == key:
+            return b.display
+    return key
+
+
+def _section(text: str) -> dict:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def _section_with_header_and_bullets(header: str, bullets: list[str]) -> list[dict]:
+    """Emit one or more section blocks. Splits into multiple sections if the
+    combined text would exceed MAX_SECTION_CHARS. Header appears only on the
+    first block; continuation blocks use the same content."""
+    if not bullets:
+        return []
+    blocks: list[dict] = []
+    current = [header]
+    current_len = len(header)
+    for b in bullets:
+        addition = len(b) + 1  # +1 for newline
+        if current_len + addition > MAX_SECTION_CHARS and len(current) > 1:
+            blocks.append(_section("\n".join(current)))
+            current = [b]
+            current_len = len(b)
+        else:
+            current.append(b)
+            current_len += addition
+    if current:
+        blocks.append(_section("\n".join(current)))
     return blocks
 
 
+def build_blocks(
+    ranking: RankingResult,
+    *,
+    digest_date: str,
+) -> list[dict]:
+    """Build the Block Kit payload from a RankingResult."""
+    total = (
+        len(ranking.top_summary)
+        + sum(len(v) for v in ranking.by_priority.values())
+        + len(ranking.other)
+    )
+    plural = "story" if total == 1 else "stories"
+
+    blocks: list[dict] = [
+        _section(
+            f"*Daily Healthcare Signal — {_escape_mrkdwn(digest_date)}*"
+            f"  ·  {total} {plural}"
+        ),
+    ]
+
+    if total == 0:
+        blocks.append(_section(
+            "_No stories made the cut today. The agent ran without errors but "
+            "had no qualifying signals._"
+        ))
+        return blocks
+
+    if ranking.top_summary:
+        bullets = [_bullet(r) for r in ranking.top_summary]
+        blocks.extend(_section_with_header_and_bullets(
+            "*Today's biggest stories*", bullets,
+        ))
+        blocks.append({"type": "divider"})
+
+    for bucket in config.PRIORITY_BUCKETS:
+        items = ranking.by_priority.get(bucket.key, [])
+        if not items:
+            continue
+        header = f"*{_escape_mrkdwn(bucket.display)}* ({len(items)})"
+        bullets = [_bullet(r) for r in items]
+        blocks.extend(_section_with_header_and_bullets(header, bullets))
+
+    if ranking.other:
+        blocks.append({"type": "divider"})
+        header = f"*Other healthcare news* ({len(ranking.other)})"
+        bullets = [_bullet(r) for r in ranking.other]
+        blocks.extend(_section_with_header_and_bullets(header, bullets))
+
+    # Enforce the Slack Block Kit ceiling. If we still overflow, truncate "Other"
+    # rather than priority categories.
+    while len(blocks) > MAX_BLOCKS and blocks:
+        blocks.pop()
+
+    return blocks
+
+
+# --- URL validation flow ----------------------------------------------
+
+def _filter_invalid_urls(
+    ranking: RankingResult,
+    *,
+    http: httpx.Client,
+    skip: bool,
+) -> tuple[RankingResult, int]:
+    """Drop ranked stories whose URLs fail HEAD/GET validation. Returns the
+    filtered result + count of drops. If `skip` is True, returns input unchanged.
+    """
+    if skip:
+        return ranking, 0
+
+    dropped = 0
+
+    def keep(r: RankedStory) -> bool:
+        nonlocal dropped
+        ok = validate_url(r.story.canonical_url, http=http)
+        if not ok:
+            dropped += 1
+        return ok
+
+    top = [r for r in ranking.top_summary if keep(r)]
+    by_priority = {
+        k: [r for r in v if keep(r)] for k, v in ranking.by_priority.items()
+    }
+    by_priority = {k: v for k, v in by_priority.items() if v}
+    other = [r for r in ranking.other if keep(r)]
+
+    filtered = RankingResult(
+        top_summary=top,
+        by_priority=by_priority,
+        other=other,
+        candidates_count=ranking.candidates_count,
+        used_fallback=ranking.used_fallback,
+        cost_usd=ranking.cost_usd,
+        elapsed_seconds=ranking.elapsed_seconds,
+        flat=tuple(top
+                   + [r for b in config.PRIORITY_BUCKETS for r in by_priority.get(b.key, [])]
+                   + other),
+    )
+    return filtered, dropped
+
+
+# --- Poster -----------------------------------------------------------
+
 def post_digest(
-    ranked: list[RankedStory],
+    ranking: RankingResult,
     *,
     digest_date: str,
     webhook_url: str | None = None,
@@ -180,43 +269,27 @@ def post_digest(
 
     own_http = http is None
     h = http or _make_default_http()
+    blocks: list[dict] = []
+    sent_ok = False
+    error: str | None = None
+    status: int | None = None
+    stories_sent = 0
+    dropped = 0
 
     try:
-        # 1) Validate URLs
-        valid: list[RankedStory] = []
-        dropped = 0
-        if skip_url_validation:
-            valid = list(ranked)
-        else:
-            for r in ranked:
-                if validate_url(r.story.canonical_url, http=h):
-                    valid.append(r)
-                else:
-                    dropped += 1
-
-        # Re-number consecutively after drops (1, 2, 3, ...).
-        valid = [
-            RankedStory(
-                story=r.story,
-                rank=i + 1,
-                one_liner=r.one_liner,
-                domain=r.domain,
-            )
-            for i, r in enumerate(valid)
-        ]
-
-        # 2) Build blocks
-        blocks = build_blocks(valid, digest_date=digest_date)
-        # fallback `text` is shown in notifications + clients that don't render blocks.
+        filtered, dropped = _filter_invalid_urls(
+            ranking, http=h, skip=skip_url_validation,
+        )
+        stories_sent = (
+            len(filtered.top_summary)
+            + sum(len(v) for v in filtered.by_priority.values())
+            + len(filtered.other)
+        )
+        blocks = build_blocks(filtered, digest_date=digest_date)
         payload = {
             "text": f"Daily Healthcare Signal — {digest_date}",
             "blocks": blocks,
         }
-
-        # 3) POST
-        error: str | None = None
-        status: int | None = None
-        sent_ok = False
         try:
             resp = h.post(url, json=payload)
             status = resp.status_code
@@ -237,9 +310,10 @@ def post_digest(
         "digest_date": digest_date,
         "sent": sent_ok,
         "channel_label": channel_label,
-        "stories_sent": len(valid),
+        "stories_sent": stories_sent,
         "stories_dropped_invalid_url": dropped,
         "status_code": status,
+        "block_count": len(blocks),
         "latency_ms": int(elapsed * 1000),
         "error": error,
     })
@@ -247,7 +321,7 @@ def post_digest(
     return SlackResult(
         sent=sent_ok,
         channel_label=channel_label,
-        stories_sent=len(valid),
+        stories_sent=stories_sent,
         stories_dropped_invalid_url=dropped,
         elapsed_seconds=elapsed,
         error=error,

@@ -41,7 +41,12 @@ class ConfigConstantsTest(unittest.TestCase):
     def test_budget_constants(self) -> None:
         self.assertEqual(config.MAX_PERPLEXITY_CALLS_PER_DAY, 60)
         self.assertEqual(config.DEDUPE_LOOKBACK_DAYS, 7)
-        self.assertEqual(config.DIGEST_TOP_N, 10)
+        self.assertEqual(config.MAX_DIGEST_ITEMS, 40)
+        self.assertEqual(config.TOP_SUMMARY_SIZE, 5)
+
+    def test_track_b_constants(self) -> None:
+        self.assertEqual(config.TRACK_B_PLANS_PER_DAY, 18)
+        self.assertEqual(config.TRACK_B_ROTATION_DAYS, 14)
 
     def test_embedding_model(self) -> None:
         self.assertEqual(config.EMBEDDING_MODEL, "text-embedding-3-small")
@@ -49,6 +54,48 @@ class ConfigConstantsTest(unittest.TestCase):
     def test_schedule(self) -> None:
         self.assertEqual(config.DIGEST_TZ, "Asia/Kolkata")
         self.assertEqual(config.DIGEST_HOUR_LOCAL, 10)
+
+
+class PriorityBucketsTest(unittest.TestCase):
+    def test_has_eight_buckets(self) -> None:
+        self.assertEqual(len(config.PRIORITY_BUCKETS), 8)
+
+    def test_keys_are_unique_and_kebab_friendly(self) -> None:
+        keys = [b.key for b in config.PRIORITY_BUCKETS]
+        self.assertEqual(len(keys), len(set(keys)))
+        for k in keys:
+            self.assertRegex(k, r"^[a-z][a-z0-9_]*$")
+
+    def test_every_bucket_has_at_least_one_sub_bucket(self) -> None:
+        for b in config.PRIORITY_BUCKETS:
+            self.assertTrue(b.sub_buckets, f"{b.key} has no sub_buckets")
+
+    def test_geos_are_valid(self) -> None:
+        allowed = {"India", "US", "Global"}
+        for b in config.PRIORITY_BUCKETS:
+            self.assertTrue(b.geos, f"{b.key} has no geos")
+            for g in b.geos:
+                self.assertIn(g, allowed)
+
+
+class SourceTier1Test(unittest.TestCase):
+    def test_nonempty(self) -> None:
+        self.assertGreater(len(config.SOURCE_TIER_1), 10)
+
+    def test_contains_expected_us_outlets(self) -> None:
+        for host in ("bloomberg.com", "wsj.com", "statnews.com"):
+            self.assertIn(host, config.SOURCE_TIER_1)
+
+    def test_contains_expected_india_outlets(self) -> None:
+        for host in ("livemint.com", "economictimes.indiatimes.com"):
+            self.assertIn(host, config.SOURCE_TIER_1)
+
+
+class MagnitudeRubricTest(unittest.TestCase):
+    def test_mentions_all_four_tiers(self) -> None:
+        rubric = config.MAGNITUDE_RUBRIC
+        for tier in ("TIER S", "TIER A", "TIER B", "TIER C"):
+            self.assertIn(tier, rubric, f"rubric missing {tier}")
 
 
 class ConfigEnvTest(unittest.TestCase):

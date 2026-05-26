@@ -112,7 +112,13 @@ def parse_perplexity_response(plan: QueryPlan, response: ChatResponse) -> list[S
                 url=url,
                 published_at=_parse_iso_or_now(item.get("published")),
                 summary=(item.get("summary") or "").strip()[:500],
-                raw={"plan_id": plan.id, "bucket": plan.bucket},
+                raw={
+                    "plan_id": plan.id,
+                    "bucket": plan.bucket,
+                    "priority_bucket": plan.priority_bucket,
+                    "geo": plan.geography,
+                    "track": plan.track,
+                },
             ))
         return out
 
@@ -127,7 +133,13 @@ def parse_perplexity_response(plan: QueryPlan, response: ChatResponse) -> list[S
             url=url,
             published_at=datetime.now(timezone.utc),
             summary=response.text[:500],
-            raw={"plan_id": plan.id, "fallback": True},
+            raw={
+                "plan_id": plan.id,
+                "priority_bucket": plan.priority_bucket,
+                "geo": plan.geography,
+                "track": plan.track,
+                "fallback": True,
+            },
         ))
     return out
 
@@ -208,36 +220,63 @@ def ensure_content_indexed(
         _log({"step": "content_index_done", **asdict(stats)})
 
 
+def _geo_tag(geo: str | None) -> str:
+    """Compact tag used in console preview + Slack: '[IND] ' / '[US]  ' / ''."""
+    if geo == "India":
+        return "[IND] "
+    if geo == "US":
+        return "[US]  "
+    return ""
+
+
+def _priority_display(key: str | None) -> str:
+    for b in config.PRIORITY_BUCKETS:
+        if b.key == key:
+            return b.display
+    return "Other"
+
+
 def print_digest_to_console(ranking: ranker.RankingResult, digest_date: str) -> None:
-    """Mirror the email layout: grouped by domain, one-liners, source host."""
+    """Preview of the locked Slack layout: top-5 summary, then per-category
+    sections (hidden when empty), then Other at the bottom."""
     bar = "=" * 72
+    total = (
+        len(ranking.top_summary)
+        + sum(len(v) for v in ranking.by_priority.values())
+        + len(ranking.other)
+    )
     print()
     print(bar)
-    print(f"Daily Healthcare Signal — {digest_date}")
+    print(f"Daily Healthcare Signal — {digest_date}  ·  {total} stories")
     print(bar)
-    if not ranking.ranked:
+    if total == 0:
         print("(no stories qualified today)")
         return
 
-    grouped: dict[str, list[ranker.RankedStory]] = {}
-    order: list[str] = []
-    for r in ranking.ranked:
-        domain = (r.domain or "Other").strip() or "Other"
-        if domain not in grouped:
-            grouped[domain] = []
-            order.append(domain)
-        grouped[domain].append(r)
+    if ranking.top_summary:
+        print("\nToday's biggest stories")
+        for r in ranking.top_summary:
+            tag = _geo_tag(r.story.geo)
+            print(f"  • {tag}{r.one_liner} ({r.story.canonical_url})")
 
-    for domain in order:
-        print(f"\n[{domain.upper()}]")
-        for r in grouped[domain]:
-            host = urlparse(r.story.canonical_url).netloc or r.story.canonical_url
-            one_liner = r.one_liner or r.story.canonical_title
-            print(f"  • {one_liner}")
-            print(f"    {host} · {r.story.canonical_url}")
+    for bucket in config.PRIORITY_BUCKETS:
+        items = ranking.by_priority.get(bucket.key, [])
+        if not items:
+            continue
+        print(f"\n{bucket.display} ({len(items)})")
+        for r in items:
+            tag = _geo_tag(r.story.geo)
+            print(f"  • {tag}{r.one_liner} ({r.story.canonical_url})")
+
+    if ranking.other:
+        print(f"\nOther healthcare news ({len(ranking.other)})")
+        for r in ranking.other:
+            tag = _geo_tag(r.story.geo)
+            print(f"  • {tag}{r.one_liner} ({r.story.canonical_url})")
+
     print()
     if ranking.used_fallback:
-        print("(used score-based fallback for some slots)")
+        print("(used score-based fallback — ranker call failed or output was unparseable)")
 
 
 # --- Pipeline -----------------------------------------------------------
@@ -348,14 +387,17 @@ def run_pipeline(
         )
         ranking = ranker.rank_stories(conn=conn, client=perplexity_client)
         _progress(
-            f"      done: {len(ranking.ranked)} ranked in "
+            f"      done: {len(ranking.flat)} ranked in "
             f"{ranking.elapsed_seconds:.1f}s  "
             f"(fallback={ranking.used_fallback}, "
             f"cost=${ranking.cost_usd:.4f})"
         )
         _log({
             "step": "ranking_done",
-            "ranked_count": len(ranking.ranked),
+            "ranked_count": len(ranking.flat),
+            "top_summary_count": len(ranking.top_summary),
+            "by_priority_counts": {k: len(v) for k, v in ranking.by_priority.items()},
+            "other_count": len(ranking.other),
             "candidates_count": ranking.candidates_count,
             "used_fallback": ranking.used_fallback,
             "cost_usd": ranking.cost_usd,
@@ -369,7 +411,7 @@ def run_pipeline(
         if dry_run:
             _progress("[5/5] Dry-run: rendering blocks to disk (no Slack post)…")
             blocks = slack_client.build_blocks(
-                ranking.ranked, digest_date=digest_date,
+                ranking, digest_date=digest_date,
             )
             payload = {
                 "text": f"Daily Healthcare Signal — {digest_date}",
@@ -383,21 +425,25 @@ def run_pipeline(
             _log({"step": "dry_run_complete", "payload_path": str(out)})
         else:
             _progress(
-                f"[5/5] Slack: validating {len(ranking.ranked)} URLs and posting…"
+                f"[5/5] Slack: validating {len(ranking.flat)} URLs and posting…"
             )
             digest_id = storage.create_digest(
                 digest_date, (config.SLACK_CHANNEL_LABEL,), conn=conn,
             )
-            for r in ranking.ranked:
+            # Persistence: flat order (top → priority sections → other), rank
+            # is the position in that flat list. `domain` repurposed to store
+            # the priority bucket display label for audit trail.
+            for rank_idx, r in enumerate(ranking.flat, start=1):
+                domain_label = _priority_display(r.story.priority_bucket)
                 storage.add_story_to_digest(
-                    digest_id, r.story.id, r.rank, r.one_liner, r.domain,
+                    digest_id, r.story.id, rank_idx, r.one_liner, domain_label,
                     conn=conn,
                 )
             if own_conn:
                 conn.commit()
 
             slack_result = slack_client.post_digest(
-                ranking.ranked,
+                ranking,
                 digest_date=digest_date,
                 http=http_client,
                 skip_url_validation=skip_url_validation,
@@ -434,7 +480,7 @@ def run_pipeline(
             rss_signals=len(rss_signals),
             signals_saved=n_saved,
             stories_created=scoring_stats.stories_created,
-            ranked_count=len(ranking.ranked),
+            ranked_count=len(ranking.flat),
             digest_sent=digest_sent,
             elapsed_seconds=elapsed,
         )

@@ -59,7 +59,7 @@ class FakePerplexityClient:
         )
 
     def complete(self, prompt: str, *, model: str = "", recency=None,
-                 query_id: str = "", system=None) -> ChatResponse:
+                 query_id: str = "", system=None, timeout=None) -> ChatResponse:
         if self._calls >= self._cap:
             raise RateLimitExceeded(f"cap: {self._calls}/{self._cap}")
         self._calls += 1
@@ -88,9 +88,19 @@ def _stub_embedder(dim: int = 8):
 # --- Parser tests -------------------------------------------------------
 
 class _PlanStub:
-    def __init__(self, pid: str = "p1", bucket: str = "Bucket"):
+    def __init__(
+        self,
+        pid: str = "p1",
+        bucket: str = "Bucket",
+        priority_bucket: str | None = None,
+        geography: str = "India",
+        track: str = "A",
+    ):
         self.id = pid
         self.bucket = bucket
+        self.priority_bucket = priority_bucket
+        self.geography = geography
+        self.track = track
 
 
 class ParseResponseTest(unittest.TestCase):
@@ -227,28 +237,26 @@ class _PipelineBase(unittest.TestCase):
 
 class HappyPathTest(_PipelineBase):
     def test_end_to_end(self) -> None:
-        # Canned Perplexity responses for 2 plans
+        # Canned Perplexity responses for 2 Track A plans
         responses = {
-            "india__1_care_delivery_models": {"stories": [
+            "pri__venture_ipo__india": {"stories": [
                 {"title": "Acme raises Series B",
                  "url": "https://e.example/acme",
                  "published": "2026-05-05T10:00:00Z",
                  "summary": "Big healthcare funding round."},
             ]},
-            "us__1_care_delivery_models": {"stories": [
+            "pri__venture_ipo__us": {"stories": [
                 {"title": "Hospital opens new wing",
                  "url": "https://e.example/wing",
                  "published": "2026-05-05T08:00:00Z",
                  "summary": "Local healthcare news."},
             ]},
         }
-        ranker_resp = {"ranked": [
+        ranker_resp = {"stories": [
             {"story_id": story_id("https://e.example/acme"),
-             "rank": 1, "domain": "Funding & M&A",
-             "one_liner": "Acme raises Series B."},
+             "tier": "S", "one_liner": "Acme raises Series B."},
             {"story_id": story_id("https://e.example/wing"),
-             "rank": 2, "domain": "Care Delivery",
-             "one_liner": "Hospital opens new wing."},
+             "tier": "A", "one_liner": "Hospital opens new wing."},
         ]}
         client = FakePerplexityClient(
             response_per_plan=responses, ranker_response=ranker_resp,
@@ -290,16 +298,16 @@ class HappyPathTest(_PipelineBase):
 class SlackFailureTest(_PipelineBase):
     def test_marks_digest_failed_and_returns_false(self) -> None:
         responses = {
-            "india__1_care_delivery_models": {"stories": [
+            "pri__venture_ipo__india": {"stories": [
                 {"title": "Acme raises Series B",
                  "url": "https://e.example/acme",
                  "published": "2026-05-05T10:00:00Z",
                  "summary": "Funding."},
             ]},
         }
-        ranker_resp = {"ranked": [
+        ranker_resp = {"stories": [
             {"story_id": story_id("https://e.example/acme"),
-             "rank": 1, "domain": "Funding & M&A", "one_liner": "x"},
+             "tier": "S", "one_liner": "x"},
         ]}
         client = FakePerplexityClient(response_per_plan=responses,
                                        ranker_response=ranker_resp)

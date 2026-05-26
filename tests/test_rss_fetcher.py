@@ -248,10 +248,10 @@ class FetchAllNewslettersTest(unittest.TestCase):
             # bad newsletter: nothing routes; all 4 heuristics + HTML 404 → "failed"
         })
         nls = [
-            Newsletter(tier=1, name="Good", geography="US", type_="Newsletter",
+            Newsletter(name="Good", geography="US", type_="Newsletter",
                        author="x", description="y", reach="z",
                        url="https://good.example"),
-            Newsletter(tier=1, name="Bad", geography="US", type_="Newsletter",
+            Newsletter(name="Bad", geography="US", type_="Newsletter",
                        author="x", description="y", reach="z",
                        url="https://bad.example"),
         ]
@@ -280,7 +280,7 @@ class FetchAllNewslettersTest(unittest.TestCase):
         http = _client_with_routes({
             "https://e.com/feed": httpx.Response(200, text=body),
         })
-        nls = [Newsletter(tier=1, name="N", geography="US", type_="x",
+        nls = [Newsletter(name="N", geography="US", type_="x",
                           author="x", description="x", reach="x",
                           url="https://e.com")]
         signals = rf.fetch_all_newsletters(http=http, newsletters=nls)

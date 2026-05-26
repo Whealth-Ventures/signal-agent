@@ -1,8 +1,22 @@
 name: Daily Digest
 
-# 10:00 IST = 04:30 UTC. GitHub Actions cron can be delayed 5-15 min at peak;
-# off-the-hour slots are more reliable than :00.
+# 10:00 IST = 04:30 UTC. GitHub's native cron is best-effort — historical runs
+# have slipped 30 min to several hours during peak load, and scheduled
+# workflows are auto-disabled on inactive repos. So we use TWO triggers:
+#
+#   1. repository_dispatch (event_type: daily-digest) — fired by an external
+#      pinger (cron-job.org / EasyCron / similar) at exactly 10:00 IST. This
+#      is the primary trigger; far more punctual than GitHub's cron.
+#   2. schedule cron — fallback safety net so the digest still ships if the
+#      external pinger fails.
+#
+# Concurrency below ensures the schedule fallback won't double-fire if the
+# external trigger already started the run.
+#
+# See docs/scheduling.md for the external pinger setup.
 on:
+  repository_dispatch:
+    types: [daily-digest]
   schedule:
     - cron: '30 4 * * *'
   workflow_dispatch:
@@ -10,7 +24,7 @@ on:
 permissions:
   contents: read
 
-# Prevent overlap between a scheduled run and a manual trigger.
+# Prevent overlap between scheduled run, external dispatch, and manual trigger.
 concurrency:
   group: daily-digest
   cancel-in-progress: false

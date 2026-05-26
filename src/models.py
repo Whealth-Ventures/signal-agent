@@ -36,7 +36,11 @@ class Story:
     """A deduped/clustered story — possibly aggregating multiple Signals.
 
     `signal_ids` is the set of Signal ids (from `signal_id()`) that this story
-    represents. `relevance_score` is set by scorer.py.
+    represents. `relevance_score` is set by scorer.py. `priority_bucket` is the
+    PriorityBucket.key (from config) the story rolls up to, or None if the story
+    came from a Track B / voice / RSS source that doesn't map cleanly to one of
+    the 8 priority categories — those are grouped as "Other" at the bottom of
+    the Slack digest.
     """
     id: str
     canonical_url: str
@@ -45,6 +49,8 @@ class Story:
     published_at: datetime
     relevance_score: float
     signal_ids: tuple[str, ...] = ()
+    priority_bucket: str | None = None
+    geo: str | None = None       # "India", "US", "Global", or None (RSS / unknown)
 
 
 def signal_id(source: str, url: str) -> str:

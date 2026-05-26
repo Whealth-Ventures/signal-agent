@@ -22,18 +22,20 @@ import config
 import storage
 from content_indexer import Embedder, ScoredChunk, query_similar
 from models import Signal, Story, signal_id, story_id
-from query_planner import load_newsletters, load_voices
+from query_planner import load_firm_additions, load_newsletters, load_voices
 
 SIMILARITY_THRESHOLD = 0.85
 TOP_K_FOR_CONTENT_SIMILARITY = 5
 SUMMARY_TRUNCATE_FOR_EMBED = 400
 TRUSTED_PUBLICATION_BOOST = 0.08
+FIRM_MENTION_BOOST = 0.08
 
-# Booster table — tunable in one place. The "tier1_voice" and
-# "trusted_publication" entries are special-cased (matched against sets, not regex).
+# Booster table — tunable in one place. The "tier1_voice", "trusted_publication",
+# and "firm_mention" entries are special-cased (matched against sets, not regex).
 BOOSTERS: dict[str, tuple[float, re.Pattern | None]] = {
     "tier1_voice":         (0.10, None),
     "trusted_publication": (TRUSTED_PUBLICATION_BOOST, None),
+    "firm_mention":        (FIRM_MENTION_BOOST, None),
     "funding":    (0.05, re.compile(r"\b(raises?|series [a-d]|seed round|funding)\b", re.IGNORECASE)),
     "m_and_a":    (0.05, re.compile(r"\b(acquires?|acquisition|merges? with|m&a)\b", re.IGNORECASE)),
     "regulatory": (0.05, re.compile(r"\b(fda|cdsco|ema|approved|cleared)\b", re.IGNORECASE)),
@@ -90,6 +92,12 @@ def _mean_vec(vecs: list[list[float]]) -> list[float]:
 
 def _tier1_voice_names() -> set[str]:
     return {v.name for v in load_voices() if v.tier == 1 and v.name}
+
+
+def _firm_names() -> set[str]:
+    """Firm names from the `New Additions` tab — used by the firm_mention
+    booster to surface stories involving PE/VC firms we explicitly track."""
+    return {f.firm for f in load_firm_additions() if f.firm}
 
 
 def _normalize_host(host: str) -> str:
@@ -165,13 +173,32 @@ def cluster_signals(
     return [c["members"] for c in clusters]
 
 
+def _source_tier_rank(url: str) -> int:
+    """Position of the URL's host in config.SOURCE_TIER_1 (lower = better).
+    Returns len(SOURCE_TIER_1) for hosts not in the list — pushes them last."""
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return len(config.SOURCE_TIER_1)
+    if host.startswith("www."):
+        host = host[4:]
+    for i, tier1 in enumerate(config.SOURCE_TIER_1):
+        if host == tier1 or host.endswith("." + tier1):
+            return i
+    return len(config.SOURCE_TIER_1)
+
+
 def pick_canonical_idx(signals: list[Signal]) -> int:
-    """Longest summary wins; tie-break by earliest published_at, then (source, title)."""
+    """Source-tier primary, then longest summary, then earliest published_at,
+    then (source, title) for stability. Tier-1 source list lives in
+    config.SOURCE_TIER_1 — when dedupe collapses N URLs, the Tier-1 outlet
+    wins the canonical slot so the Slack link points to the strongest source."""
     if not signals:
         raise ValueError("pick_canonical_idx: empty list")
     return min(
         range(len(signals)),
         key=lambda i: (
+            _source_tier_rank(signals[i].url),
             -len(signals[i].summary or ""),
             signals[i].published_at,
             signals[i].source,
@@ -184,14 +211,45 @@ def pick_canonical(signals: list[Signal]) -> Signal:
     return signals[pick_canonical_idx(signals)]
 
 
+def _most_common_raw_field(signals: list[Signal], field: str) -> str | None:
+    """Across a cluster of signals, return the most common non-empty value of
+    `signal.raw[field]`. Tie-break: first-seen order."""
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for s in signals:
+        v = (s.raw or {}).get(field)
+        if not v:
+            continue
+        if v not in counts:
+            order.append(v)
+        counts[v] = counts.get(v, 0) + 1
+    if not counts:
+        return None
+    return max(order, key=lambda k: (counts[k], -order.index(k)))
+
+
+def pick_priority_bucket(signals: list[Signal]) -> str | None:
+    """The most common priority_bucket among contributing signals, or None if
+    no signal in the cluster came from a Track A plan."""
+    return _most_common_raw_field(signals, "priority_bucket")
+
+
+def pick_geo(signals: list[Signal]) -> str | None:
+    """The most common geography ('India' / 'US' / 'Global') among contributing
+    signals. Returns None for RSS-only clusters (no plan-derived geo)."""
+    return _most_common_raw_field(signals, "geo")
+
+
 def compute_boosters(
     signal: Signal,
     tier1_voice_names: set[str],
     trusted_hosts: set[str] | None = None,
+    firm_names: set[str] | None = None,
 ) -> dict[str, float]:
     out: dict[str, float] = {}
     text = f"{signal.title} {signal.summary or ''}"
     trusted_hosts = trusted_hosts or set()
+    firm_names = firm_names or set()
     for name, (delta, pattern) in BOOSTERS.items():
         if name == "tier1_voice":
             for v in tier1_voice_names:
@@ -201,6 +259,11 @@ def compute_boosters(
         elif name == "trusted_publication":
             if _matches_trusted_host(signal.url, trusted_hosts):
                 out[name] = delta
+        elif name == "firm_mention":
+            for f in firm_names:
+                if f and f in text:
+                    out[name] = delta
+                    break
         else:
             if pattern is not None and pattern.search(text):
                 out[name] = delta
@@ -254,6 +317,7 @@ def run_scoring(
     similarity_threshold: float = SIMILARITY_THRESHOLD,
     voice_names: set[str] | None = None,
     trusted_hosts: set[str] | None = None,
+    firm_names: set[str] | None = None,
 ) -> ScoringStats:
     start = time.monotonic()
     own_conn = conn is None
@@ -293,6 +357,7 @@ def run_scoring(
             trusted_hosts if trusted_hosts is not None
             else _trusted_publication_hosts()
         )
+        firms = firm_names if firm_names is not None else _firm_names()
 
         stories_created = 0
         for cluster in clusters:
@@ -307,8 +372,10 @@ def run_scoring(
                 chroma_client=chroma_client,
                 embedder=embedder,
             )
-            boosters = compute_boosters(canonical, names, hosts)
+            boosters = compute_boosters(canonical, names, hosts, firms)
             breakdown = score_story(content_chunks, boosters)
+            priority_bucket = pick_priority_bucket(cs)
+            geo = pick_geo(cs)
 
             sid = story_id(canonical.url)
             story = Story(
@@ -319,6 +386,8 @@ def run_scoring(
                 published_at=canonical.published_at,
                 relevance_score=breakdown.final,
                 signal_ids=tuple(signal_id(s.source, s.url) for s in cs),
+                priority_bucket=priority_bucket,
+                geo=geo,
             )
             storage.upsert_story(story, conn=conn)
             for s in cs:
@@ -331,6 +400,8 @@ def run_scoring(
                 "story_id": sid,
                 "canonical_url": canonical.url,
                 "cluster_size": len(cs),
+                "priority_bucket": priority_bucket,
+                "geo": geo,
                 "content_similarity": breakdown.content_similarity,
                 "boosters": breakdown.boosters,
                 "booster_total": breakdown.booster_total,

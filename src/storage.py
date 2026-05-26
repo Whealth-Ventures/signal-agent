@@ -33,10 +33,13 @@ _SCHEMA_SQL = [
         canonical_summary TEXT,
         published_at TEXT NOT NULL,
         relevance_score REAL NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        priority_bucket TEXT,
+        geo TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_stories_score ON stories(relevance_score DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_stories_priority_bucket ON stories(priority_bucket)",
     """
     CREATE TABLE IF NOT EXISTS signals (
         id TEXT PRIMARY KEY,
@@ -85,6 +88,17 @@ def _migrate(c: sqlite3.Connection) -> None:
     cols = {row["name"] for row in cur.fetchall()}
     if "domain" not in cols:
         c.execute("ALTER TABLE digest_stories ADD COLUMN domain TEXT")
+
+    cur = c.execute("PRAGMA table_info(stories)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "priority_bucket" not in cols:
+        c.execute("ALTER TABLE stories ADD COLUMN priority_bucket TEXT")
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stories_priority_bucket "
+            "ON stories(priority_bucket)"
+        )
+    if "geo" not in cols:
+        c.execute("ALTER TABLE stories ADD COLUMN geo TEXT")
 
 
 # --- Connection management ---------------------------------------------
@@ -157,6 +171,9 @@ def _signal_from_row(row: sqlite3.Row) -> Signal:
 
 
 def _story_from_row(row: sqlite3.Row) -> Story:
+    keys = row.keys()
+    pb = row["priority_bucket"] if "priority_bucket" in keys else None
+    geo = row["geo"] if "geo" in keys else None
     return Story(
         id=row["id"],
         canonical_url=row["canonical_url"],
@@ -165,6 +182,8 @@ def _story_from_row(row: sqlite3.Row) -> Story:
         published_at=_parse_iso(row["published_at"]),
         relevance_score=float(row["relevance_score"]),
         signal_ids=(),  # populated by callers if they need it
+        priority_bucket=pb,
+        geo=geo,
     )
 
 
@@ -228,18 +247,21 @@ def upsert_story(story: Story, *, conn: sqlite3.Connection | None = None) -> Non
         c.execute(
             """INSERT INTO stories
                (id, canonical_url, canonical_title, canonical_summary,
-                published_at, relevance_score, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                published_at, relevance_score, created_at, priority_bucket, geo)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  canonical_url     = excluded.canonical_url,
                  canonical_title   = excluded.canonical_title,
                  canonical_summary = excluded.canonical_summary,
                  published_at      = excluded.published_at,
-                 relevance_score   = excluded.relevance_score""",
+                 relevance_score   = excluded.relevance_score,
+                 priority_bucket   = excluded.priority_bucket,
+                 geo               = excluded.geo""",
             (
                 story.id, story.canonical_url, story.canonical_title,
                 story.canonical_summary, _iso(story.published_at),
                 story.relevance_score, _iso(_utcnow()),
+                story.priority_bucket, story.geo,
             ),
         )
 
