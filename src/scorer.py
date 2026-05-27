@@ -8,7 +8,6 @@ Stories and links signals to them.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -24,32 +23,15 @@ from content_indexer import Embedder, ScoredChunk, query_similar
 from models import Signal, Story, signal_id, story_id
 from query_planner import load_firm_additions, load_newsletters, load_voices
 
-SIMILARITY_THRESHOLD = 0.85
-TOP_K_FOR_CONTENT_SIMILARITY = 5
-SUMMARY_TRUNCATE_FOR_EMBED = 400
-TRUSTED_PUBLICATION_BOOST = 0.08
-FIRM_MENTION_BOOST = 0.08
-
-# Cross-day dedup. Looser than the within-day cluster threshold because
-# different outlets covering the same event use different wording.
-HISTORICAL_DEDUP_THRESHOLD = 0.80
-HISTORICAL_DEDUP_WINDOW_DAYS = 30
-URL_DEDUP_WINDOW_DAYS = 30
-
-# Booster table — tunable in one place. The "tier1_voice", "trusted_publication",
-# and "firm_mention" entries are special-cased (matched against sets, not regex).
-BOOSTERS: dict[str, tuple[float, re.Pattern | None]] = {
-    "tier1_voice":         (0.10, None),
-    "trusted_publication": (TRUSTED_PUBLICATION_BOOST, None),
-    "firm_mention":        (FIRM_MENTION_BOOST, None),
-    "funding":    (0.05, re.compile(r"\b(raises?|series [a-d]|seed round|funding)\b", re.IGNORECASE)),
-    "m_and_a":    (0.05, re.compile(r"\b(acquires?|acquisition|merges? with|m&a)\b", re.IGNORECASE)),
-    "regulatory": (0.05, re.compile(r"\b(fda|cdsco|ema|approved|cleared)\b", re.IGNORECASE)),
-    "product":    (0.03, re.compile(r"\b(launches?|unveils?|debuts?)\b", re.IGNORECASE)),
-    "leadership": (0.03, re.compile(r"\b(appoints?|named|joins|hires?)\b", re.IGNORECASE)),
-    "listicle":   (-0.10, re.compile(r"^\s*\d+\s+(best|top|essential|reasons|tips|ways)\b", re.IGNORECASE)),
-    "opinion":    (-0.05, re.compile(r"^\s*(opinion|perspective|column):", re.IGNORECASE)),
-}
+# Every tunable in this module is sourced from config — see docs/TUNING.md.
+# These aliases keep the call sites short without re-defining the value.
+SIMILARITY_THRESHOLD = config.CLUSTER_SIMILARITY_THRESHOLD
+TOP_K_FOR_CONTENT_SIMILARITY = config.TOP_K_CONTENT_SIMILARITY
+SUMMARY_TRUNCATE_FOR_EMBED = config.SUMMARY_TRUNCATE_FOR_EMBED
+HISTORICAL_DEDUP_THRESHOLD = config.HISTORICAL_DEDUP_THRESHOLD
+HISTORICAL_DEDUP_WINDOW_DAYS = config.DEDUP_WINDOW_DAYS
+URL_DEDUP_WINDOW_DAYS = config.DEDUP_WINDOW_DAYS
+BOOSTERS = config.BOOSTERS
 
 
 @dataclass(frozen=True)

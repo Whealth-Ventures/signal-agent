@@ -36,13 +36,14 @@ from perplexity_client import (
     RateLimitExceeded,
 )
 
-ONE_LINER_MAX_CHARS = 120
-SUMMARY_MAX_CHARS_IN_PROMPT = 220
-# No pre-filter — the magnitude rubric handles tiering far better than a score
-# threshold ever could, and a low-score story with the right magnitude (e.g. an
-# FDA approval from a non-Tier-1 source) should still surface. The
-# candidate_pool_size cap below provides a sanity ceiling.
-MIN_CANDIDATE_SCORE = 0.0
+# Every tunable in this module is sourced from config — see docs/TUNING.md.
+# No pre-score-filter on candidates: the magnitude rubric handles tiering far
+# better than a score threshold ever could, and a low-score story with the
+# right magnitude (e.g. an FDA approval from a non-Tier-1 source) should still
+# surface. candidate_pool_size below provides a sanity ceiling instead.
+ONE_LINER_MAX_CHARS = config.ONE_LINER_MAX_CHARS
+SUMMARY_MAX_CHARS_IN_PROMPT = config.RANKER_SUMMARY_MAX_CHARS
+MIN_CANDIDATE_SCORE = config.MIN_CANDIDATE_SCORE
 
 Tier = Literal["S", "A", "B", "C"]
 _VALID_TIERS: tuple[Tier, ...] = ("S", "A", "B", "C")
@@ -85,12 +86,7 @@ class RankingResult:
     flat: tuple[RankedStory, ...] = field(default_factory=tuple)
 
 
-_SYSTEM_PROMPT = (
-    "You are an editor curating a scannable daily healthcare news digest for an "
-    "Indian and US healthcare VC firm. Apply the magnitude rubric strictly — "
-    "FDA approvals and M&A deals are Tier S; routine state expansions and "
-    "opinion pieces are Tier C. Output JSON only, no preamble or markdown fences."
-)
+_SYSTEM_PROMPT = config.RANKER_SYSTEM_PROMPT
 
 
 # --- Prompt building ----------------------------------------------------
@@ -367,7 +363,7 @@ def _log(rec: dict) -> None:
 
 # --- Orchestrator -------------------------------------------------------
 
-RECENT_SENT_WINDOW_DAYS = 30
+RECENT_SENT_WINDOW_DAYS = config.DEDUP_WINDOW_DAYS
 
 
 def rank_stories(

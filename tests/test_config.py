@@ -40,7 +40,7 @@ class ConfigConstantsTest(unittest.TestCase):
 
     def test_budget_constants(self) -> None:
         self.assertEqual(config.MAX_PERPLEXITY_CALLS_PER_DAY, 60)
-        self.assertEqual(config.DEDUPE_LOOKBACK_DAYS, 7)
+        self.assertEqual(config.DEDUP_WINDOW_DAYS, 30)
         self.assertEqual(config.MAX_DIGEST_ITEMS, 40)
         self.assertEqual(config.TOP_SUMMARY_SIZE, 5)
 
@@ -54,6 +54,24 @@ class ConfigConstantsTest(unittest.TestCase):
     def test_schedule(self) -> None:
         self.assertEqual(config.DIGEST_TZ, "Asia/Kolkata")
         self.assertEqual(config.DIGEST_HOUR_LOCAL, 10)
+
+    def test_prompts_load_from_disk(self) -> None:
+        # Both prompts come from prompts/*.md, not inline strings.
+        self.assertTrue(config.RANKER_SYSTEM_PROMPT)
+        self.assertIn("VC firm", config.RANKER_SYSTEM_PROMPT)
+        self.assertTrue(config.MAGNITUDE_RUBRIC)
+        self.assertIn("TIER S", config.MAGNITUDE_RUBRIC)
+        self.assertIn("TIER C", config.MAGNITUDE_RUBRIC)
+
+    def test_boosters_dict_has_expected_keys(self) -> None:
+        # Locks in the booster table shape so future edits to the dict are
+        # deliberate, not accidental.
+        expected = {
+            "tier1_voice", "trusted_publication", "firm_mention",
+            "funding", "m_and_a", "regulatory", "product",
+            "leadership", "listicle", "opinion",
+        }
+        self.assertEqual(set(config.BOOSTERS), expected)
 
 
 class PriorityBucketsTest(unittest.TestCase):
