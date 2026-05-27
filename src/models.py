@@ -1,4 +1,4 @@
-"""Shared data types that flow between layers (fetchers → scorer → ranker → emailer).
+"""Shared data types that flow between layers (fetchers → scorer → ranker → slack_client).
 
 Per-module loader types (Voice, Newsletter, KeywordRow, QueryPlan, ChatResponse,
 etc.) stay with their producer modules. This module is for types that cross

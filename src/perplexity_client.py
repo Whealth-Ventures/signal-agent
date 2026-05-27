@@ -19,6 +19,7 @@ from typing import Iterator
 
 import httpx
 from tenacity import (
+    AsyncRetrying,
     Retrying,
     retry_if_exception,
     stop_after_attempt,
@@ -31,8 +32,10 @@ from query_planner import QueryPlan
 
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 
-# Polite floor between successive in-process calls (Perplexity's RPM allowance
-# is generous; this just keeps us from bursting 32 calls in 5 seconds).
+# Polite floor between successive sync-path calls. The async path uses an
+# asyncio.Semaphore in main.py (concurrency cap) instead of a sleep floor,
+# so this constant only applies when complete()/search_recent() are called
+# directly (tests, ad-hoc scripts).
 MIN_SECONDS_BETWEEN_CALLS = 0.5
 
 # === Pricing — TODO: VERIFY against current Perplexity pricing.
@@ -135,13 +138,16 @@ class PerplexityClient:
         self._api_key = api_key if api_key is not None else config.PERPLEXITY_API_KEY
         if not self._api_key:
             raise RuntimeError("PERPLEXITY_API_KEY is not set")
+        self._headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
         self._http = http or httpx.Client(
             timeout=config.HTTP_TIMEOUT_S,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=self._headers,
         )
+        # Lazy: only created if complete_async is called.
+        self._async_http: httpx.AsyncClient | None = None
         self._calls_today: int | None = None
         self._last_call_ts: float = 0.0
         self._no_wait = no_wait_for_tests
@@ -179,19 +185,9 @@ class PerplexityClient:
 
     # --- core call ---
 
-    def complete(
-        self,
-        prompt: str,
-        *,
-        model: str = config.PERPLEXITY_MODEL_FETCH,
-        recency: str | None = None,
-        query_id: str = "ad-hoc",
-        system: str | None = None,
-        timeout: float | None = None,
-    ) -> ChatResponse:
-        self._check_cap()
-        self._polite_throttle()
-
+    def _build_body(
+        self, prompt: str, *, model: str, recency: str | None, system: str | None,
+    ) -> dict:
         messages: list[dict] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -199,44 +195,25 @@ class PerplexityClient:
         body: dict = {"model": model, "messages": messages}
         if recency:
             body["search_recency_filter"] = recency
+        return body
 
-        attempts = 0
-        last_exc: BaseException | None = None
-        last_status = 0
-        last_body = ""
-        response: httpx.Response | None = None
-        start = time.monotonic()
+    def _wait_policy(self):
+        if self._no_wait:
+            return wait_exponential(multiplier=0, min=0, max=0)
+        return wait_exponential(multiplier=1, min=2, max=30) + wait_random(0, 1)
 
-        wait = (
-            wait_exponential(multiplier=0, min=0, max=0)
-            if self._no_wait
-            else wait_exponential(multiplier=1, min=2, max=30) + wait_random(0, 1)
-        )
-        retryer: Iterator = Retrying(
-            stop=stop_after_attempt(config.HTTP_MAX_RETRIES),
-            wait=wait,
-            retry=retry_if_exception(_is_retryable),
-            reraise=True,
-        )
-
-        try:
-            for attempt in retryer:
-                with attempt:
-                    attempts += 1
-                    response = self._do_post(body, timeout=timeout)
-        except httpx.HTTPStatusError as e:
-            last_exc = e
-            last_status = e.response.status_code
-            try:
-                last_body = e.response.text[:600]
-            except Exception:
-                last_body = ""
-        except Exception as e:  # network errors after retries
-            last_exc = e
-            last_status = 0
-
-        latency_ms = int((time.monotonic() - start) * 1000)
-
+    def _finalize_response(
+        self,
+        *,
+        response: httpx.Response | None,
+        last_exc: BaseException | None,
+        last_status: int,
+        last_body: str,
+        latency_ms: int,
+        attempts: int,
+        model: str,
+        query_id: str,
+    ) -> ChatResponse:
         if response is None or response.status_code != 200:
             err_str = str(last_exc) if last_exc else "no response"
             if last_body:
@@ -292,8 +269,119 @@ class PerplexityClient:
             raw=data,
         )
 
+    def complete(
+        self,
+        prompt: str,
+        *,
+        model: str = config.PERPLEXITY_MODEL_FETCH,
+        recency: str | None = None,
+        query_id: str = "ad-hoc",
+        system: str | None = None,
+        timeout: float | None = None,
+    ) -> ChatResponse:
+        self._check_cap()
+        self._polite_throttle()
+        body = self._build_body(prompt, model=model, recency=recency, system=system)
+
+        attempts = 0
+        last_exc: BaseException | None = None
+        last_status = 0
+        last_body = ""
+        response: httpx.Response | None = None
+        start = time.monotonic()
+
+        retryer: Iterator = Retrying(
+            stop=stop_after_attempt(config.HTTP_MAX_RETRIES),
+            wait=self._wait_policy(),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        )
+
+        try:
+            for attempt in retryer:
+                with attempt:
+                    attempts += 1
+                    response = self._do_post(body, timeout=timeout)
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            last_status = e.response.status_code
+            try:
+                last_body = e.response.text[:600]
+            except Exception:
+                last_body = ""
+        except Exception as e:  # network errors after retries
+            last_exc = e
+            last_status = 0
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return self._finalize_response(
+            response=response, last_exc=last_exc, last_status=last_status,
+            last_body=last_body, latency_ms=latency_ms, attempts=attempts,
+            model=model, query_id=query_id,
+        )
+
+    async def complete_async(
+        self,
+        prompt: str,
+        *,
+        model: str = config.PERPLEXITY_MODEL_FETCH,
+        recency: str | None = None,
+        query_id: str = "ad-hoc",
+        system: str | None = None,
+        timeout: float | None = None,
+    ) -> ChatResponse:
+        """Async sibling of `complete`. Same cap accounting + retry semantics;
+        skips the in-process polite-floor (concurrency is controlled by the
+        caller via asyncio.Semaphore)."""
+        self._check_cap()
+        body = self._build_body(prompt, model=model, recency=recency, system=system)
+
+        attempts = 0
+        last_exc: BaseException | None = None
+        last_status = 0
+        last_body = ""
+        response: httpx.Response | None = None
+        start = time.monotonic()
+
+        retryer = AsyncRetrying(
+            stop=stop_after_attempt(config.HTTP_MAX_RETRIES),
+            wait=self._wait_policy(),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        )
+        try:
+            async for attempt in retryer:
+                with attempt:
+                    attempts += 1
+                    response = await self._do_post_async(body, timeout=timeout)
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            last_status = e.response.status_code
+            try:
+                last_body = e.response.text[:600]
+            except Exception:
+                last_body = ""
+        except Exception as e:
+            last_exc = e
+            last_status = 0
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return self._finalize_response(
+            response=response, last_exc=last_exc, last_status=last_status,
+            last_body=last_body, latency_ms=latency_ms, attempts=attempts,
+            model=model, query_id=query_id,
+        )
+
     def search_recent(self, plan: QueryPlan) -> ChatResponse:
         return self.complete(
+            plan.prompt_text,
+            model=config.PERPLEXITY_MODEL_FETCH,
+            recency=config.PERPLEXITY_RECENCY,
+            query_id=plan.id,
+        )
+
+    async def search_recent_async(self, plan: QueryPlan) -> ChatResponse:
+        return await self.complete_async(
             plan.prompt_text,
             model=config.PERPLEXITY_MODEL_FETCH,
             recency=config.PERPLEXITY_RECENCY,
@@ -313,6 +401,33 @@ class PerplexityClient:
         # _is_retryable() filters on status code so 429/5xx retry, others don't.
         r.raise_for_status()
         return r  # unreachable
+
+    def _ensure_async_http(self) -> httpx.AsyncClient:
+        if self._async_http is None:
+            self._async_http = httpx.AsyncClient(
+                timeout=config.HTTP_TIMEOUT_S,
+                headers=self._headers,
+            )
+        return self._async_http
+
+    async def _do_post_async(
+        self, body: dict, *, timeout: float | None = None,
+    ) -> httpx.Response:
+        http = self._ensure_async_http()
+        if timeout is not None:
+            r = await http.post(PERPLEXITY_URL, json=body, timeout=timeout)
+        else:
+            r = await http.post(PERPLEXITY_URL, json=body)
+        if r.status_code == 200:
+            return r
+        r.raise_for_status()
+        return r  # unreachable
+
+    async def aclose(self) -> None:
+        """Close the lazily-created async client. Safe to call multiple times."""
+        if self._async_http is not None:
+            await self._async_http.aclose()
+            self._async_http = None
 
     def _log_call(
         self,

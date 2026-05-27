@@ -16,10 +16,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import chromadb
+import numpy as np
 
 import config
 import storage
-from content_indexer import Embedder, ScoredChunk, query_similar
+from content_indexer import (
+    Embedder,
+    ScoredChunk,
+    _default_chroma_client,
+    query_similar_batch,
+)
 from models import Signal, Story, signal_id, story_id
 from query_planner import load_firm_additions, load_newsletters, load_voices
 
@@ -58,39 +64,11 @@ def _signal_text(s: Signal) -> str:
     return f"{s.title} — {summary}".strip()
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(y * y for y in b) ** 0.5
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
-
-
-def _max_similarity(
-    embedding: list[float],
-    historical: list[tuple[str, list[float]]],
-) -> tuple[float, str | None]:
-    best_sim = 0.0
-    best_id: str | None = None
-    for sid, vec in historical:
-        sim = _cosine(embedding, vec)
-        if sim > best_sim:
-            best_sim = sim
-            best_id = sid
-    return best_sim, best_id
-
-
-def _mean_vec(vecs: list[list[float]]) -> list[float]:
-    n = len(vecs)
-    if n == 0:
-        return []
-    dim = len(vecs[0])
-    out = [0.0] * dim
-    for v in vecs:
-        for i, x in enumerate(v):
-            out[i] += x
-    return [x / n for x in out]
+def _l2_normalize(arr: np.ndarray) -> np.ndarray:
+    """L2-normalize each row; zero-rows stay zero (cosine vs them is 0)."""
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    safe = np.where(norms == 0, 1.0, norms)
+    return arr / safe
 
 
 def _tier1_voice_names() -> set[str]:
@@ -154,26 +132,35 @@ def cluster_signals(
     """Greedy clustering: returns list of clusters, each a list of indices.
 
     A signal joins the existing cluster whose centroid has the highest cosine
-    similarity above threshold; otherwise it starts a new cluster. Centroid is
-    a running mean of member vectors.
+    similarity above threshold; otherwise it starts a new cluster. Cosine is
+    computed in numpy: vectors are L2-normalized once, and a centroid's running
+    sum is tracked so cosine(new, centroid) = dot(new, sum) / ||sum|| in one
+    vector op per cluster.
     """
-    clusters: list[dict] = []
-    for i, emb in enumerate(embeddings):
+    if not embeddings:
+        return []
+    normed = _l2_normalize(np.asarray(embeddings, dtype=np.float32))
+    cluster_sums: list[np.ndarray] = []
+    sum_norms: list[float] = []
+    members: list[list[int]] = []
+    for i in range(normed.shape[0]):
+        v = normed[i]
         best_j = -1
-        best_sim = threshold
-        for j, c in enumerate(clusters):
-            sim = _cosine(emb, c["centroid"])
-            if sim > best_sim:
-                best_sim = sim
+        if cluster_sums:
+            sums_mat = np.vstack(cluster_sums)
+            sims = (sums_mat @ v) / np.asarray(sum_norms, dtype=np.float32)
+            j = int(np.argmax(sims))
+            if float(sims[j]) > threshold:
                 best_j = j
         if best_j == -1:
-            clusters.append({"members": [i], "vecs": [emb], "centroid": list(emb)})
+            cluster_sums.append(v.copy())
+            sum_norms.append(1.0)
+            members.append([i])
         else:
-            c = clusters[best_j]
-            c["members"].append(i)
-            c["vecs"].append(emb)
-            c["centroid"] = _mean_vec(c["vecs"])
-    return [c["members"] for c in clusters]
+            cluster_sums[best_j] = cluster_sums[best_j] + v
+            sum_norms[best_j] = float(np.linalg.norm(cluster_sums[best_j]))
+            members[best_j].append(i)
+    return members
 
 
 def _source_tier_rank(url: str) -> int:
@@ -368,22 +355,57 @@ def run_scoring(
         )
         firms = firm_names if firm_names is not None else _firm_names()
 
+        # Share one Chroma client across all per-cluster lookups; without this,
+        # query_similar_batch would otherwise spin up a fresh PersistentClient
+        # on every call.
+        if chroma_client is None:
+            chroma_client = _default_chroma_client()
+
         # Load historical embeddings once. Empty list on first ever run.
         historical = storage.recent_story_embeddings(
             within_days=historical_dedup_window_days, conn=conn,
         )
 
-        stories_created = 0
+        # Pre-normalize once: cosine becomes a single dot product.
+        normed = _l2_normalize(np.asarray(embeddings, dtype=np.float32))
+        if historical:
+            hist_ids = [sid for sid, _ in historical]
+            hist_mat = _l2_normalize(
+                np.asarray([v for _, v in historical], dtype=np.float32),
+            )
+        else:
+            hist_ids = []
+            hist_mat = np.zeros((0, normed.shape[1]), dtype=np.float32)
+
+        # Pass 1: pick canonical + filter historical dups. Build a list of
+        # surviving clusters in the same order; their normalized embeddings
+        # will then drive a single batched Chroma query.
+        @dataclass(frozen=True)
+        class _Survivor:
+            cluster: list[int]
+            canonical: Signal
+            canonical_emb: list[float]
+            canonical_normed: np.ndarray
+            cluster_signals: list[Signal]
+
+        survivors: list[_Survivor] = []
         clusters_filtered_historical = 0
         for cluster in clusters:
             cs = [signals[i] for i in cluster]
             local_idx = pick_canonical_idx(cs)
             canonical = cs[local_idx]
             canonical_emb = embeddings[cluster[local_idx]]
+            canonical_normed = normed[cluster[local_idx]]
 
-            # Cross-day dedup: if any recently-sent story has a near-identical
-            # embedding, drop this cluster before paying tokens to rank it.
-            best_sim, best_id = _max_similarity(canonical_emb, historical)
+            if hist_mat.shape[0]:
+                sims = hist_mat @ canonical_normed
+                j = int(np.argmax(sims))
+                best_sim = float(sims[j])
+                best_id: str | None = hist_ids[j]
+            else:
+                best_sim = 0.0
+                best_id = None
+
             if best_sim >= historical_dedup_threshold:
                 clusters_filtered_historical += 1
                 _log({
@@ -396,12 +418,34 @@ def run_scoring(
                 })
                 continue
 
-            content_chunks = query_similar(
-                k=TOP_K_FOR_CONTENT_SIMILARITY * 2,
-                embedding=canonical_emb,
-                chroma_client=chroma_client,
-                embedder=embedder,
-            )
+            survivors.append(_Survivor(
+                cluster=cluster,
+                canonical=canonical,
+                canonical_emb=canonical_emb,
+                canonical_normed=canonical_normed,
+                cluster_signals=cs,
+            ))
+
+            # Treat this canonical as historical-for-the-rest-of-this-run so a
+            # later cluster in the same batch can't survive if it matches us
+            # across the historical threshold.
+            hist_mat = np.vstack([hist_mat, canonical_normed[None, :]])
+            hist_ids.append(story_id(canonical.url))
+
+        # One Chroma round-trip for all surviving clusters.
+        content_chunks_per_cluster: list[list[ScoredChunk]] = query_similar_batch(
+            [s.canonical_emb for s in survivors],
+            k=TOP_K_FOR_CONTENT_SIMILARITY * 2,
+            chroma_client=chroma_client,
+        )
+        if not content_chunks_per_cluster:
+            content_chunks_per_cluster = [[] for _ in survivors]
+
+        stories_created = 0
+        assign_rows: list[tuple[str, str]] = []
+        for surv, content_chunks in zip(survivors, content_chunks_per_cluster):
+            canonical = surv.canonical
+            cs = surv.cluster_signals
             boosters = compute_boosters(canonical, names, hosts, firms)
             breakdown = score_story(content_chunks, boosters)
             priority_bucket = pick_priority_bucket(cs)
@@ -419,17 +463,9 @@ def run_scoring(
                 priority_bucket=priority_bucket,
                 geo=geo,
             )
-            storage.upsert_story(story, embedding=canonical_emb, conn=conn)
+            storage.upsert_story(story, embedding=surv.canonical_emb, conn=conn)
             for s in cs:
-                storage.assign_signal_to_story(
-                    signal_id(s.source, s.url), sid, conn=conn,
-                )
-
-            # Newly-stored embedding becomes available for the rest of this run,
-            # so two clusters from today's batch can't both survive if they'd
-            # match each other across days. (Within-day dedup is the clustering
-            # step above, but it uses a tighter threshold.)
-            historical.append((sid, canonical_emb))
+                assign_rows.append((signal_id(s.source, s.url), sid))
 
             stories_created += 1
             _log({
@@ -443,6 +479,9 @@ def run_scoring(
                 "booster_total": breakdown.booster_total,
                 "final_score": breakdown.final,
             })
+
+        # One executemany for every (signal, story) link in this run.
+        storage.assign_signals_to_story(assign_rows, conn=conn)
 
         if own_conn:
             conn.commit()

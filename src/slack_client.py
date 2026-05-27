@@ -24,6 +24,7 @@ with invalid URLs rather than shipping broken links.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -38,6 +39,10 @@ from ranker import RankedStory, RankingResult
 # Slack Block Kit limits — keep us well clear of them.
 MAX_BLOCKS = 48
 MAX_SECTION_CHARS = 2900     # actual limit is 3000; small headroom
+
+# Concurrent URL HEAD validations. Production sees 20-40 URLs per digest;
+# serial HEAD-with-GET-fallback was a 10-30s blocker.
+URL_VALIDATION_CONCURRENCY = 10
 
 # Geo tag prefixes used in bullets. Empty string for global / unknown — per
 # user instruction, only India and US get explicit tags.
@@ -88,6 +93,19 @@ def validate_url(url: str, *, http: httpx.Client | None = None) -> bool:
     finally:
         if own_http and http is not None:
             http.close()
+
+
+async def _validate_url_async(url: str, http: httpx.AsyncClient) -> bool:
+    try:
+        r = await http.request("HEAD", url)
+    except httpx.HTTPError:
+        return False
+    if r.status_code in (403, 405):
+        try:
+            r = await http.get(url)
+        except httpx.HTTPError:
+            return False
+    return 200 <= r.status_code < 400
 
 
 # --- Formatting --------------------------------------------------------
@@ -210,6 +228,40 @@ def build_blocks(
 
 # --- URL validation flow ----------------------------------------------
 
+def _all_ranked(ranking: RankingResult) -> list[RankedStory]:
+    return (
+        list(ranking.top_summary)
+        + [r for v in ranking.by_priority.values() for r in v]
+        + list(ranking.other)
+    )
+
+
+def _ranking_from_decisions(
+    ranking: RankingResult, ok_ids: set[str],
+) -> RankingResult:
+    top = [r for r in ranking.top_summary if r.story.id in ok_ids]
+    by_priority = {
+        k: [r for r in v if r.story.id in ok_ids]
+        for k, v in ranking.by_priority.items()
+    }
+    by_priority = {k: v for k, v in by_priority.items() if v}
+    other = [r for r in ranking.other if r.story.id in ok_ids]
+    return RankingResult(
+        top_summary=top,
+        by_priority=by_priority,
+        other=other,
+        candidates_count=ranking.candidates_count,
+        used_fallback=ranking.used_fallback,
+        cost_usd=ranking.cost_usd,
+        elapsed_seconds=ranking.elapsed_seconds,
+        flat=tuple(
+            top
+            + [r for b in config.PRIORITY_BUCKETS for r in by_priority.get(b.key, [])]
+            + other
+        ),
+    )
+
+
 def _filter_invalid_urls(
     ranking: RankingResult,
     *,
@@ -218,39 +270,48 @@ def _filter_invalid_urls(
 ) -> tuple[RankingResult, int]:
     """Drop ranked stories whose URLs fail HEAD/GET validation. Returns the
     filtered result + count of drops. If `skip` is True, returns input unchanged.
-    """
+    Uses the sync httpx.Client passed in — this is the path tests exercise."""
     if skip:
         return ranking, 0
-
+    all_items = _all_ranked(ranking)
+    ok_ids: set[str] = set()
     dropped = 0
-
-    def keep(r: RankedStory) -> bool:
-        nonlocal dropped
-        ok = validate_url(r.story.canonical_url, http=http)
-        if not ok:
+    for r in all_items:
+        if validate_url(r.story.canonical_url, http=http):
+            ok_ids.add(r.story.id)
+        else:
             dropped += 1
-        return ok
+    return _ranking_from_decisions(ranking, ok_ids), dropped
 
-    top = [r for r in ranking.top_summary if keep(r)]
-    by_priority = {
-        k: [r for r in v if keep(r)] for k, v in ranking.by_priority.items()
-    }
-    by_priority = {k: v for k, v in by_priority.items() if v}
-    other = [r for r in ranking.other if keep(r)]
 
-    filtered = RankingResult(
-        top_summary=top,
-        by_priority=by_priority,
-        other=other,
-        candidates_count=ranking.candidates_count,
-        used_fallback=ranking.used_fallback,
-        cost_usd=ranking.cost_usd,
-        elapsed_seconds=ranking.elapsed_seconds,
-        flat=tuple(top
-                   + [r for b in config.PRIORITY_BUCKETS for r in by_priority.get(b.key, [])]
-                   + other),
-    )
-    return filtered, dropped
+async def _filter_invalid_urls_async(
+    ranking: RankingResult,
+    *,
+    skip: bool,
+    concurrency: int = URL_VALIDATION_CONCURRENCY,
+) -> tuple[RankingResult, int]:
+    """Async variant: validates all candidate URLs concurrently under a
+    semaphore. Used in production where no sync httpx.Client is injected."""
+    if skip:
+        return ranking, 0
+    all_items = _all_ranked(ranking)
+    if not all_items:
+        return ranking, 0
+
+    sem = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(
+        timeout=config.URL_VALIDATION_TIMEOUT_S,
+        headers={"User-Agent": "SignalAgent/0.1"},
+        follow_redirects=True,
+    ) as http:
+        async def check(r: RankedStory) -> tuple[str, bool]:
+            async with sem:
+                ok = await _validate_url_async(r.story.canonical_url, http)
+                return r.story.id, ok
+        results = await asyncio.gather(*(check(r) for r in all_items))
+    ok_ids = {sid for sid, ok in results if ok}
+    dropped = sum(1 for _, ok in results if not ok)
+    return _ranking_from_decisions(ranking, ok_ids), dropped
 
 
 # --- Poster -----------------------------------------------------------
@@ -285,9 +346,17 @@ def post_digest(
     dropped = 0
 
     try:
-        filtered, dropped = _filter_invalid_urls(
-            ranking, http=h, skip=skip_url_validation,
-        )
+        if http is None:
+            # Production path: concurrent URL validation via an AsyncClient
+            # spun up inside _filter_invalid_urls_async; the sync `h` above
+            # is reused for the single Slack POST.
+            filtered, dropped = asyncio.run(_filter_invalid_urls_async(
+                ranking, skip=skip_url_validation,
+            ))
+        else:
+            filtered, dropped = _filter_invalid_urls(
+                ranking, http=h, skip=skip_url_validation,
+            )
         stories_sent = (
             len(filtered.top_summary)
             + sum(len(v) for v in filtered.by_priority.values())

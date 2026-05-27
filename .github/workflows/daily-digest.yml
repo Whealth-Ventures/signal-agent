@@ -49,7 +49,7 @@ jobs:
 
       # Restore SQLite + Chroma from the previous run. On first ever run the
       # cache will miss and the pipeline will initialise both from scratch
-      # (storage.init_db + reindex_content_dir over the committed content/).
+      # (storage.init_db + reindex_content_dir over the committed inputs/content/).
       - name: Restore state cache
         id: state-cache
         uses: actions/cache/restore@v4

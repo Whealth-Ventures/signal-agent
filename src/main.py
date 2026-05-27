@@ -7,6 +7,7 @@ email was sent, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sqlite3
 import sys
@@ -14,7 +15,6 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import chromadb
 import httpx
@@ -41,6 +41,10 @@ from ranker import _extract_json
 from rss_fetcher import fetch_all_newsletters
 
 PERPLEXITY_HEADROOM = 2  # leave room for ranker (1 call) + 1 retry/buffer
+
+# Concurrent in-flight Perplexity fetches. Cap is 60/day, ranker is 1 call,
+# polite enough not to spam the API.
+PERPLEXITY_FETCH_CONCURRENCY = 5
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,70 @@ def fetch_perplexity(
     return out
 
 
+async def fetch_perplexity_async(
+    client: PerplexityClient,
+    plans: list[QueryPlan],
+    *,
+    headroom: int = PERPLEXITY_HEADROOM,
+    concurrency: int = PERPLEXITY_FETCH_CONCURRENCY,
+) -> list[Signal]:
+    """Concurrent variant of fetch_perplexity. Preserves the headroom early-stop
+    and per-plan failure isolation. Cap accounting is checked atomically inside
+    each task via client._check_cap()."""
+    out: list[Signal] = []
+    n = len(plans)
+    width = len(str(n))
+    sem = asyncio.Semaphore(concurrency)
+    stop = asyncio.Event()
+
+    async def one(i: int, plan: QueryPlan) -> None:
+        if stop.is_set():
+            return
+        async with sem:
+            # Re-check after the semaphore acquire — counter may have moved.
+            if stop.is_set():
+                return
+            if client.remaining_today <= headroom:
+                stop.set()
+                _log({
+                    "step": "perplexity_fetch_capped",
+                    "remaining": client.remaining_today,
+                    "headroom": headroom,
+                    "skipped_plan": plan.id,
+                })
+                _progress(
+                    f"  [{i:>{width}}/{n}] {plan.id:<40}  capped (remaining<={headroom})"
+                )
+                return
+            try:
+                t0 = time.monotonic()
+                resp = await client.search_recent_async(plan)
+                signals = parse_perplexity_response(plan, resp)
+                out.extend(signals)
+                _progress(
+                    f"  [{i:>{width}}/{n}] {plan.id:<40}  "
+                    f"{len(signals):>2} stories  "
+                    f"{int((time.monotonic() - t0) * 1000):>5}ms"
+                )
+            except RateLimitExceeded as e:
+                _log({"step": "perplexity_fetch_rate_limit",
+                      "plan": plan.id, "error": str(e)})
+                _progress(f"  [{i:>{width}}/{n}] {plan.id:<40}  rate-limited, stopping")
+                stop.set()
+            except Exception as e:
+                _log({"step": "perplexity_fetch_plan_failed",
+                      "plan": plan.id, "error": f"{type(e).__name__}: {e}"})
+                _progress(
+                    f"  [{i:>{width}}/{n}] {plan.id:<40}  FAILED ({type(e).__name__})"
+                )
+
+    try:
+        await asyncio.gather(*(one(i, p) for i, p in enumerate(plans, start=1)))
+    finally:
+        await client.aclose()
+    return out
+
+
 def ensure_content_indexed(
     *,
     chroma_client: chromadb.api.ClientAPI | None = None,
@@ -323,7 +391,13 @@ def run_pipeline(
             f"{config.MAX_PERPLEXITY_CALLS_PER_DAY} calls remaining today)"
         )
         t0 = time.monotonic()
-        perp_signals = fetch_perplexity(perplexity_client, plans)
+        if hasattr(perplexity_client, "search_recent_async"):
+            perp_signals = asyncio.run(
+                fetch_perplexity_async(perplexity_client, plans),
+            )
+        else:
+            # Test path: fakes implement only the sync .search_recent().
+            perp_signals = fetch_perplexity(perplexity_client, plans)
         _progress(
             f"      done: {len(perp_signals)} signals in "
             f"{time.monotonic() - t0:.1f}s  "

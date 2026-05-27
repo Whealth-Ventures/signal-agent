@@ -1,12 +1,10 @@
 """Smoke tests for src/rss_fetcher.py — all offline via httpx.MockTransport."""
 from __future__ import annotations
 
-import calendar
 import json
 import os
 import sys
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +17,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import config  # noqa: E402
 import rss_fetcher as rf  # noqa: E402
-from models import Signal  # noqa: E402
 from query_planner import Newsletter  # noqa: E402
 
 

@@ -14,11 +14,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import config  # noqa: E402
-import content_indexer as ci  # noqa: E402
 import scorer  # noqa: E402
 import storage  # noqa: E402
 from content_indexer import ScoredChunk  # noqa: E402
-from models import Signal, signal_id, story_id  # noqa: E402
+from models import Signal, story_id  # noqa: E402
 
 
 def _utcnow() -> datetime:

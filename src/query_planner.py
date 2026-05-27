@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date as date_cls
+from functools import lru_cache
 from typing import Literal
 
 from openpyxl import load_workbook
@@ -180,6 +181,7 @@ def _geo_matches(row_geo: Geography, plan_geo: PlanGeo) -> bool:
 
 # --- Loaders ------------------------------------------------------------
 
+@lru_cache(maxsize=1)
 def load_keywords() -> list[KeywordRow]:
     """Read the single `Master Keywords` tab. Columns: Bucket, Sub-bucket,
     Keyword, Geo. Header is row 1, data from row 2."""
@@ -197,6 +199,7 @@ def load_keywords() -> list[KeywordRow]:
     return out
 
 
+@lru_cache(maxsize=1)
 def load_voices() -> list[Voice]:
     """Read India Top Voices + US Top Voices tabs. Layout:
        row 1 = banner (merged A1:H1), row 2 = blank, row 3 = header, row 4+ = data.
@@ -227,6 +230,7 @@ def load_voices() -> list[Voice]:
     return out
 
 
+@lru_cache(maxsize=1)
 def load_newsletters() -> list[Newsletter]:
     """Read `Newsletters & Publications`. Layout: row 1 blank, row 2 header,
     row 3+ data. Columns: #, Publication, Geography, Type, Run by, What it
@@ -254,6 +258,7 @@ def load_newsletters() -> list[Newsletter]:
     return out
 
 
+@lru_cache(maxsize=1)
 def load_company_pages() -> list[CompanyPage]:
     """Read `Firms & Org Pages` (renamed from `Company Pages`). Layout: row 1
     blank, row 2 header, row 3+ data."""
@@ -279,6 +284,7 @@ def load_company_pages() -> list[CompanyPage]:
     return out
 
 
+@lru_cache(maxsize=1)
 def load_firm_additions() -> list[FirmAddition]:
     """Read the `New Additions` tab — PE/VC firms active in healthcare.
     Layout: row 1 blank, row 2 header, row 3+ data."""

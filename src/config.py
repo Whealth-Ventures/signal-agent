@@ -1,17 +1,23 @@
-"""Single source of truth for paths, env, and tunable constants.
+"""Single source of truth for paths, env, prompt loading, and re-exported
+tunables.
 
-Import is cheap: only loads .env, resolves paths, and ensures data/ subdirs exist.
-No HTTP, no DB, no logging setup. Call check_env() from main.py at startup to
-fail fast if required env vars are missing.
+Import is cheap: loads .env, resolves paths, ensures data/ subdirs exist, and
+reads inputs/tuning.xlsx via `tunables`. No HTTP, no DB, no logging setup.
+Call check_env() from main.py at startup to fail fast on missing env vars.
+
+Tunable numbers, regex patterns, priority-bucket structure, and the source-
+tier list all live in `inputs/tuning.xlsx`. This module just re-exposes them
+as module-level constants so the rest of the codebase keeps reading
+`config.MAX_PERPLEXITY_CALLS_PER_DAY` etc. unchanged. See docs/EDITING.md.
 """
 from __future__ import annotations
 
 import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from tunables import PriorityBucket, load_tunables
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -22,8 +28,9 @@ load_dotenv(ROOT / ".env")
 INPUTS_DIR = ROOT / "inputs"
 KEYWORDS_XLSX = INPUTS_DIR / "keywords.xlsx"
 VOICES_XLSX = INPUTS_DIR / "voices.xlsx"
+TUNING_XLSX = INPUTS_DIR / "tuning.xlsx"
 
-CONTENT_DIR = ROOT / "content"
+CONTENT_DIR = INPUTS_DIR / "content"
 PROMPTS_DIR = ROOT / "prompts"
 
 DATA_DIR = ROOT / "data"
@@ -57,196 +64,69 @@ SLACK_WEBHOOK_URL = _env("SLACK_WEBHOOK_URL")
 SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
 
 
-# --- Constants ----------------------------------------------------------
+# --- Tunables (loaded from inputs/tuning.xlsx) --------------------------
 #
-# All tunable numbers live in this file. Modules import them from `config`
-# rather than holding their own copies — keeps the "what shapes the output"
-# surface to one place. See docs/TUNING.md for what each knob does.
+# The Excel file is the source of truth for every value below. To edit any of
+# them: open inputs/tuning.xlsx (Excel for the web or desktop), find the row,
+# change the value, save. The next pipeline run picks up the change — no code
+# edits required. See docs/EDITING.md for the lever map.
 
-# --- Budget --------------------------------------------------------------
+_t = load_tunables()
 
-MAX_PERPLEXITY_CALLS_PER_DAY = 60
-DAILY_BUDGET_USD = 3.0
+# Budget
+MAX_PERPLEXITY_CALLS_PER_DAY = _t.get_int("max_perplexity_calls_per_day")
+DAILY_BUDGET_USD = _t.get_float("daily_budget_usd")
 
+# Digest shape
+MAX_DIGEST_ITEMS = _t.get_int("max_digest_items")
+TOP_SUMMARY_SIZE = _t.get_int("top_summary_size")
 
-# --- Digest shape --------------------------------------------------------
+# Dedup
+DEDUP_WINDOW_DAYS = _t.get_int("dedup_window_days")
+HISTORICAL_DEDUP_THRESHOLD = _t.get_float("historical_dedup_threshold")
 
-# Ranker output is variable per category (see PRIORITY_BUCKETS + MAGNITUDE_RUBRIC).
-# MAX_DIGEST_ITEMS is a sanity ceiling, not a target — typical days land 15–25.
-MAX_DIGEST_ITEMS = 40
-TOP_SUMMARY_SIZE = 5
+# Scoring
+CLUSTER_SIMILARITY_THRESHOLD = _t.get_float("cluster_similarity_threshold")
+TOP_K_CONTENT_SIMILARITY = _t.get_int("top_k_content_similarity")
+SUMMARY_TRUNCATE_FOR_EMBED = _t.get_int("summary_truncate_for_embed")
 
+# Boosters
+BOOSTERS = _t.boosters
 
-# --- Dedup ---------------------------------------------------------------
+# Ranker
+MIN_CANDIDATE_SCORE = _t.get_float("min_candidate_score")
+ONE_LINER_MAX_CHARS = _t.get_int("one_liner_max_chars")
+RANKER_SUMMARY_MAX_CHARS = _t.get_int("ranker_summary_max_chars")
 
-# Single dedup window used by URL filter, ranker candidate filter, and the
-# cross-day embedding similarity check. They were three constants before; in
-# practice they should all be the same value (= "how far back does 'recent'
-# go?"). Split them again if you ever need different windows per layer.
-DEDUP_WINDOW_DAYS = 30
+# Perplexity
+PERPLEXITY_MODEL_FETCH = _t.get_str("perplexity_model_fetch")
+PERPLEXITY_MODEL_RANK = _t.get_str("perplexity_model_rank")
+PERPLEXITY_RECENCY = _t.get_str("perplexity_recency")
 
-# Cross-day cosine threshold. Looser than the within-day cluster threshold
-# below because different outlets covering the same event use different wording.
-HISTORICAL_DEDUP_THRESHOLD = 0.80
+# Embeddings
+EMBEDDING_MODEL = _t.get_str("embedding_model")
 
+# HTTP
+HTTP_TIMEOUT_S = _t.get_int("http_timeout_s")
+HTTP_TIMEOUT_RANK_S = _t.get_int("http_timeout_rank_s")
+HTTP_MAX_RETRIES = _t.get_int("http_max_retries")
+URL_VALIDATION_TIMEOUT_S = _t.get_int("url_validation_timeout_s")
 
-# --- Scoring -------------------------------------------------------------
+# Schedule (digest sent at 10am IST)
+DIGEST_TZ = _t.get_str("digest_tz")
+DIGEST_HOUR_LOCAL = _t.get_int("digest_hour_local")
 
-# Within-day clustering: signals whose canonical-text embeddings have cosine
-# similarity above this threshold collapse into one story.
-CLUSTER_SIMILARITY_THRESHOLD = 0.85
+# Track B rotation
+TRACK_B_PLANS_PER_DAY = _t.get_int("track_b_plans_per_day")
+TRACK_B_ROTATION_DAYS = _t.get_int("track_b_rotation_days")
 
-# How many content-corpus chunks to compare against when measuring a story's
-# "does this sound like something the firm cares about" score.
-TOP_K_CONTENT_SIMILARITY = 5
+# Priority buckets — re-exported so callers can still write `config.PriorityBucket`
+# and `config.PRIORITY_BUCKETS`.
+PRIORITY_BUCKETS: tuple[PriorityBucket, ...] = _t.priority_buckets
 
-# Cap on the (title + summary) text fed into the embedding model. Longer
-# summaries don't measurably improve clustering quality.
-SUMMARY_TRUNCATE_FOR_EMBED = 400
-
-# Boosters applied to the base content-similarity score. Inline numeric values
-# so all tuning lives in one literal — no orphan SOMETHING_BOOST constants.
-# "tier1_voice", "trusted_publication", and "firm_mention" are special-cased
-# (matched against name/host sets, not regex) by scorer.compute_boosters.
-BOOSTERS: dict[str, tuple[float, "re.Pattern[str] | None"]] = {
-    "tier1_voice":         (0.10, None),
-    "trusted_publication": (0.08, None),
-    "firm_mention":        (0.08, None),
-    "funding":    (0.05, re.compile(r"\b(raises?|series [a-d]|seed round|funding)\b", re.IGNORECASE)),
-    "m_and_a":    (0.05, re.compile(r"\b(acquires?|acquisition|merges? with|m&a)\b", re.IGNORECASE)),
-    "regulatory": (0.05, re.compile(r"\b(fda|cdsco|ema|approved|cleared)\b", re.IGNORECASE)),
-    "product":    (0.03, re.compile(r"\b(launches?|unveils?|debuts?)\b", re.IGNORECASE)),
-    "leadership": (0.03, re.compile(r"\b(appoints?|named|joins|hires?)\b", re.IGNORECASE)),
-    "listicle":   (-0.10, re.compile(r"^\s*\d+\s+(best|top|essential|reasons|tips|ways)\b", re.IGNORECASE)),
-    "opinion":    (-0.05, re.compile(r"^\s*(opinion|perspective|column):", re.IGNORECASE)),
-}
-
-
-# --- Ranker --------------------------------------------------------------
-
-# Story candidates with relevance_score below this are silently dropped from
-# the ranker's input pool. 0.0 means "let the ranker see everything."
-MIN_CANDIDATE_SCORE = 0.0
-
-# Tightest budget on the LLM's one-line headline (forces newsroom-punchy
-# output, blocks paragraph creep).
-ONE_LINER_MAX_CHARS = 120
-
-# How much of each candidate's summary the prompt shows the ranker.
-RANKER_SUMMARY_MAX_CHARS = 220
-
-
-# --- Perplexity ----------------------------------------------------------
-
-PERPLEXITY_MODEL_FETCH = "sonar-pro"
-PERPLEXITY_MODEL_RANK = "sonar-reasoning-pro"
-PERPLEXITY_RECENCY = "day"
-
-
-# --- Embeddings ----------------------------------------------------------
-
-EMBEDDING_MODEL = "text-embedding-3-small"
-
-
-# --- HTTP ----------------------------------------------------------------
-
-HTTP_TIMEOUT_S = 30
-# sonar-reasoning-pro does extended chain-of-thought; 30s is too tight when the
-# candidate prompt is large (timed out 4× in a row on --max-plans 20).
-HTTP_TIMEOUT_RANK_S = 120
-HTTP_MAX_RETRIES = 4
-URL_VALIDATION_TIMEOUT_S = 10
-
-
-# --- Schedule (digest sent at 10am IST) ---------------------------------
-
-DIGEST_TZ = "Asia/Kolkata"
-DIGEST_HOUR_LOCAL = 10
-
-
-# --- Track B rotation ---------------------------------------------------
-
-# Non-priority sub-buckets cycle across N days so all eventually get coverage
-# without blowing past the daily call budget. With ~245 (sub-bucket × geo)
-# combos, 18 picks/day fully covers in 14 days (18 * 14 = 252 >= 245).
-TRACK_B_PLANS_PER_DAY = 18
-TRACK_B_ROTATION_DAYS = 14
-
-
-# --- Priority buckets ---------------------------------------------------
-
-@dataclass(frozen=True)
-class PriorityBucket:
-    """A daily-tracked category. Maps to one or more sub-buckets in keywords.xlsx.
-
-    `geos` controls which (geo, bucket) plans the query_planner emits:
-      - ("India", "US") → two plans, one India-filtered, one US-filtered
-      - ("US",)         → one US plan
-      - ("Global",)     → one plan querying across all geos (no Geo filter)
-    """
-    key: str                          # slug used in storage + ranker output
-    display: str                      # human-readable label for Slack
-    sub_buckets: tuple[str, ...]      # exact names from Master Keywords sheet
-    geos: tuple[str, ...]
-
-
-PRIORITY_BUCKETS: tuple[PriorityBucket, ...] = (
-    PriorityBucket(
-        key="venture_ipo",
-        display="Venture & IPO",
-        sub_buckets=("Venture and IPO", "Capital and deal types"),
-        geos=("India", "US"),
-    ),
-    PriorityBucket(
-        key="pe_strategics",
-        display="PE & Strategics",
-        sub_buckets=("Private equity and strategics",),
-        geos=("India", "US"),
-    ),
-    PriorityBucket(
-        key="hospital_ma",
-        display="Hospital & Health System M&A",
-        sub_buckets=("Hospital and health system M&A",),
-        geos=("India", "US"),
-    ),
-    PriorityBucket(
-        key="mso_rollups",
-        display="Physician Practice & MSO Roll-ups",
-        sub_buckets=("Physician practice and MSO roll-ups",),
-        geos=("US",),
-    ),
-    PriorityBucket(
-        key="fda_regulatory",
-        display="FDA & Regulatory",
-        sub_buckets=("FDA, regulatory and approvals",),
-        geos=("India", "US"),
-    ),
-    PriorityBucket(
-        key="hot_tas",
-        display="Phase 3 / Hot Therapeutic Areas",
-        sub_buckets=("Hot therapeutic areas",),
-        geos=("Global",),
-    ),
-    PriorityBucket(
-        key="us_medicare",
-        display="US Medicare",
-        sub_buckets=("US Medicare policy and reform",),
-        geos=("US",),
-    ),
-    # AI in Healthcare emits two plans (ventures/fundraises + clinical/partnerships)
-    # — see query_planner._build_ai_plans. Both share this single PriorityBucket
-    # for storage + Slack grouping.
-    PriorityBucket(
-        key="ai_healthcare",
-        display="AI in Healthcare",
-        sub_buckets=(
-            "Generative AI and LLMs in healthcare",
-            "AI scribes and ambient documentation",
-            "Revenue cycle and administrative AI",
-        ),
-        geos=("Global",),
-    ),
-)
+# Source tier — ordered list. When dedupe collapses N URLs for one story,
+# slack_client picks the URL whose host matches earliest in this tuple.
+SOURCE_TIER_1: tuple[str, ...] = _t.source_tiers
 
 
 # --- Prompts ------------------------------------------------------------
@@ -271,57 +151,6 @@ RANKER_SYSTEM_PROMPT = _load_prompt("ranker_system")
 MAGNITUDE_RUBRIC = _load_prompt("magnitude_rubric")
 
 
-# --- Source tier (for picking the best link when a story has duplicates) ---
-
-# Ordered list — when dedupe collapses N URLs for one story, slack_client picks
-# the URL whose host matches earliest in this tuple. Exact host match preferred;
-# falls back to suffix match (so www.bloomberg.com matches bloomberg.com).
-# If nothing matches, the first signal URL is used.
-SOURCE_TIER_1: tuple[str, ...] = (
-    # US — finance / business / general
-    "bloomberg.com",
-    "reuters.com",
-    "wsj.com",
-    "nytimes.com",
-    "ft.com",
-    "axios.com",
-    "cnbc.com",
-    "forbes.com",
-    # US — healthcare-specific
-    "statnews.com",
-    "endpts.com",
-    "biopharmadive.com",
-    "modernhealthcare.com",
-    "fiercehealthcare.com",
-    "fiercebiotech.com",
-    "fiercepharma.com",
-    "healthcaredive.com",
-    "medcitynews.com",
-    "beckershospitalreview.com",
-    "healthcareitnews.com",
-    "healthaffairs.org",
-    # India — finance / business / general
-    "economictimes.indiatimes.com",
-    "livemint.com",
-    "business-standard.com",
-    "moneycontrol.com",
-    "thehindubusinessline.com",
-    "financialexpress.com",
-    "thehindu.com",
-    "indianexpress.com",
-    # India — healthcare-specific
-    "health.economictimes.indiatimes.com",
-    "biospectrumindia.com",
-    "expresshealthcare.in",
-    "pharmabiz.com",
-    # India — tech / startup news
-    "inc42.com",
-    "yourstory.com",
-    "entrackr.com",
-    "the-ken.com",
-)
-
-
 # --- Validation ---------------------------------------------------------
 
 REQUIRED_ENV = (
@@ -343,5 +172,10 @@ def check_env() -> None:
         raise RuntimeError(f"Keywords file not found: {KEYWORDS_XLSX}")
     if not VOICES_XLSX.exists():
         raise RuntimeError(f"Voices file not found: {VOICES_XLSX}")
+    if not TUNING_XLSX.exists():
+        raise RuntimeError(
+            f"Tuning file not found: {TUNING_XLSX}. Run "
+            f"`python scripts/build_default_tuning_xlsx.py` to bootstrap defaults."
+        )
     if not CONTENT_DIR.is_dir():
         raise RuntimeError(f"Content dir not found: {CONTENT_DIR}")

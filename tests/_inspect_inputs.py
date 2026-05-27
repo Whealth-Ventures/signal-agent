@@ -1,4 +1,4 @@
-"""One-off inspection of inputs/ and content/. Not part of runtime — kept under tests/ for reproducibility."""
+"""One-off inspection of inputs/. Not part of runtime — kept under tests/ for reproducibility."""
 from pathlib import Path
 from openpyxl import load_workbook
 
@@ -25,7 +25,7 @@ def excel_summary(path: Path) -> None:
 
 
 def content_summary(root: Path) -> None:
-    print("\n=== content/ ===")
+    print("\n=== inputs/content/ ===")
     for sub in sorted(p for p in root.iterdir() if p.is_dir()):
         files = [f for f in sub.rglob('*') if f.is_file() and not f.name.startswith('.')]
         ext_counts: dict[str, int] = {}
@@ -37,4 +37,5 @@ def content_summary(root: Path) -> None:
 if __name__ == '__main__':
     excel_summary(ROOT / 'inputs' / 'keywords.xlsx')
     excel_summary(ROOT / 'inputs' / 'voices.xlsx')
-    content_summary(ROOT / 'content')
+    excel_summary(ROOT / 'inputs' / 'tuning.xlsx')
+    content_summary(ROOT / 'inputs' / 'content')

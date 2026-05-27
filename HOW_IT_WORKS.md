@@ -1,221 +1,140 @@
-# Signal Agent — How It Works (Plain English)
+# How Signal Agent Works
 
-A daily news digest robot for healthcare investors. Every morning at 10am IST it
-emails you the 5 most important healthcare stories of the last 24 hours. This
-document explains what happens between "cron fires" and "email lands in inbox",
-without assuming you've read the code.
+A robot that reads healthcare news every morning and posts a briefing to Slack — the kind of briefing a junior analyst might write, but done by 10am every day, automatically.
 
----
-
-## The big picture in one paragraph
-
-You hand the agent two spreadsheets — one with ~2,280 keywords (e.g. "telehealth
-reimbursement", "Ayushman Bharat", "GLP-1 manufacturing") and one with ~225
-trusted voices (people, newsletters, company pages). The agent groups those
-keywords into ~30 thematic searches, asks Perplexity (an AI search engine) to
-find news matching each theme from the last 24 hours, also pulls RSS feeds from
-the trusted publications, dedupes everything, scores each story for how well it
-matches your firm's existing writing (the `content/` folder is your "taste
-profile"), and finally asks Perplexity again — this time using its reasoning
-model — to pick the best 5. Those 5 get rendered into an HTML email and sent.
+This document is the orientation: what controls what, how the agent works in plain English, and where to look when something seems off. No code knowledge required.
 
 ---
 
-## The 4-layer pipeline
+## Where everything lives (and what you can change)
 
-Each layer hands work to the next. They're deliberately separate: if the email
-ever looks bad, you can usually point at exactly one layer that's misbehaving.
+The repo has a few top-level folders. You only ever edit two of them.
 
-### Layer 1 — Query Planner (`src/query_planner.py`)
+### `inputs/` — everything you can change
 
-**Input:** `inputs/keywords.xlsx` and `inputs/voices.xlsx`.
-**Output:** ~30 "query plans" — each one a single, well-phrased question to ask
-Perplexity.
+This is your control room. Open `inputs/` and you'll see four things:
 
-Why not ask one question per keyword? 2,280 calls/day would cost ~$15+ and hit
-rate limits. So the planner clusters keywords by **(geography, bucket)** —
-e.g. all "India + Care Delivery Models" keywords become one query that names
-the bucket and lists 3 sample keywords per sub-bucket. It also generates one
-"voice-anchored" query per geography that names every Tier-1 voice by name —
-because Tier-1 voices mostly post on LinkedIn/X where RSS doesn't reach.
-
-This layer is **fully deterministic** — same Excel in, same plans out, byte for
-byte. No LLM here. That's intentional: the planning logic is auditable.
-
-### Layer 2 — Fetchers (Perplexity + RSS)
-
-**Perplexity** (`src/perplexity_client.py`) — for each query plan, calls
-Perplexity's `sonar-pro` model with `recency=day`. Perplexity searches the open
-web in real time, reads the results, and returns a JSON list of stories
-(title, URL, published date, 2-sentence summary). The client enforces a
-**60 calls/day budget** (with a 2-call headroom kept aside for the ranker) and
-a 0.5-second floor between calls so we don't get rate-limited.
-
-**RSS** (`src/rss_fetcher.py`) — pulls the named newsletters from the voices
-spreadsheet directly. This catches stories from sources we already trust,
-without burning Perplexity calls on them.
-
-Everything from both fetchers gets stored as a "Signal" in SQLite
-(`data/db/agent.db`).
-
-### Layer 3 — Dedupe + Score (`src/scorer.py`)
-
-Two jobs:
-
-1. **Dedupe.** The same story often shows up in 5 different feeds with
-   different headlines. The scorer embeds each signal (using OpenAI's
-   `text-embedding-3-small`), measures cosine similarity between embeddings,
-   and any pair scoring above **0.85** is treated as the same story. Duplicates
-   collapse into a single "Story" record. URLs already sent in the last
-   **7 days** are dropped entirely (no story repeats within a week).
-
-2. **Relevance score.** Each story gets compared against a vector index of
-   your firm's `content/` folder (your published articles, blog posts,
-   interviews, LinkedIn posts) — this is your "taste profile". Cosine
-   similarity to the firm's content is the base score. Then deterministic
-   **boosters** add or subtract:
-
-   - +0.10 if a Tier-1 voice authored or is named in the story
-   - +0.05 for funding / M&A / regulatory language
-   - +0.03 for product launches or leadership moves
-   - −0.10 for listicles ("10 Best…")
-   - −0.05 for opinion/perspective columns
-
-   The result is one number per story between roughly 0 and 1.
-
-The corpus only gets embedded once — on first run, the agent indexes your
-`content/` folder into a local Chroma vector DB at `data/vector_store/`. After
-that it's reused.
-
-### Layer 4 — Ranker (`src/ranker.py`)
-
-Takes the **top 25** scored stories, hands their titles + summaries to
-Perplexity's `sonar-reasoning-pro` model, and asks: "pick the 5 most
-investor-relevant for a healthcare VC, and explain why in ≤280 chars each."
-This is the only LLM call that does subjective judgment. If the model fails or
-returns garbage, the agent falls back to "just take the top 5 by score" so the
-pipeline never blocks on the ranker.
-
-**Why Perplexity again instead of Claude?** To keep vendor count to one. You
-already pay Perplexity for the fetchers; the ranker is a marginal cost
-(~$0.02/day).
-
-### Output — Email (`src/emailer.py`)
-
-The 5 ranked stories get rendered into an HTML email via a Jinja2 template,
-then sent via SMTP. **Before sending**, every URL is HEAD-checked — if a URL
-404s or times out, that story is dropped from the email rather than shipping a
-broken link. The digest is also recorded in SQLite so tomorrow's run knows
-"don't repeat these".
-
----
-
-## What the run on 2026-05-04 actually did (spoiler: it was truncated)
-
-Looking at `data/logs/pipeline_2026-05-04.jsonl`, the most recent successful
-end-to-end run had these characteristics:
-
-| Field | Value | What it means |
+| What | What it controls | Edit how |
 |---|---|---|
-| `plans_total` | **3** | Only 3 of ~30 query plans ran |
-| `signals_collected` | 7 | Perplexity returned 7 stories |
-| `rss_fetch_skipped` | true | RSS was skipped entirely |
-| `calls_used_today` | 10 | Used 10 of 60 Perplexity calls |
-| `ranked_count` | 5 | Top-5 picked |
-| `stories_sent` | 4 | One was dropped at the URL-check step |
+| `inputs/keywords.xlsx` | The topics the agent searches for (~2,240 keywords organized into themes). | Open in Excel, edit rows, save. |
+| `inputs/voices.xlsx` | The people and publications the agent trusts. Marking someone as "Tier 1" makes their posts count more. | Open in Excel, edit rows, save. |
+| **`inputs/tuning.xlsx`** | **Every dial and threshold the agent uses.** How aggressive should dedup be? How many stories to show? What weight to give a funding mention? Four sheets, one row per knob, plain English descriptions. | Open in Excel, change a cell, save. |
+| `inputs/content/` | The firm's own writing — articles, podcasts, LinkedIn posts. The agent reads this to figure out what kinds of stories "sound like yours". Add a new article and the agent's taste sharpens. | Drag a markdown file into the right subfolder. |
 
-**This was a truncated run.** Specifically, it was launched with
-`--max-plans 3 --skip-rss` (probably for fast iteration / testing). A full run
-would have:
+### `prompts/` — the agent's instructions to the AI
 
-- Run **all ~30 query plans** (every (geo, bucket) combo + Tier-1 voice queries)
-- Pulled **all RSS feeds** from the newsletters tab (~60 sources)
-- Probably collected 100–300 raw signals before dedupe
-- Cost roughly $1–2 instead of ~$0.05
+The agent sends two written instructions to the AI on every run. They live as plain markdown files.
 
-To get a full run, just run it without flags: `python src/main.py`.
-
----
-
-## Knobs you can turn to improve quality
-
-Quality has three axes: **breadth** (how much we look at), **precision**
-(how aggressively we filter junk), and **judgment** (which 5 we pick). Here's
-what to tweak for each.
-
-### To increase breadth (look at more)
-
-| Knob | File | Default | Meaning |
-|---|---|---|---|
-| `MAX_PERPLEXITY_CALLS_PER_DAY` | `src/config.py` | 60 | Hard ceiling. Raise to 100 if you want more queries (and don't mind paying ~$1.50 more/day) |
-| `KEYWORDS_PER_SUB_BUCKET_IN_PROMPT` | `src/query_planner.py` | 3 | How many sample keywords get listed in each Perplexity prompt. Raising to 5–7 gives Perplexity more lexical hooks |
-| `PERPLEXITY_RECENCY` | `src/config.py` | `"day"` | Set to `"week"` to widen the time window (useful on Mondays / after holidays) |
-| `inputs/keywords.xlsx` | — | ~2,280 keywords | Add new sub-buckets / keywords here to expand the search universe |
-| `inputs/voices.xlsx` | — | ~225 sources | Add tier-1 voices / newsletters; the planner will pick them up automatically |
-| `content/` folder | — | 58 files | More firm-published content = a sharper "taste profile" for relevance scoring |
-
-### To improve precision (filter junk harder)
-
-| Knob | File | Default | Meaning |
-|---|---|---|---|
-| `SIMILARITY_THRESHOLD` | `src/scorer.py` | 0.85 | Lower (e.g. 0.78) = collapse more "near-duplicates" together. Higher = treat slight variants as separate |
-| `BOOSTERS` table | `src/scorer.py` | see file | Edit these to reweight what matters — e.g. bump `funding` to +0.10 if you only care about deals; make `listicle` more punitive |
-| `DEDUPE_LOOKBACK_DAYS` | `src/config.py` | 7 | Increase to 14 to reduce repeats further (at the cost of slow-burn stories getting suppressed) |
-
-### To improve judgment (smarter top-5 selection)
-
-| Knob | File | Default | Meaning |
-|---|---|---|---|
-| `CANDIDATE_POOL_SIZE` | `src/ranker.py` | 25 | How many top-scored stories the ranker chooses from. Raise to 40 if you suspect good stories are getting cut at the score stage |
-| `PERPLEXITY_MODEL_RANK` | `src/config.py` | `sonar-reasoning-pro` | Already the strongest reasoning model in Perplexity's lineup. No upgrade available — your lever here is the ranker prompt itself |
-| `_SYSTEM_PROMPT` (ranker) | `src/ranker.py` | see file | The "what makes a good story" instructions sent to the ranker. Edit this to teach the ranker your firm's specific lens (e.g. "we care more about India scale-ups than US biotech") |
-| `SUMMARY_MAX_CHARS_IN_PROMPT` | `src/ranker.py` | 200 | Each story's summary is truncated to 200 chars before going to the ranker. Raise to 400 if you think the ranker is missing nuance |
-| `DIGEST_TOP_N` | `src/config.py` | 5 | Change the email length |
-
-### Quick recipes
-
-- **Email feels too India-light:** add more keywords to the US/Cross-Cutting tabs
-  in `keywords.xlsx`, or duplicate certain US buckets to weight them more
-  heavily in the plan list.
-- **Email keeps recommending listicles:** make `BOOSTERS["listicle"]` more
-  punitive (e.g. `-0.20`).
-- **Email misses big stories you knew about:** the source probably wasn't in
-  RSS and the keyword cluster missed it. Add the source to `voices.xlsx`
-  newsletters tab.
-- **Stories feel "generically newsy" not "investor-relevant":** the ranker
-  prompt is the lever — edit `_SYSTEM_PROMPT` in `src/ranker.py` to add specific
-  criteria ("prioritize stage and check size", "downweight clinical-trial
-  readouts unless phase 3").
-- **Want to test a change without sending email:** add `--dry-run`. The HTML
-  digest gets written to `data/logs/dry_run_digest_<date>.html` and nothing
-  hits SMTP or the digest table.
-
-### CLI flags (for ad-hoc runs)
-
-| Flag | Effect |
+| What | What it controls |
 |---|---|
-| `--max-plans N` | Run only the first N query plans. Used for fast tests. **This is the flag that truncated the recent run** |
-| `--skip-rss` | Skip the RSS fetch entirely |
-| `--skip-content-index` | Skip the first-run check that indexes `content/` |
-| `--skip-url-validation` | Skip the HEAD-check on every story URL before email |
-| `--dry-run` | Render HTML digest to disk, don't send email or persist digest record |
+| `prompts/ranker_system.md` | The agent's "voice" when it asks the AI to pick stories. Edit this to change tone, framing, or what kind of editor you want the AI to act as. |
+| `prompts/magnitude_rubric.md` | The cheat-sheet the AI uses to decide which stories are big news, noteworthy, minor, or skip. Move "FDA approval" from "biggest news" to "noteworthy" and FDA stories will get less prominence. |
+
+### The rest (don't edit unless you're changing how the agent works)
+
+- `src/` — the code.
+- `data/` — the agent's working files. SQLite database of every story it's ever seen, a "math fingerprint" cache of your content, and one log file per module per day. **Logs in `data/logs/` are your first stop when something looks off.**
+- `scripts/` — utility scripts. Most useful: `build_default_tuning_xlsx.py` regenerates `inputs/tuning.xlsx` if it gets into a bad state.
+- `docs/` — these files, plus:
+  - `docs/EDITING.md` — a quick "I want to change X, where do I go?" index
+  - `docs/TUNING.md` — knob-by-knob detail for `inputs/tuning.xlsx`
+  - `docs/scheduling.md` — how the 10am IST cron is set up
+- `tests/` — automated tests for the code.
 
 ---
 
-## Where things live on disk
+## How the agent works, in 4 steps
 
-```
-inputs/
-  keywords.xlsx        ← what we search for
-  voices.xlsx          ← who we trust
-content/               ← your firm's writing — the "taste profile"
-src/                   ← the 10 modules
-data/
-  db/agent.db          ← SQLite: signals, stories, digests
-  vector_store/        ← Chroma: embedded content/ corpus (built once)
-  logs/                ← One JSONL per module per day, plus dry-run HTML files
-.env                   ← API keys + SMTP creds
-```
+### Step 1 — Plan the searches
 
-If something goes wrong, the logs in `data/logs/<module>_<date>.jsonl` are
-your first stop — every API call, every signal, every cost is recorded there.
+The agent reads your keywords (~2,240 of them) and groups them into about 34 search questions. Why 34 and not 2,240? Each search costs money. Asking 2,240 separate questions would burn the daily budget in minutes. So the agent clusters related keywords into themes — "everything India + venture capital" becomes one search, "everything US + FDA news" becomes another.
+
+There are four kinds of searches:
+
+- **8 priority categories** — Venture & IPO, PE & Strategics, Hospital M&A, MSO Roll-ups, FDA & Regulatory, Phase 3 / Hot Therapeutic Areas, US Medicare, AI in Healthcare. Each runs every day. Some are India-focused, some US-focused, some global, depending on the category. That's ~13 search questions total.
+- **Long-tail categories** — the smaller themes that don't fit the 8 priorities. There are too many to run every day, so the agent picks 18 different ones each day on a 14-day rotation. By the end of two weeks, every long-tail theme has been covered.
+- **Named voices** — 2 searches that ask the AI: "what has [list of your Tier-1 healthcare voices] posted in the last 24 hours?" One for India, one for US.
+- **PE/VC firms** — 1 search that asks about deal news from the firms on your "New Additions" tab.
+
+That's 34 well-phrased questions ready to send out.
+
+This step is 100% deterministic — give it the same Excels and it produces the same 34 questions, every time. No AI involved here.
+
+### Step 2 — Run the searches
+
+The agent fires those 34 questions at Perplexity (an AI-powered search engine). Each question gets back a list of stories: title, link, summary. The agent runs 5 of these questions at the same time, so the whole batch finishes in roughly 30 seconds instead of several minutes.
+
+In parallel, the agent also pulls **RSS feeds** (auto-published news feeds) from the trusted publications listed in your voices spreadsheet. RSS catches stories from sources you already trust without burning the Perplexity budget on them.
+
+By the end of Step 2, the agent has 100–300 raw stories. Lots of duplicates, lots of noise — that's expected.
+
+### Step 3 — Dedupe and score
+
+**Dedupe first.** The same story often shows up in five outlets with different headlines ("FDA approves Alzheimer's drug" vs "Eli Lilly's Kisunla gets nod from FDA"). The agent converts each headline+summary into a "math fingerprint" and compares them. Any two stories whose fingerprints are more than 85% similar get collapsed into one. The agent also drops any story that already shipped in any digest in the last 30 days.
+
+**Then score.** For each surviving story, the agent compares its fingerprint to the firm's own writing (in `inputs/content/`). The closer the match, the higher the base score. On top of that, the agent adds bonuses and penalties:
+
+- Story mentions a Tier-1 voice from your spreadsheet: **+0.10**
+- Story is from a trusted publication you've curated: **+0.08**
+- Story mentions a firm from your "New Additions" tab: **+0.08**
+- Funding round / M&A / regulatory language: **+0.05**
+- Product launch or leadership-move language: **+0.03**
+- Looks like a listicle ("10 Best Healthcare Startups"): **−0.10**
+- Looks like an opinion column ("Opinion: Why Medicare needs reform"): **−0.05**
+
+Final score is one number per story, roughly between 0 and 1. These can all be re-weighted in `inputs/tuning.xlsx` → Boosters sheet.
+
+### Step 4 — Pick what goes in the briefing
+
+The agent sends every scored story to Perplexity's reasoning model (a stronger AI, used only once per run) along with the rubric from `prompts/magnitude_rubric.md`. The AI rates each story:
+
+- **Biggest news** (always include)
+- **Noteworthy** (include if there's room)
+- **Minor mention** (include only if a category would otherwise be empty)
+- **Skip** (drop entirely)
+
+The AI also writes a one-line headline for each story it keeps — newsroom style, max ~120 characters.
+
+The agent then assembles the Slack post:
+- The 5 highest-rated stories get pulled into a **"Today's biggest stories"** section at the top.
+- The rest go into per-category sections (Venture & IPO, PE & Strategics, etc.). Categories that have no stories are hidden.
+- Anything from voices/firms/RSS without a category goes into an **"Other healthcare news"** section at the bottom.
+
+Before posting, the agent checks every link actually works (no 404s) — broken links get dropped, not shipped. Then it posts to Slack.
+
+If the AI call in Step 4 fails for any reason, the agent falls back to "treat everything as Noteworthy, score-order within each category" — so the digest always ships, even if the smart ranking is unavailable. The post will say `(used score-based fallback...)` when this happens.
+
+---
+
+## When something looks off
+
+| What you noticed | Probably means | Where to fix it |
+|---|---|---|
+| The briefing is too India-light or too US-light | Keyword balance is uneven | `inputs/keywords.xlsx` — add or rebalance keywords with the right Geo |
+| Same story keeps appearing day after day | The 30-day "don't repeat" window is set wrong, or the similarity bar is too high | `inputs/tuning.xlsx` → Settings → `dedup_window_days` or `historical_dedup_threshold` |
+| Stories feel "generic" rather than investor-relevant | The AI's instructions are too vague | `prompts/ranker_system.md` — sharpen the criteria you care about |
+| Listicles keep slipping through | The penalty is too soft | `inputs/tuning.xlsx` → Boosters → `listicle` → make the weight more negative (e.g. -0.20) |
+| Big stories you knew about are missing | The source isn't in your trusted feeds AND the keyword cluster missed it | `inputs/voices.xlsx` → Newsletters & Publications tab — add the source |
+| Wrong category is getting too much weight | The magnitude rubric is rating it too highly | `prompts/magnitude_rubric.md` — move the relevant criteria from "biggest news" to "noteworthy" |
+| Top section feels too short / too long | The top-summary size needs adjustment | `inputs/tuning.xlsx` → Settings → `top_summary_size` (default 5) |
+| The whole briefing is too short / too long | The ceiling on total stories is too low / high | `inputs/tuning.xlsx` → Settings → `max_digest_items` (default 40) |
+| Want to test changes without polluting the Slack channel | Use a flag | `python src/main.py --test` posts with a `[TEST]` marker and doesn't write to the 30-day dedup history. `--dry-run` skips Slack entirely and writes the post to disk. |
+
+For a knob-by-knob reference of `inputs/tuning.xlsx`, see [`docs/TUNING.md`](docs/TUNING.md).
+
+For a one-page "where do I edit X?" index, see [`docs/EDITING.md`](docs/EDITING.md).
+
+---
+
+## Running it yourself
+
+| Command | What it does |
+|---|---|
+| `python src/main.py` | Full run — fetches, scores, ranks, posts to Slack |
+| `python src/main.py --test` | Same, but Slack post is marked `[TEST]` and doesn't enter the 30-day dedup history |
+| `python src/main.py --dry-run` | Skip Slack entirely; the Slack-formatted post gets written to `data/logs/dry_run_digest_<date>.json` |
+| `python src/main.py --max-plans 3` | Run only the first 3 of 34 search questions (fast iteration) |
+| `python src/main.py --skip-rss` | Skip the RSS pull (saves ~30s) |
+| `python src/main.py --skip-url-validation` | Skip the link-check before posting |
+
+If a full run takes much longer than 2–3 minutes, check `data/logs/pipeline_<date>.jsonl` for the bottleneck. Each module also writes its own daily log (e.g., `data/logs/perplexity_<date>.jsonl`) — that's where every API call, every cost, every story considered is recorded.

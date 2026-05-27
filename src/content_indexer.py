@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 import chromadb
 from openai import OpenAI
@@ -383,6 +383,41 @@ def query_similar(
             text=doc,
             distance=float(dist),
         ))
+    return out
+
+
+def query_similar_batch(
+    embeddings: list[list[float]],
+    k: int = 10,
+    *,
+    chroma_client: chromadb.api.ClientAPI | None = None,
+) -> list[list[ScoredChunk]]:
+    """One Chroma roundtrip for N query embeddings. Returns a list aligned with
+    `embeddings`: out[i] is the top-k ScoredChunk results for embeddings[i]."""
+    if not embeddings:
+        return []
+    client = chroma_client or _default_chroma_client()
+    collection = _get_or_create_collection(client)
+    res = collection.query(
+        query_embeddings=embeddings,
+        n_results=k,
+        include=["documents", "metadatas", "distances"],
+    )
+    docs_all = res.get("documents") or [[] for _ in embeddings]
+    metas_all = res.get("metadatas") or [[] for _ in embeddings]
+    dists_all = res.get("distances") or [[] for _ in embeddings]
+    out: list[list[ScoredChunk]] = []
+    for docs, metas, dists in zip(docs_all, metas_all, dists_all):
+        out.append([
+            ScoredChunk(
+                file_path=meta.get("file_path", ""),
+                subfolder=meta.get("subfolder", ""),
+                chunk_index=int(meta.get("chunk_index", 0)),
+                text=doc,
+                distance=float(dist),
+            )
+            for doc, meta, dist in zip(docs, metas, dists)
+        ])
     return out
 
 

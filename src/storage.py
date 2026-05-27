@@ -14,7 +14,6 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -300,21 +299,32 @@ def assign_signal_to_story(
     conn: sqlite3.Connection | None = None,
 ) -> None:
     with _maybe_own(conn) as c:
-        # FK enforcement requires the story to exist already.
-        cur = c.execute(
+        # SQLite enforces the FK on UPDATE (PRAGMA foreign_keys=ON is set in
+        # connect()), so a bogus story_id raises sqlite3.IntegrityError without
+        # any extra SELECT.
+        c.execute(
             "UPDATE signals SET story_id = ? WHERE id = ?",
             (story_id_, signal_id_),
         )
-        if cur.rowcount == 0:
-            return
-        # Force FK validation in case the story id is bogus.
-        c.execute(
-            "SELECT 1 FROM stories WHERE id = ?", (story_id_,)
-        ).fetchone() or _raise_fk(story_id_)
 
 
-def _raise_fk(story_id_: str) -> None:
-    raise sqlite3.IntegrityError(f"FOREIGN KEY violation: stories.id={story_id_}")
+def assign_signals_to_story(
+    rows: Iterable[tuple[str, str]],
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Bulk version of assign_signal_to_story. `rows` is an iterable of
+    (signal_id, story_id) pairs. One executemany roundtrip; FK still enforced
+    on each row, so a bogus story_id anywhere in the batch raises IntegrityError.
+    """
+    pairs = [(sid_story, sid_signal) for sid_signal, sid_story in rows]
+    if not pairs:
+        return
+    with _maybe_own(conn) as c:
+        c.executemany(
+            "UPDATE signals SET story_id = ? WHERE id = ?",
+            pairs,
+        )
 
 
 def list_stories(
