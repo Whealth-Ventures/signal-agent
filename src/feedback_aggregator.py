@@ -33,9 +33,11 @@ from tunables import load_tunables
 _POSITIVE = {"+1", "thumbsup", "heart", "fire", "white_check_mark", "100"}
 _NEGATIVE = {"-1", "thumbsdown", "x", "no_entry_sign"}
 
-# Minimums to make any proposal at all — we don't want noise from 1-2 days.
-MIN_UPVOTED_DIGESTS = 3
-MIN_DOWNVOTED_DIGESTS = 3
+# Minimums to make any proposal at all. Set to 1 so a single upvoted digest is
+# already a positive signal (more upvotes = stronger signal). The proposal math
+# is still a contrast, so at least one downvoted digest is needed to diverge against.
+MIN_UPVOTED_DIGESTS = 1
+MIN_DOWNVOTED_DIGESTS = 1
 MIN_BOOSTER_MATCHES_PER_GROUP = 5
 DIVERGENCE_THRESHOLD = 0.20   # 20 percentage points
 WEIGHT_STEP = 0.02            # how much to nudge a booster
