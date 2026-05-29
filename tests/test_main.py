@@ -206,6 +206,8 @@ class _PipelineBase(unittest.TestCase):
                 "https://hooks.slack.com/services/T000/B000/xxx",
             ),
             mock.patch.object(config, "SLACK_CHANNEL_LABEL", "#test-channel"),
+            mock.patch.object(config, "SLACK_BOT_TOKEN", ""),
+            mock.patch.object(config, "SLACK_CHANNEL_ID", ""),
         ]
         for p in self._patches:
             p.start()

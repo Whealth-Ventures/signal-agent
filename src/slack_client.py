@@ -64,6 +64,8 @@ class SlackResult:
     error: str | None = None
     blocks: list[dict] | None = None
     status_code: int | None = None
+    slack_ts: str | None = None
+    slack_channel: str | None = None
 
 
 def _make_default_http() -> httpx.Client:
@@ -316,24 +318,88 @@ async def _filter_invalid_urls_async(
 
 # --- Poster -----------------------------------------------------------
 
+_SLACK_POST_URL = "https://slack.com/api/chat.postMessage"
+
+
+def _post_via_api(
+    *,
+    h: httpx.Client,
+    bot_token: str,
+    channel_id: str,
+    text: str,
+    blocks: list[dict],
+) -> tuple[bool, int | None, str | None, str | None, str | None]:
+    """POST to chat.postMessage. Returns (ok, http_status, error, ts, channel)."""
+    try:
+        resp = h.post(
+            _SLACK_POST_URL,
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            json={"channel": channel_id, "text": text, "blocks": blocks},
+        )
+    except httpx.HTTPError as e:
+        return False, None, f"{type(e).__name__}: {e}", None, None
+
+    status = resp.status_code
+    try:
+        data = resp.json()
+    except Exception:
+        return False, status, f"HTTP {status}: non-JSON response", None, None
+
+    if status == 200 and data.get("ok"):
+        return True, status, None, data.get("ts"), data.get("channel")
+    err = data.get("error") or f"HTTP {status}"
+    return False, status, f"slack api error: {err}", None, None
+
+
+def _post_via_webhook(
+    *,
+    h: httpx.Client,
+    url: str,
+    text: str,
+    blocks: list[dict],
+) -> tuple[bool, int | None, str | None]:
+    """POST to incoming webhook. Returns (ok, http_status, error). No ts."""
+    try:
+        resp = h.post(url, json={"text": text, "blocks": blocks})
+    except httpx.HTTPError as e:
+        return False, None, f"{type(e).__name__}: {e}"
+    status = resp.status_code
+    body = (resp.text or "").strip()
+    if status == 200 and body == "ok":
+        return True, status, None
+    return False, status, f"HTTP {status}: {body[:200]}"
+
+
 def post_digest(
     ranking: RankingResult,
     *,
     digest_date: str,
     webhook_url: str | None = None,
+    bot_token: str | None = None,
+    channel_id: str | None = None,
     http: httpx.Client | None = None,
     skip_url_validation: bool = False,
     test_mode: bool = False,
 ) -> SlackResult:
     start = time.monotonic()
-    url = webhook_url if webhook_url is not None else config.SLACK_WEBHOOK_URL
     channel_label = config.SLACK_CHANNEL_LABEL
-    if not url:
+
+    # Prefer chat.postMessage when bot token + channel id are configured (gives
+    # us a message ts to join Slack reactions back to the digest). Fall back to
+    # incoming webhook otherwise.
+    bt = bot_token if bot_token is not None else config.SLACK_BOT_TOKEN
+    ch = channel_id if channel_id is not None else config.SLACK_CHANNEL_ID
+    wh = webhook_url if webhook_url is not None else config.SLACK_WEBHOOK_URL
+    use_api = bool(bt and ch)
+    if not use_api and not wh:
         return SlackResult(
             sent=False, channel_label=channel_label,
             stories_sent=0, stories_dropped_invalid_url=0,
             elapsed_seconds=round(time.monotonic() - start, 3),
-            error="SLACK_WEBHOOK_URL not configured",
+            error="No Slack transport configured (need SLACK_BOT_TOKEN+SLACK_CHANNEL_ID or SLACK_WEBHOOK_URL)",
         )
 
     own_http = http is None
@@ -344,12 +410,11 @@ def post_digest(
     status: int | None = None
     stories_sent = 0
     dropped = 0
+    slack_ts: str | None = None
+    slack_channel: str | None = None
 
     try:
         if http is None:
-            # Production path: concurrent URL validation via an AsyncClient
-            # spun up inside _filter_invalid_urls_async; the sync `h` above
-            # is reused for the single Slack POST.
             filtered, dropped = asyncio.run(_filter_invalid_urls_async(
                 ranking, skip=skip_url_validation,
             ))
@@ -364,20 +429,16 @@ def post_digest(
         )
         blocks = build_blocks(filtered, digest_date=digest_date, test_mode=test_mode)
         text_prefix = "[TEST] " if test_mode else ""
-        payload = {
-            "text": f"{text_prefix}Daily Healthcare Signal — {digest_date}",
-            "blocks": blocks,
-        }
-        try:
-            resp = h.post(url, json=payload)
-            status = resp.status_code
-            body = (resp.text or "").strip()
-            if status == 200 and body == "ok":
-                sent_ok = True
-            else:
-                error = f"HTTP {status}: {body[:200]}"
-        except httpx.HTTPError as e:
-            error = f"{type(e).__name__}: {e}"
+        text = f"{text_prefix}Daily Healthcare Signal — {digest_date}"
+
+        if use_api:
+            sent_ok, status, error, slack_ts, slack_channel = _post_via_api(
+                h=h, bot_token=bt, channel_id=ch, text=text, blocks=blocks,
+            )
+        else:
+            sent_ok, status, error = _post_via_webhook(
+                h=h, url=wh, text=text, blocks=blocks,
+            )
     finally:
         if own_http:
             h.close()
@@ -388,9 +449,12 @@ def post_digest(
         "digest_date": digest_date,
         "sent": sent_ok,
         "channel_label": channel_label,
+        "transport": "chat.postMessage" if use_api else "webhook",
         "stories_sent": stories_sent,
         "stories_dropped_invalid_url": dropped,
         "status_code": status,
+        "slack_ts": slack_ts,
+        "slack_channel": slack_channel,
         "block_count": len(blocks),
         "latency_ms": int(elapsed * 1000),
         "error": error,
@@ -405,6 +469,8 @@ def post_digest(
         error=error,
         blocks=blocks,
         status_code=status,
+        slack_ts=slack_ts,
+        slack_channel=slack_channel,
     )
 
 

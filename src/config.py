@@ -58,10 +58,17 @@ OPENAI_API_KEY = _env("OPENAI_API_KEY")
 PERPLEXITY_API_KEY = _env("PERPLEXITY_API_KEY")
 
 SLACK_WEBHOOK_URL = _env("SLACK_WEBHOOK_URL")
-# Human-readable channel label, e.g. "#healthcare-signal". Optional — used only
-# in the digests.recipients audit column and in logs; the webhook URL already
-# pins which channel actually receives the post.
+# Bot token + channel ID power the chat.postMessage path. When SLACK_BOT_TOKEN
+# is set we post via Web API (returns a message ts that lets us join Slack
+# reactions to the digest in the feedback loop). When unset we fall back to
+# SLACK_WEBHOOK_URL — same message body, but no ts capture.
+SLACK_BOT_TOKEN = _env("SLACK_BOT_TOKEN")
+SLACK_CHANNEL_ID = _env("SLACK_CHANNEL_ID")
 SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
+
+# Vercel Blob read/write token — used by the feedback puller to fetch
+# Slack-event blobs written by the admin app's receiver.
+BLOB_READ_WRITE_TOKEN = _env("BLOB_READ_WRITE_TOKEN")
 
 
 # --- Tunables (loaded from inputs/tuning.xlsx) --------------------------

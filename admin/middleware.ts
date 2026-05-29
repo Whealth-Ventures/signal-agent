@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookieString } from "@/lib/auth";
 
 // Routes that don't require auth.
-const PUBLIC_PATHS = ["/login", "/api/auth/request", "/api/auth/verify"];
+const PUBLIC_PATHS = ["/login", "/api/auth/request", "/api/auth/verify", "/api/slack/events"];
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

@@ -277,6 +277,10 @@ class _PostTestBase(unittest.TestCase):
             mock.patch.object(config, "LOGS_DIR", Path(self.tmp.name)),
             mock.patch.object(config, "SLACK_WEBHOOK_URL", WEBHOOK_URL),
             mock.patch.object(config, "SLACK_CHANNEL_LABEL", "#healthcare-signal"),
+            # Force the webhook path. New chat.postMessage path is preferred
+            # when both are set; these tests assert webhook-shape requests.
+            mock.patch.object(config, "SLACK_BOT_TOKEN", ""),
+            mock.patch.object(config, "SLACK_CHANNEL_ID", ""),
         ]
         for p in self._patches:
             p.start()
@@ -405,14 +409,18 @@ class PostFailureTest(_PostTestBase):
         self.assertFalse(result.sent)
         self.assertIn("ConnectError", result.error or "")
 
-    def test_no_webhook_url_short_circuits(self) -> None:
-        with mock.patch.object(config, "SLACK_WEBHOOK_URL", ""):
+    def test_no_transport_short_circuits(self) -> None:
+        with (
+            mock.patch.object(config, "SLACK_WEBHOOK_URL", ""),
+            mock.patch.object(config, "SLACK_BOT_TOKEN", ""),
+            mock.patch.object(config, "SLACK_CHANNEL_ID", ""),
+        ):
             result = slack_client.post_digest(
                 _mk_ranking(top_summary=[_mk_ranked("a")]),
                 digest_date="2026-05-27", skip_url_validation=True,
             )
         self.assertFalse(result.sent)
-        self.assertEqual(result.error, "SLACK_WEBHOOK_URL not configured")
+        self.assertIn("No Slack transport configured", result.error or "")
 
 
 class PostEmptyDigestTest(_PostTestBase):

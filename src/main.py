@@ -556,7 +556,12 @@ def run_pipeline(
                 skip_url_validation=skip_url_validation,
             )
             if slack_result.sent:
-                storage.mark_digest_sent(digest_id, conn=conn)
+                storage.mark_digest_sent(
+                    digest_id,
+                    slack_ts=slack_result.slack_ts,
+                    slack_channel=slack_result.slack_channel,
+                    conn=conn,
+                )
             else:
                 storage.mark_digest_failed(
                     digest_id, slack_result.error or "unknown", conn=conn,

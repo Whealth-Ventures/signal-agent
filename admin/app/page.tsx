@@ -24,7 +24,7 @@ export default async function Home() {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-10">
-        <div className="grid md:grid-cols-2 gap-4">
+        <div className="grid md:grid-cols-3 gap-4">
           <Link
             href="/tuning"
             className="block p-6 bg-white border rounded-lg hover:border-gray-400"
@@ -43,6 +43,16 @@ export default async function Home() {
             <p className="text-sm text-gray-600">
               Edit the two LLM prompts: ranker tone &amp; magnitude rubric (what
               counts as Tier S / A / B / C).
+            </p>
+          </Link>
+          <Link
+            href="/suggestions"
+            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
+          >
+            <h2 className="font-semibold mb-1">Suggestions</h2>
+            <p className="text-sm text-gray-600">
+              Review proposed tuning changes derived from Slack reactions on
+              recent digests. Accept to apply; reject to archive.
             </p>
           </Link>
         </div>

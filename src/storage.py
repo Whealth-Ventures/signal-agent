@@ -68,10 +68,14 @@ _SCHEMA_SQL = [
         sent_at TEXT,
         status TEXT NOT NULL,
         recipients TEXT NOT NULL,
-        error TEXT
+        error TEXT,
+        slack_ts TEXT,
+        slack_channel TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_digests_sent_at ON digests(sent_at)",
+    # idx_digests_slack_ts is created in _migrate() *after* the column is added
+    # so this works on pre-existing DBs that don't yet have slack_ts.
     """
     CREATE TABLE IF NOT EXISTS digest_stories (
         digest_id TEXT NOT NULL REFERENCES digests(id),
@@ -80,6 +84,28 @@ _SCHEMA_SQL = [
         reasoning TEXT,
         domain TEXT,
         PRIMARY KEY (digest_id, story_id)
+    )
+    """,
+    # Phase 2 feedback loop: events pulled from Vercel Blob receiver.
+    """
+    CREATE TABLE IF NOT EXISTS feedback (
+        event_id TEXT PRIMARY KEY,
+        received_at TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        slack_user TEXT,
+        reaction TEXT,
+        slack_ts TEXT,
+        slack_channel TEXT,
+        digest_id TEXT REFERENCES digests(id),
+        raw_json TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_feedback_digest_id ON feedback(digest_id)",
+    "CREATE INDEX IF NOT EXISTS idx_feedback_slack_ts  ON feedback(slack_ts)",
+    """
+    CREATE TABLE IF NOT EXISTS feedback_cursor (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_received_at TEXT NOT NULL
     )
     """,
 ]
@@ -100,12 +126,23 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE stories ADD COLUMN geo TEXT")
     if "embedding" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN embedding BLOB")
+
+    cur = c.execute("PRAGMA table_info(digests)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "slack_ts" not in cols:
+        c.execute("ALTER TABLE digests ADD COLUMN slack_ts TEXT")
+    if "slack_channel" not in cols:
+        c.execute("ALTER TABLE digests ADD COLUMN slack_channel TEXT")
+
     # Create indexes for migration-added columns AFTER the columns exist.
     # Idempotent so it's fine to also run on fresh DBs where CREATE TABLE
     # already produced the column.
     c.execute(
         "CREATE INDEX IF NOT EXISTS idx_stories_priority_bucket "
         "ON stories(priority_bucket)"
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_digests_slack_ts ON digests(slack_ts)"
     )
 
 
@@ -395,13 +432,18 @@ def mark_digest_sent(
     digest_id: str,
     sent_at: datetime | None = None,
     *,
+    slack_ts: str | None = None,
+    slack_channel: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> None:
     sent = sent_at or _utcnow()
     with _maybe_own(conn) as c:
         c.execute(
-            "UPDATE digests SET status='sent', sent_at=?, error=NULL WHERE id=?",
-            (_iso(sent), digest_id),
+            "UPDATE digests SET status='sent', sent_at=?, error=NULL, "
+            "slack_ts=COALESCE(?, slack_ts), "
+            "slack_channel=COALESCE(?, slack_channel) "
+            "WHERE id=?",
+            (_iso(sent), slack_ts, slack_channel, digest_id),
         )
 
 
