@@ -29,6 +29,7 @@ from typing import Any, Literal, Protocol
 import config
 import storage
 from models import Story
+from topicality import is_healthcare
 from perplexity_client import (
     ChatResponse,
     PerplexityCallFailed,
@@ -371,7 +372,7 @@ def rank_stories(
     max_total: int = config.MAX_DIGEST_ITEMS,
     top_summary_size: int = config.TOP_SUMMARY_SIZE,
     min_score: float = MIN_CANDIDATE_SCORE,
-    candidate_pool_size: int = 200,
+    candidate_pool_size: int = 60,
     recent_sent_window_days: int = RECENT_SENT_WINDOW_DAYS,
     conn: sqlite3.Connection | None = None,
     client: _RankerClient | None = None,
@@ -419,6 +420,27 @@ def rank_stories(
 
     decisions, parse_fallback = parse_ranked(response_text, stories_by_id)
     used_fallback = bool(call_error) or parse_fallback
+
+    if used_fallback:
+        # The LLM topicality gate never ran, and relevance_score can't stand in
+        # for topicality (the content corpus rewards VC/funding language, not
+        # healthcare). Apply the deterministic healthcare lexicon so non-
+        # healthcare stories can't ship in this degraded path. See topicality.py.
+        dropped_non_healthcare = 0
+        filtered: dict[str, list[Story]] = {}
+        for key, sts in grouped.items():
+            keep = [
+                s for s in sts
+                if is_healthcare(f"{s.canonical_title} {s.canonical_summary or ''}")
+            ]
+            dropped_non_healthcare += len(sts) - len(keep)
+            filtered[key] = keep
+        grouped = filtered
+        _log({
+            "step": "fallback_topicality_filter",
+            "dropped_non_healthcare": dropped_non_healthcare,
+            "reason": call_error or "unparseable_ranker_output",
+        })
 
     by_priority, other = _select(grouped, decisions, max_total)
     top = _top_summary(by_priority, other, top_summary_size)

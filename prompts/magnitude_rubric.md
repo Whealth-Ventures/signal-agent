@@ -1,3 +1,13 @@
+TOPICALITY GATE — apply this FIRST, before any tiering:
+  - Every story MUST be about healthcare, health, medicine, life sciences, biotech,
+    pharma, medical devices/diagnostics, digital health, or health insurance/policy.
+  - If a story is about a non-healthcare company or sector — general fintech, lending,
+    payments/UPI, consumer/D2C, food & beverage, retail, EVs, edtech, generic AI/SaaS,
+    banking — assign Tier C (DROP), no matter how large the deal or how big the news.
+  - The healthcare angle must be in the story itself, not merely in the investor. A
+    sector-agnostic VC/PE fund raising, closing a fund, or buying/exiting a
+    NON-healthcare company is Tier C. Only its healthcare deals count.
+
 TIER S — must include (at least one per category if any present):
   - FDA / CDSCO / EMA approval, rejection, or major label change
   - Phase 3 trial readout (positive or negative)

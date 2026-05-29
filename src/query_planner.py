@@ -396,11 +396,14 @@ _VOICE_PROMPT_TEMPLATE = (
 )
 
 _FIRM_PROMPT_TEMPLATE = (
-    "Deal news, portfolio announcements, or fund actions from the last 24 hours involving "
-    "these PE/VC firms active in Indian healthcare: {firms}.\n"
-    "Surface: new investments, exits, portfolio company news (funding rounds, M&A, IPO), "
-    "fund launches, leadership moves at the firms. Skip generic market commentary not tied "
-    "to a named firm above.\n"
+    "Healthcare deal news, portfolio announcements, or fund actions from the last 24 hours "
+    "involving these PE/VC firms active in Indian healthcare: {firms}.\n"
+    "Surface ONLY healthcare / health-tech / life-sciences items: new healthcare investments, "
+    "exits from healthcare companies, healthcare portfolio-company news (funding rounds, M&A, "
+    "IPO), healthcare-fund launches, leadership moves at the firms. Several of these are "
+    "sector-agnostic funds — IGNORE their fintech, payments, consumer/D2C, retail, EV, edtech, "
+    "and other non-healthcare portfolio news. Skip generic market commentary not tied to a "
+    "named firm above.\n"
     "Return ONLY a JSON object (no markdown fences, no preamble):\n"
     "{{\n"
     '  "stories": [\n'
