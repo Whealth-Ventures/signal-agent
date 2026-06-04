@@ -120,6 +120,24 @@ class StoryUpsertTest(_DBTestBase):
         c = self.conn.execute("SELECT count(*) AS c FROM stories").fetchone()["c"]
         self.assertEqual(c, 1)
 
+    def test_bucket_round_trips(self) -> None:
+        url = "https://x.example/bucketed"
+        s = Story(
+            id=story_id(url),
+            canonical_url=url,
+            canonical_title="Bucketed story",
+            canonical_summary="s",
+            published_at=_utcnow(),
+            relevance_score=0.6,
+            priority_bucket=None,
+            bucket="Funding & Deals",
+        )
+        storage.upsert_story(s, conn=self.conn)
+        self.conn.commit()
+        got = storage.list_stories(min_score=0.0, conn=self.conn)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].bucket, "Funding & Deals")
+
 
 class AssignSignalTest(_DBTestBase):
     def test_assign_unscored_now_excluded(self) -> None:

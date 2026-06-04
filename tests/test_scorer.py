@@ -126,6 +126,26 @@ class PickCanonicalTest(unittest.TestCase):
         self.assertEqual(scorer.pick_canonical([a, b]).source, "A")
 
 
+class PickBucketTest(unittest.TestCase):
+    def _sig(self, slug: str, bucket: str | None) -> Signal:
+        raw = {"bucket": bucket} if bucket is not None else {}
+        return Signal(source="X", source_type="perplexity", title="t",
+                      url=f"https://e.example/{slug}", published_at=_utcnow(),
+                      summary="s", raw=raw)
+
+    def test_most_common_bucket_wins(self) -> None:
+        sigs = [
+            self._sig("a", "Funding & Deals"),
+            self._sig("b", "Funding & Deals"),
+            self._sig("c", "Digital Health"),
+        ]
+        self.assertEqual(scorer.pick_bucket(sigs), "Funding & Deals")
+
+    def test_none_when_no_bucket(self) -> None:
+        sigs = [self._sig("a", None), self._sig("b", None)]
+        self.assertIsNone(scorer.pick_bucket(sigs))
+
+
 class ScoreStoryTest(unittest.TestCase):
     def test_clamps_to_one(self) -> None:
         chunks = [ScoredChunk(file_path="x", subfolder="y", chunk_index=0,

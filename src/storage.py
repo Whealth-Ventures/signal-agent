@@ -36,6 +36,7 @@ _SCHEMA_SQL = [
         created_at TEXT NOT NULL,
         priority_bucket TEXT,
         geo TEXT,
+        bucket TEXT,
         embedding BLOB
     )
     """,
@@ -124,6 +125,8 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE stories ADD COLUMN priority_bucket TEXT")
     if "geo" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN geo TEXT")
+    if "bucket" not in cols:
+        c.execute("ALTER TABLE stories ADD COLUMN bucket TEXT")
     if "embedding" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN embedding BLOB")
 
@@ -229,6 +232,7 @@ def _story_from_row(row: sqlite3.Row) -> Story:
     keys = row.keys()
     pb = row["priority_bucket"] if "priority_bucket" in keys else None
     geo = row["geo"] if "geo" in keys else None
+    bucket = row["bucket"] if "bucket" in keys else None
     return Story(
         id=row["id"],
         canonical_url=row["canonical_url"],
@@ -239,6 +243,7 @@ def _story_from_row(row: sqlite3.Row) -> Story:
         signal_ids=(),  # populated by callers if they need it
         priority_bucket=pb,
         geo=geo,
+        bucket=bucket,
     )
 
 
@@ -309,8 +314,8 @@ def upsert_story(
             """INSERT INTO stories
                (id, canonical_url, canonical_title, canonical_summary,
                 published_at, relevance_score, created_at, priority_bucket,
-                geo, embedding)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                geo, bucket, embedding)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  canonical_url     = excluded.canonical_url,
                  canonical_title   = excluded.canonical_title,
@@ -319,12 +324,13 @@ def upsert_story(
                  relevance_score   = excluded.relevance_score,
                  priority_bucket   = excluded.priority_bucket,
                  geo               = excluded.geo,
+                 bucket            = excluded.bucket,
                  embedding         = COALESCE(excluded.embedding, stories.embedding)""",
             (
                 story.id, story.canonical_url, story.canonical_title,
                 story.canonical_summary, _iso(story.published_at),
                 story.relevance_score, _iso(_utcnow()),
-                story.priority_bucket, story.geo, emb_blob,
+                story.priority_bucket, story.geo, story.bucket, emb_blob,
             ),
         )
 

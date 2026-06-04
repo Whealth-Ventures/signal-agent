@@ -32,6 +32,7 @@ def _mk_story(
     *,
     priority_bucket: str | None = None,
     geo: str | None = None,
+    bucket: str | None = None,
 ) -> Story:
     url = f"https://e.example/{slug}"
     return Story(
@@ -43,6 +44,7 @@ def _mk_story(
         relevance_score=0.7,
         priority_bucket=priority_bucket,
         geo=geo,
+        bucket=bucket,
     )
 
 
@@ -53,9 +55,10 @@ def _mk_ranked(
     one_liner: str = "",
     priority_bucket: str | None = None,
     geo: str | None = None,
+    bucket: str | None = None,
 ) -> RankedStory:
     return RankedStory(
-        story=_mk_story(slug, priority_bucket=priority_bucket, geo=geo),
+        story=_mk_story(slug, priority_bucket=priority_bucket, geo=geo, bucket=bucket),
         tier=tier,
         one_liner=one_liner or f"One-liner for {slug}",
     )
@@ -229,6 +232,57 @@ class BuildBlocksTest(unittest.TestCase):
         # "Other healthcare news" should be the last section
         self.assertIn("Other healthcare news", section_texts[-1])
         self.assertIn("long-tail story", section_texts[-1])
+
+    def test_other_subgrouped_by_bucket(self) -> None:
+        ranking = _mk_ranking(
+            by_priority={"venture_ipo": [_mk_ranked("a")]},
+            other=[
+                _mk_ranked("o1", bucket="Funding & Deals", one_liner="deal one"),
+                _mk_ranked("o2", bucket="Funding & Deals", one_liner="deal two"),
+                _mk_ranked("o3", bucket="Digital Health", one_liner="digital one"),
+            ],
+        )
+        blocks = slack_client.build_blocks(ranking, digest_date="2026-05-27")
+        section_texts = [
+            b["text"]["text"] for b in blocks if b["type"] == "section"
+        ]
+        flat = "\n".join(section_texts)
+        # Parent header + a labelled sub-section per bucket. The '&' is escaped
+        # to '&amp;' by the mrkdwn escaper.
+        self.assertIn("Other healthcare news", flat)
+        self.assertIn("*Funding &amp; Deals* (2)", flat)
+        self.assertIn("*Digital Health* (1)", flat)
+        # Larger bucket comes before the smaller one.
+        self.assertLess(flat.index("Funding"), flat.index("Digital Health"))
+
+    def test_other_no_bucket_renders_flat(self) -> None:
+        # No bucket on any story → single group → flat list, no sub-headers.
+        ranking = _mk_ranking(
+            by_priority={"venture_ipo": [_mk_ranked("a")]},
+            other=[_mk_ranked("z", one_liner="long-tail story")],
+        )
+        blocks = slack_client.build_blocks(ranking, digest_date="2026-05-27")
+        section_texts = [
+            b["text"]["text"] for b in blocks if b["type"] == "section"
+        ]
+        # Header and bullet live together in the last section (unchanged behaviour).
+        self.assertIn("Other healthcare news", section_texts[-1])
+        self.assertIn("long-tail story", section_texts[-1])
+
+    def test_no_double_divider_when_priorities_empty(self) -> None:
+        # Top summary + Other but no priority sections → must not emit two
+        # consecutive dividers between them.
+        ranking = _mk_ranking(
+            top_summary=[_mk_ranked("t", geo="US")],
+            other=[_mk_ranked("z", one_liner="long-tail story")],
+        )
+        blocks = slack_client.build_blocks(ranking, digest_date="2026-05-27")
+        types = [b["type"] for b in blocks]
+        for i in range(len(types) - 1):
+            self.assertFalse(
+                types[i] == "divider" and types[i + 1] == "divider",
+                f"two consecutive dividers at index {i}: {types}",
+            )
 
     def test_empty_digest_renders_no_stories_message(self) -> None:
         ranking = _mk_ranking()

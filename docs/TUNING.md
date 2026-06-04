@@ -33,7 +33,8 @@ All grouped by purpose below. Defaults shown. To change a value: open `inputs/tu
 - `daily_budget_usd = 3.0` — soft budget reference, currently used only for logging.
 
 ### Digest shape
-- `max_digest_items = 40` — sanity ceiling on total ranked stories. Typical days land 15–25.
+- `max_digest_items = 22` — ceiling on total ranked stories. With `target_digest_min` as the floor, most days land in a tight band just under this.
+- `target_digest_min = 18` — floor on total ranked stories. If the normal keep-all-S / keep-A selection lands below this, the ranker backfills with the best remaining Tier-B stories (highest tier→score first, across every category including "Other") until the floor is hit or candidates run out. This is what keeps slow news days from collapsing to ~10 stories. Tier-C is never backfilled, so quality holds. Set to `0` to disable the floor and get pure threshold behaviour. Keep it below `max_digest_items`.
 - `top_summary_size = 5` — count of stories promoted into the "Today's biggest stories" section at the top of the Slack post.
 
 ### Dedup

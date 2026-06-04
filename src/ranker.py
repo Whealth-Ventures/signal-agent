@@ -11,6 +11,8 @@ from config.MAGNITUDE_RUBRIC, and assembles a digest with:
 
 Selection rules: keep all Tier-S, keep Tier-A if room (subject to MAX_DIGEST_ITEMS),
 keep Tier-B only when a priority category would otherwise be empty, drop Tier-C.
+If that lands below TARGET_DIGEST_MIN, backfill with the best leftover Tier-B
+stories (across all categories) so slow news days aren't thin.
 
 If the LLM call fails or its output can't be parsed, falls back to score-order
 inside each category and surfaces used_fallback=True to the caller.
@@ -259,24 +261,38 @@ def _select(
     grouped: dict[str, list[Story]],
     decisions: dict[str, tuple[Tier, str]],
     max_total: int,
+    target_min: int = 0,
 ) -> tuple[dict[str, list[RankedStory]], list[RankedStory]]:
     """Apply the keep-S / keep-A-if-room / B-only-if-empty rules to each
-    category. Returns (priority_groups_by_key, other_list).
+    category, then backfill toward `target_min` with the best leftover stories
+    so slow news days aren't thin. Returns (priority_groups_by_key, other_list).
+
+    Selection order:
+      1. Keep all Tier-S, then Tier-A up to the global cap (max_total).
+      2. For any priority category still empty, keep a single Tier-B so the
+         section doesn't disappear ("Other" is exempt — empty Other just hides).
+      3. If the running total is still below `target_min`, backfill from the
+         leftover Tier-B/overflow-A pool (best tier→score first, across all
+         categories including "Other") until the floor or the cap is reached.
+
+    Tier-C is never selected (dropped in `_ordered_within_category`), so the
+    floor only ever pulls in genuinely-ranked stories. `target_min=0` disables
+    the backfill, giving the original pure-threshold behaviour.
 
     Note: the top_summary pull-out happens AFTER this — selected items stay
     in their categories here.
     """
-    by_priority: dict[str, list[RankedStory]] = {}
-    other: list[RankedStory] = []
+    chosen_by_key: dict[str, list[tuple[Story, Tier, str]]] = {}
+    bench: list[tuple[str, tuple[Story, Tier, str]]] = []  # (key, tup) backfill pool
     total = 0
 
     for key, stories in grouped.items():
         ordered = _ordered_within_category(stories, decisions)
-        if not ordered:
-            continue
-
-        # Pass 1: take all S, then A up to the global cap.
         chosen: list[tuple[Story, Tier, str]] = []
+        rest: list[tuple[Story, Tier, str]] = []
+
+        # Pass 1: take all S, then A up to the global cap. Everything else
+        # (Tier-B, plus any A that didn't fit) goes to the leftover pile.
         for tup in ordered:
             tier = tup[1]
             if tier == "S":
@@ -285,20 +301,43 @@ def _select(
             elif tier == "A" and total < max_total:
                 chosen.append(tup)
                 total += 1
+            else:
+                rest.append(tup)
 
-        # Pass 2: if this category is still empty, allow a single Tier-B to
-        # keep the section from disappearing — but only for priority categories,
-        # not "Other". (Empty Other is fine; we just hide it.)
+        # Pass 2: if this priority category is still empty, promote a single
+        # Tier-B to keep the section from disappearing.
         if not chosen and key != OTHER_KEY:
-            b_items = [t for t in ordered if t[1] == "B"]
-            if b_items and total < max_total:
-                chosen.append(b_items[0])
+            b = next((t for t in rest if t[1] == "B"), None)
+            if b is not None and total < max_total:
+                chosen.append(b)
+                rest.remove(b)
                 total += 1
 
+        chosen_by_key[key] = chosen
+        for tup in rest:
+            bench.append((key, tup))
+
+    # Pass 3: backfill toward the floor with the best remaining stories,
+    # ordered globally by (tier, -score) so the strongest leftovers win.
+    if total < target_min and total < max_total and bench:
+        bench.sort(key=lambda kt: (_TIER_RANK[kt[1][1]], -kt[1][0].relevance_score))
+        for key, tup in bench:
+            if total >= target_min or total >= max_total:
+                break
+            chosen_by_key[key].append(tup)
+            total += 1
+
+    by_priority: dict[str, list[RankedStory]] = {}
+    other: list[RankedStory] = []
+    for key, chosen in chosen_by_key.items():
+        if not chosen:
+            continue
+        # Re-sort within the category so backfilled items land in tier/score order.
+        chosen.sort(key=lambda x: (_TIER_RANK[x[1]], -x[0].relevance_score))
         ranked = [RankedStory(story=s, tier=t, one_liner=ol) for s, t, ol in chosen]
         if key == OTHER_KEY:
             other = ranked
-        elif ranked:
+        else:
             by_priority[key] = ranked
 
     return by_priority, other
@@ -370,6 +409,7 @@ RECENT_SENT_WINDOW_DAYS = config.DEDUP_WINDOW_DAYS
 def rank_stories(
     *,
     max_total: int = config.MAX_DIGEST_ITEMS,
+    target_min: int = config.TARGET_DIGEST_MIN,
     top_summary_size: int = config.TOP_SUMMARY_SIZE,
     min_score: float = MIN_CANDIDATE_SCORE,
     candidate_pool_size: int = 60,
@@ -442,7 +482,7 @@ def rank_stories(
             "reason": call_error or "unparseable_ranker_output",
         })
 
-    by_priority, other = _select(grouped, decisions, max_total)
+    by_priority, other = _select(grouped, decisions, max_total, target_min)
     top = _top_summary(by_priority, other, top_summary_size)
     by_priority_minus_top = _remove_promoted(by_priority, top)
 

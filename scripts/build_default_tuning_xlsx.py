@@ -38,8 +38,13 @@ SETTINGS: list[tuple[str, object, str]] = [
      "Soft budget reference; currently used only in logging."),
 
     # Digest shape
-    ("max_digest_items", 40,
-     "Sanity ceiling on total ranked stories per digest. Typical days land 15-25."),
+    ("max_digest_items", 22,
+     "Ceiling on total ranked stories per digest. With target_digest_min as the "
+     "floor, most days land in a tight band just under this."),
+    ("target_digest_min", 18,
+     "Floor on total ranked stories. If normal S/A selection lands below this, "
+     "the ranker backfills with the best remaining Tier-B stories so slow news "
+     "days aren't thin. 0 disables the floor."),
     ("top_summary_size", 5,
      "Stories promoted into 'Today's biggest stories' at the top of the Slack post."),
 

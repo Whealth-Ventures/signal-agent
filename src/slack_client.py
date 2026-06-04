@@ -16,8 +16,14 @@ Consumes a ranker.RankingResult and produces the locked daily format:
   ... (per-priority sections; hidden if empty after the top-5 promotion)
 
   *Other healthcare news* (5)
-    • [US]  one-liner (Link)
-    ...
+    *Funding & Deals* (3)
+      • [US]  one-liner (Link)
+      ...
+    *Digital Health* (2)
+      • [IND] one-liner (Link)
+      ...
+  (sub-grouped by keyword bucket; falls back to a flat list when there's
+   only one bucket)
 
 Validates each story URL (HEAD with GET fallback) before posting; drops stories
 with invalid URLs rather than shipping broken links.
@@ -142,6 +148,40 @@ def _section(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
+def _append_divider(blocks: list[dict]) -> None:
+    """Append a divider unless the previous block is already one — prevents the
+    double horizontal rule that appeared when a section between two dividers
+    (e.g. all priority categories empty) collapsed to nothing."""
+    if blocks and blocks[-1].get("type") != "divider":
+        blocks.append({"type": "divider"})
+
+
+# Sub-header shown above each sub-group inside "Other healthcare news" when a
+# bucket can't be determined (RSS-only clusters, voices, firm pages).
+_OTHER_FALLBACK_LABEL = "More healthcare news"
+
+
+def _subgroup_other(items: list[RankedStory]) -> list[tuple[str, list[RankedStory]]]:
+    """Group the "Other" stories by their top-level keyword bucket, preserving
+    each story's existing (tier, score) order within a group. Groups are ordered
+    by size (largest first), then label; the no-bucket fallback group always
+    goes last. Returns [(label, items), ...]."""
+    groups: dict[str, list[RankedStory]] = {}
+    order: list[str] = []
+    for r in items:
+        label = (r.story.bucket or "").strip() or _OTHER_FALLBACK_LABEL
+        if label not in groups:
+            groups[label] = []
+            order.append(label)
+        groups[label].append(r)
+
+    def sort_key(label: str) -> tuple[int, int, str]:
+        is_fallback = 1 if label == _OTHER_FALLBACK_LABEL else 0
+        return (is_fallback, -len(groups[label]), label.lower())
+
+    return [(label, groups[label]) for label in sorted(order, key=sort_key)]
+
+
 def _section_with_header_and_bullets(header: str, bullets: list[str]) -> list[dict]:
     """Emit one or more section blocks. Splits into multiple sections if the
     combined text would exceed MAX_SECTION_CHARS. Header appears only on the
@@ -204,7 +244,7 @@ def build_blocks(
         blocks.extend(_section_with_header_and_bullets(
             "*Today's biggest stories*", bullets,
         ))
-        blocks.append({"type": "divider"})
+        _append_divider(blocks)
 
     for bucket in config.PRIORITY_BUCKETS:
         items = ranking.by_priority.get(bucket.key, [])
@@ -215,10 +255,21 @@ def build_blocks(
         blocks.extend(_section_with_header_and_bullets(header, bullets))
 
     if ranking.other:
-        blocks.append({"type": "divider"})
+        _append_divider(blocks)
         header = f"*Other healthcare news* ({len(ranking.other)})"
-        bullets = [_bullet(r) for r in ranking.other]
-        blocks.extend(_section_with_header_and_bullets(header, bullets))
+        subgroups = _subgroup_other(ranking.other)
+        if len(subgroups) <= 1:
+            # Single (or no) bucket — render a flat list under the header, as before.
+            bullets = [_bullet(r) for r in ranking.other]
+            blocks.extend(_section_with_header_and_bullets(header, bullets))
+        else:
+            # Multiple buckets — header on its own line, then one labelled
+            # sub-section per bucket.
+            blocks.append(_section(header))
+            for label, group in subgroups:
+                sub_header = f"*{_escape_mrkdwn(label)}* ({len(group)})"
+                sub_bullets = [_bullet(r) for r in group]
+                blocks.extend(_section_with_header_and_bullets(sub_header, sub_bullets))
 
     # Enforce the Slack Block Kit ceiling. If we still overflow, truncate "Other"
     # rather than priority categories.

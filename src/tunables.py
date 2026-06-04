@@ -34,6 +34,10 @@ from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parent.parent
 TUNING_XLSX = ROOT / "inputs" / "tuning.xlsx"
 
+# Sentinel for "no default supplied" so that an explicit default of None is
+# distinguishable from the absence of a default.
+_MISSING: Any = object()
+
 
 # --- Types ----------------------------------------------------------------
 
@@ -59,18 +63,21 @@ class Tunables:
     priority_buckets: tuple[PriorityBucket, ...]
     source_tiers: tuple[str, ...]
 
-    def get(self, name: str) -> Any:
-        """Look up a Settings-sheet value. Raises with a clear pointer at the
-        xlsx if the name is missing."""
+    def get(self, name: str, default: Any = _MISSING) -> Any:
+        """Look up a Settings-sheet value. If `default` is supplied it's returned
+        when the row is absent (lets new knobs ship before the xlsx is updated);
+        otherwise a missing row raises with a clear pointer at the xlsx."""
         if name not in self.settings:
+            if default is not _MISSING:
+                return default
             raise RuntimeError(
                 f"Tuning setting '{name}' not found in inputs/tuning.xlsx "
                 f"'Settings' sheet. Add a row with name='{name}'."
             )
         return self.settings[name]
 
-    def get_int(self, name: str) -> int:
-        v = self.get(name)
+    def get_int(self, name: str, default: Any = _MISSING) -> int:
+        v = self.get(name, default)
         try:
             return int(v)
         except (TypeError, ValueError) as e:
@@ -78,8 +85,8 @@ class Tunables:
                 f"Tuning setting '{name}' must be an integer; got {v!r}."
             ) from e
 
-    def get_float(self, name: str) -> float:
-        v = self.get(name)
+    def get_float(self, name: str, default: Any = _MISSING) -> float:
+        v = self.get(name, default)
         try:
             return float(v)
         except (TypeError, ValueError) as e:

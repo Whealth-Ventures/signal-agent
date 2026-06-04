@@ -51,6 +51,11 @@ class Story:
     signal_ids: tuple[str, ...] = ()
     priority_bucket: str | None = None
     geo: str | None = None       # "India", "US", "Global", or None (RSS / unknown)
+    # Top-level keyword bucket (Master Keywords "Bucket" column) the story rolls
+    # up to, e.g. "Funding & Deals". Used to sub-categorize the "Other healthcare
+    # news" section in the Slack digest. None for sources with no plan-derived
+    # bucket (e.g. RSS-only clusters).
+    bucket: str | None = None
 
 
 def signal_id(source: str, url: str) -> str:

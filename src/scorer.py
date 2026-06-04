@@ -230,6 +230,13 @@ def pick_geo(signals: list[Signal]) -> str | None:
     return _most_common_raw_field(signals, "geo")
 
 
+def pick_bucket(signals: list[Signal]) -> str | None:
+    """The most common top-level keyword bucket among contributing signals, or
+    None if no signal carries one (e.g. an RSS-only cluster). Drives the
+    sub-categorization of the 'Other healthcare news' section in the digest."""
+    return _most_common_raw_field(signals, "bucket")
+
+
 def compute_boosters(
     signal: Signal,
     tier1_voice_names: set[str],
@@ -450,6 +457,7 @@ def run_scoring(
             breakdown = score_story(content_chunks, boosters)
             priority_bucket = pick_priority_bucket(cs)
             geo = pick_geo(cs)
+            bucket = pick_bucket(cs)
 
             sid = story_id(canonical.url)
             story = Story(
@@ -462,6 +470,7 @@ def run_scoring(
                 signal_ids=tuple(signal_id(s.source, s.url) for s in cs),
                 priority_bucket=priority_bucket,
                 geo=geo,
+                bucket=bucket,
             )
             storage.upsert_story(story, embedding=surv.canonical_emb, conn=conn)
             for s in cs:
@@ -474,6 +483,7 @@ def run_scoring(
                 "cluster_size": len(cs),
                 "priority_bucket": priority_bucket,
                 "geo": geo,
+                "bucket": bucket,
                 "content_similarity": breakdown.content_similarity,
                 "boosters": breakdown.boosters,
                 "booster_total": breakdown.booster_total,

@@ -87,6 +87,11 @@ DAILY_BUDGET_USD = _t.get_float("daily_budget_usd")
 # Digest shape
 MAX_DIGEST_ITEMS = _t.get_int("max_digest_items")
 TOP_SUMMARY_SIZE = _t.get_int("top_summary_size")
+# Floor: if normal S/A selection lands below this, the ranker backfills with the
+# best remaining Tier-B stories so slow news days don't produce a thin digest.
+# 0 disables the floor (pure threshold behaviour). Default 18 if the xlsx row
+# hasn't been added yet.
+TARGET_DIGEST_MIN = _t.get_int("target_digest_min", 18)
 
 # Dedup
 DEDUP_WINDOW_DAYS = _t.get_int("dedup_window_days")

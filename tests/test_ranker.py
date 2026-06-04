@@ -229,6 +229,93 @@ class SelectionTest(unittest.TestCase):
         # Other is never elevated by the "category empty → keep one B" rule.
         self.assertEqual(other, [])
 
+    def test_target_min_zero_is_pure_threshold(self) -> None:
+        # One S and three B in the same category, no floor → only the S survives.
+        stories = [
+            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
+            _mk_story("b1", priority_bucket="venture_ipo", score=0.8),
+            _mk_story("b2", priority_bucket="venture_ipo", score=0.7),
+            _mk_story("b3", priority_bucket="venture_ipo", score=0.6),
+        ]
+        grouped = ranker._group_for_prompt(stories)
+        decisions = {
+            stories[0].id: ("S", "x"),
+            stories[1].id: ("B", "y"),
+            stories[2].id: ("B", "z"),
+            stories[3].id: ("B", "w"),
+        }
+        by_priority, _ = ranker._select(grouped, decisions, max_total=40, target_min=0)
+        self.assertEqual(len(by_priority["venture_ipo"]), 1)
+
+    def test_backfill_to_floor_with_tier_b(self) -> None:
+        # One S and three B; floor of 3 → backfill the two best B to reach 3.
+        stories = [
+            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
+            _mk_story("b1", priority_bucket="venture_ipo", score=0.85),
+            _mk_story("b2", priority_bucket="venture_ipo", score=0.80),
+            _mk_story("b3", priority_bucket="venture_ipo", score=0.40),
+        ]
+        grouped = ranker._group_for_prompt(stories)
+        decisions = {
+            stories[0].id: ("S", "x"),
+            stories[1].id: ("B", "y"),
+            stories[2].id: ("B", "z"),
+            stories[3].id: ("B", "w"),
+        }
+        by_priority, _ = ranker._select(grouped, decisions, max_total=40, target_min=3)
+        chosen = by_priority["venture_ipo"]
+        self.assertEqual(len(chosen), 3)
+        ids = {r.story.id for r in chosen}
+        # Highest-scoring B backfilled; the 0.40 one left out.
+        self.assertIn(stories[1].id, ids)
+        self.assertIn(stories[2].id, ids)
+        self.assertNotIn(stories[3].id, ids)
+
+    def test_backfill_never_resurrects_tier_c(self) -> None:
+        # Floor is high but the only leftovers are Tier-C → they stay dropped.
+        stories = [
+            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
+            _mk_story("c1", priority_bucket="venture_ipo", score=0.8),
+            _mk_story("c2", priority_bucket="venture_ipo", score=0.7),
+        ]
+        grouped = ranker._group_for_prompt(stories)
+        decisions = {
+            stories[0].id: ("S", "x"),
+            stories[1].id: ("C", "drop"),
+            stories[2].id: ("C", "drop"),
+        }
+        by_priority, _ = ranker._select(grouped, decisions, max_total=40, target_min=10)
+        self.assertEqual(len(by_priority["venture_ipo"]), 1)
+
+    def test_backfill_respects_max_total(self) -> None:
+        # Floor above the ceiling → ceiling wins.
+        stories = [
+            _mk_story(f"s{i}", priority_bucket="venture_ipo", score=0.9 - i * 0.01)
+            for i in range(6)
+        ]
+        grouped = ranker._group_for_prompt(stories)
+        decisions = {stories[0].id: ("S", "x")}
+        decisions.update({s.id: ("B", "b") for s in stories[1:]})
+        by_priority, _ = ranker._select(grouped, decisions, max_total=3, target_min=10)
+        self.assertEqual(len(by_priority["venture_ipo"]), 3)
+
+    def test_backfill_spans_categories_including_other(self) -> None:
+        # Floor pulls the best leftover B regardless of category, incl. Other.
+        stories = [
+            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
+            _mk_story("b_other", priority_bucket=None, score=0.88),
+        ]
+        grouped = ranker._group_for_prompt(stories)
+        decisions = {
+            stories[0].id: ("S", "x"),
+            stories[1].id: ("B", "y"),
+        }
+        by_priority, other = ranker._select(
+            grouped, decisions, max_total=40, target_min=2,
+        )
+        self.assertEqual(len(by_priority["venture_ipo"]), 1)
+        self.assertEqual(len(other), 1)  # the Other B was backfilled to hit the floor
+
 
 class TopSummaryTest(unittest.TestCase):
     def test_picks_n_highest_magnitude(self) -> None:
