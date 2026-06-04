@@ -3,7 +3,6 @@ import { cookies } from "next/headers";
 
 const SESSION_COOKIE = "signal_admin_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24; // 24h
-const MAGIC_LINK_TTL_SECONDS = 60 * 15;   // 15m
 
 function secret(): Uint8Array {
   const s = process.env.AUTH_SECRET;
@@ -13,37 +12,34 @@ function secret(): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
-export function allowedEmails(): string[] {
-  return (process.env.ALLOWED_EMAILS || "")
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
+// Constant-time string comparison so failed logins don't leak the secret's
+// contents via response timing. (Length is allowed to leak — that's standard.)
+function safeEqual(a: string, b: string): boolean {
+  const aBuf = new TextEncoder().encode(a);
+  const bBuf = new TextEncoder().encode(b);
+  if (aBuf.length !== bBuf.length) return false;
+  let diff = 0;
+  for (let i = 0; i < aBuf.length; i++) diff |= aBuf[i] ^ bBuf[i];
+  return diff === 0;
 }
 
-export function isAllowed(email: string): boolean {
-  return allowedEmails().includes(email.trim().toLowerCase());
-}
-
-export async function signMagicToken(email: string): Promise<string> {
-  return new SignJWT({ email: email.toLowerCase(), kind: "magic" })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime(`${MAGIC_LINK_TTL_SECONDS}s`)
-    .sign(secret());
-}
-
-export async function verifyMagicToken(token: string): Promise<string | null> {
-  try {
-    const { payload } = await jwtVerify(token, secret());
-    if (payload.kind !== "magic" || typeof payload.email !== "string") return null;
-    return payload.email;
-  } catch {
-    return null;
+// Single shared login. Credentials live only in Vercel env vars; anyone who
+// knows them can sign in. Replaces the old per-email magic-link allowlist.
+export function verifyCredentials(username: string, password: string): boolean {
+  const u = process.env.ADMIN_USERNAME;
+  const p = process.env.ADMIN_PASSWORD;
+  if (!u || !p) {
+    throw new Error("ADMIN_USERNAME / ADMIN_PASSWORD env vars not set");
   }
+  // Evaluate both halves before AND-ing so timing doesn't reveal whether the
+  // username alone matched.
+  const userOk = safeEqual(username, u);
+  const passOk = safeEqual(password, p);
+  return userOk && passOk;
 }
 
-export async function setSession(email: string): Promise<void> {
-  const token = await new SignJWT({ email: email.toLowerCase(), kind: "session" })
+export async function setSession(identifier: string): Promise<void> {
+  const token = await new SignJWT({ email: identifier.toLowerCase(), kind: "session" })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(`${SESSION_TTL_SECONDS}s`)

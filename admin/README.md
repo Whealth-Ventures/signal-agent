@@ -34,11 +34,11 @@ The admin UI needs to read and write files in the `signal-agent` repo.
   - **Metadata**: Read-only (auto-selected)
 - Generate, copy the `github_pat_...` token. You'll paste it into Vercel env vars in step 5.
 
-### 3. Set up Resend for magic-link emails
+### 3. Choose the shared login
 
-- Sign up at [resend.com](https://resend.com) (free tier: 100 emails/day, 3000/month).
-- Add and **verify a domain you own** (5-min DNS setup — TXT + MX records). The `from` address must be on a verified domain; Resend won't deliver from unverified senders.
-- Generate an API key (Dashboard → API Keys → Create).
+There's a single shared username + password — anyone who knows it can sign in. You
+set both values in Vercel env vars (next steps); nothing is stored in the repo.
+Pick a username and a strong password now.
 
 ### 4. Import to Vercel
 
@@ -57,38 +57,39 @@ In the project settings → Environment Variables, add:
 | `GITHUB_REPO` | `signal-agent` |
 | `GITHUB_BRANCH` | `main` |
 | `AUTH_SECRET` | a random 32+ char string (e.g. `openssl rand -hex 32`) |
-| `RESEND_API_KEY` | from step 3 |
-| `RESEND_FROM` | `Signal Agent <admin@yourdomain.com>` |
-| `ALLOWED_EMAILS` | comma-separated whitelist, e.g. `engineering@2070health.com,partner@2070health.com` |
-| `APP_URL` | leave blank — Vercel will use `VERCEL_URL` automatically once deployed |
+| `ADMIN_USERNAME` | the shared login username, e.g. `admin` |
+| `ADMIN_PASSWORD` | a strong shared password |
 
-Set them for all environments (Production / Preview / Development).
+Set them for all environments (Production / Preview / Development). `ADMIN_USERNAME`
+and `ADMIN_PASSWORD` are the only credentials — keep them out of the repo and share
+them only with people who should have access.
 
 ### 6. Deploy
 
 - Trigger a deploy in Vercel (will happen automatically after env vars are set on next push, or click "Redeploy").
-- Once green, visit the deployment URL → enter your email → check inbox → click link → you're in.
+- Once green, visit the deployment URL → enter the shared username + password → you're in.
 
-Adding a new editor later = adding their email to `ALLOWED_EMAILS` and redeploying (or use a Vercel "Edge Config" later if list churns often).
+To rotate access (e.g. someone leaves), change `ADMIN_PASSWORD` in Vercel and redeploy —
+everyone signs in again with the new password. No per-person allowlist to maintain.
 
 ## Local development
 
 ```bash
 cp .env.example .env.local
-# Fill in real values (you can use the same GITHUB_TOKEN; magic links will go to real emails)
+# Fill in real values (same GITHUB_TOKEN; set ADMIN_USERNAME / ADMIN_PASSWORD to anything for local use)
 npm install
 npm run dev
 ```
 
-Visit `http://localhost:3000`. Note: magic links sent from local dev will still point at `http://localhost:3000` only if `APP_URL` is set in `.env.local`.
+Visit `http://localhost:3000` and sign in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env.local`.
 
 ## How it works
 
-- **Auth**: `lib/auth.ts` issues 15-minute signed JWT tokens for the magic link, and 24-hour signed JWT session cookies once verified. No DB; the whitelist lives in `ALLOWED_EMAILS`.
+- **Auth**: a single shared login. `app/api/auth/login` checks the submitted username + password against the `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars (constant-time compare) and, on success, `lib/auth.ts` sets a 24-hour signed JWT session cookie. No DB, no email, no per-person allowlist.
 - **GitHub I/O**: `lib/github.ts` reads/writes files via Octokit. SHA round-trip prevents concurrent-edit overwrites — if the file changed since you loaded it, the write fails.
 - **XLSX**: `lib/xlsx.ts` parses 4 sheets into JSON on read, serializes JSON back to xlsx on save. Schema mirrors `src/tunables.py` in the agent — keep them in sync.
 - **Validation**: server-side. Invalid regex / invalid geo / empty sub-buckets / empty prompts are rejected before the commit.
-- **Audit**: each save is its own commit with the editor's email as author. `git log inputs/tuning.xlsx` and `git log prompts/` show the history.
+- **Audit**: each save is its own commit; the shared login name is recorded in the commit author name and message. `git log inputs/tuning.xlsx` and `git log prompts/` show the history. (The committer email is always the Vercel project owner so Hobby-plan deploys aren't blocked.)
 
 ## Adding new tunables
 
@@ -103,7 +104,6 @@ When you add a new **sheet** or **column**, update `lib/xlsx.ts` and the matchin
 ## Costs
 
 - Vercel: free tier covers this easily (single-digit requests/day from a few users).
-- Resend: free tier (100 emails/day) is overkill — you'll send <10 magic links per month.
 - GitHub: free.
 
 Total: $0.
