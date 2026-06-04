@@ -71,6 +71,7 @@ export default function SuggestionsPage() {
   const noData = data.generated_at === null;
   return (
     <Layout>
+      <RecentReactions />
       {noData ? (
         <div className="p-6 bg-white border rounded text-sm text-gray-600">
           No <code>proposals/pending.json</code> in the repo yet. Run{" "}
@@ -101,8 +102,8 @@ export default function SuggestionsPage() {
 
           {data.proposals.length === 0 ? (
             <div className="p-6 bg-white border rounded text-sm text-gray-600">
-              No pending proposals. The aggregator needs at least 3 upvoted and 3
-              downvoted digests with measurable divergence before it suggests
+              No pending proposals. The aggregator needs at least 1 upvoted and 1
+              downvoted digest with measurable divergence before it suggests
               changes.
             </div>
           ) : (
@@ -144,6 +145,120 @@ export default function SuggestionsPage() {
         </>
       )}
     </Layout>
+  );
+}
+
+type ReactionSummary = {
+  received_at: string;
+  type: string;
+  reaction: string | null;
+  user: string | null;
+  slack_ts: string | null;
+  slack_channel: string | null;
+};
+
+const POSITIVE = new Set(["+1", "thumbsup", "heart", "fire", "white_check_mark", "100"]);
+const NEGATIVE = new Set(["-1", "thumbsdown", "x", "no_entry_sign"]);
+
+function reactionGlyph(reaction: string | null): string {
+  if (!reaction) return "·";
+  if (POSITIVE.has(reaction)) return "👍";
+  if (NEGATIVE.has(reaction)) return "👎";
+  return `:${reaction}:`;
+}
+
+// Live feed of Slack reactions, read straight from Vercel Blob. This is how an
+// analyst confirms a 👍/👎 was actually captured — independent of the daily
+// cron that turns reactions into tuning proposals.
+function RecentReactions() {
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "error"; message: string }
+    | { status: "ready"; total: number; recent: ReactionSummary[] }
+  >({ status: "loading" });
+
+  function load() {
+    setState({ status: "loading" });
+    fetch("/api/feedback/recent")
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `error ${r.status}`);
+        return j;
+      })
+      .then((d) => setState({ status: "ready", total: d.total ?? 0, recent: d.recent ?? [] }))
+      .catch((e) => setState({ status: "error", message: e.message }));
+  }
+  useEffect(load, []);
+
+  const adds = state.status === "ready"
+    ? state.recent.filter((r) => r.type === "reaction_added")
+    : [];
+  const up = adds.filter((r) => POSITIVE.has(r.reaction || "")).length;
+  const down = adds.filter((r) => NEGATIVE.has(r.reaction || "")).length;
+
+  return (
+    <div className="mb-6 border rounded bg-white">
+      <div className="flex items-center justify-between px-4 py-3 border-b">
+        <div>
+          <div className="font-medium text-sm">Recent reactions</div>
+          <div className="text-xs text-gray-500">
+            Live from Slack — confirms feedback is being captured.
+          </div>
+        </div>
+        <button
+          onClick={load}
+          className="text-xs border rounded px-2 py-1 hover:bg-gray-50"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {state.status === "loading" && (
+        <div className="px-4 py-3 text-sm text-gray-500">Loading reactions…</div>
+      )}
+      {state.status === "error" && (
+        <div className="px-4 py-3 text-sm text-red-700">
+          Couldn’t read reactions: {state.message}
+          <div className="text-xs text-gray-500 mt-1">
+            Usually means <code>BLOB_READ_WRITE_TOKEN</code> isn’t set in Vercel,
+            or no reactions have been captured yet.
+          </div>
+        </div>
+      )}
+      {state.status === "ready" && (
+        <>
+          <div className="px-4 py-2 text-sm border-b bg-gray-50">
+            <span className="font-medium">{state.total}</span> events captured ·{" "}
+            <span className="text-green-700">{up} 👍</span> ·{" "}
+            <span className="text-red-700">{down} 👎</span>{" "}
+            <span className="text-gray-400">(latest {state.recent.length})</span>
+          </div>
+          {state.recent.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-gray-600">
+              No reactions captured yet. Add a 👍 or 👎 on a digest in Slack, then
+              hit Refresh. If nothing shows after a minute, the Slack Event
+              Subscription or its scopes likely need checking.
+            </div>
+          ) : (
+            <ul className="divide-y max-h-72 overflow-auto">
+              {state.recent.map((r, i) => (
+                <li key={i} className="px-4 py-2 text-sm flex items-center gap-3">
+                  <span className="text-lg w-6 text-center">{reactionGlyph(r.reaction)}</span>
+                  <span className="text-gray-700 w-32">
+                    {r.type === "reaction_removed" ? "removed" : "added"}
+                    {r.reaction ? ` :${r.reaction}:` : ""}
+                  </span>
+                  <span className="text-xs text-gray-400 flex-1">
+                    {new Date(r.received_at).toLocaleString()}
+                    {r.user ? ` · ${r.user}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

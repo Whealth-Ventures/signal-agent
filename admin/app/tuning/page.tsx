@@ -149,41 +149,108 @@ function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Curated set of settings an analyst can understand and safely change. Anything
+// not listed here is treated as "advanced" (model names, similarity thresholds,
+// timeouts, embedding internals) and hidden behind a toggle so the everyday view
+// stays simple. The hidden rows still live in state, so saving preserves them.
+const ANALYST_SETTINGS: Record<string, string> = {
+  target_digest_min: "Minimum stories per digest",
+  max_digest_items: "Maximum stories per digest",
+  top_summary_size: "“Today’s biggest stories” count",
+  dedup_window_days: "Don’t repeat a story for (days)",
+  track_b_plans_per_day: "Extra topics explored per day",
+  track_b_rotation_days: "Topic rotation cycle (days)",
+  one_liner_max_chars: "Headline length limit (characters)",
+};
+
 function SettingsTable({
   rows, onChange,
 }: { rows: SettingRow[]; onChange: (r: SettingRow[]) => void }) {
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const update = (i: number, patch: Partial<SettingRow>) => {
     const next = [...rows];
     next[i] = { ...next[i], ...patch };
     onChange(next);
   };
-  return (
-    <div className="bg-white border rounded overflow-hidden">
-      <div className="grid grid-cols-[1fr_140px_2fr] gap-3 px-4 py-2 border-b bg-gray-50 text-xs font-medium text-gray-600 uppercase">
-        <div>Name</div>
-        <div>Value</div>
-        <div>Description</div>
-      </div>
-      {rows.map((r, i) => (
-        <div
-          key={i}
-          className="grid grid-cols-[1fr_140px_2fr] gap-3 px-4 py-2 border-b items-center text-sm"
-        >
+
+  // Keep each row's original index so edits write back to the right slot.
+  const indexed = rows.map((r, i) => ({ r, i }));
+  const simple = indexed.filter((x) => x.r.name in ANALYST_SETTINGS);
+  const advanced = indexed.filter((x) => !(x.r.name in ANALYST_SETTINGS));
+
+  const Row = ({ r, i, label }: { r: SettingRow; i: number; label?: string }) => (
+    <div className="grid grid-cols-[1fr_140px_2fr] gap-3 px-4 py-2 border-b items-center text-sm">
+      <div>
+        {label ? (
+          <>
+            <div className="font-medium">{label}</div>
+            <div className="font-mono text-[11px] text-gray-400">{r.name}</div>
+          </>
+        ) : (
           <div className="font-mono text-xs">{r.name}</div>
-          <input
-            type="text"
-            value={r.value == null ? "" : String(r.value)}
-            onChange={(e) => {
-              const v = e.target.value;
-              const n = Number(v);
-              update(i, { value: v !== "" && !Number.isNaN(n) ? n : v });
-            }}
-            className="border rounded px-2 py-1 text-sm"
-          />
-          <div className="text-xs text-gray-600">{r.description}</div>
-        </div>
-      ))}
+        )}
+      </div>
+      <input
+        type="text"
+        value={r.value == null ? "" : String(r.value)}
+        onChange={(e) => {
+          const v = e.target.value;
+          const n = Number(v);
+          update(i, { value: v !== "" && !Number.isNaN(n) ? n : v });
+        }}
+        className="border rounded px-2 py-1 text-sm"
+      />
+      <div className="text-xs text-gray-600">{r.description}</div>
     </div>
+  );
+
+  return (
+    <>
+      <p className="text-sm text-gray-500 mb-3">
+        The everyday knobs for shaping the digest. Change a value, then hit
+        <span className="font-medium"> Save changes</span> — the next morning’s
+        digest picks it up.
+      </p>
+      <div className="bg-white border rounded overflow-hidden">
+        <div className="grid grid-cols-[1fr_140px_2fr] gap-3 px-4 py-2 border-b bg-gray-50 text-xs font-medium text-gray-600 uppercase">
+          <div>Setting</div>
+          <div>Value</div>
+          <div>What it does</div>
+        </div>
+        {simple.map(({ r, i }) => (
+          <Row key={i} r={r} i={i} label={ANALYST_SETTINGS[r.name]} />
+        ))}
+      </div>
+
+      {advanced.length > 0 && (
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((s) => !s)}
+            className="text-sm text-gray-500 hover:text-gray-900"
+          >
+            {showAdvanced ? "▾ Hide" : "▸ Show"} advanced settings ({advanced.length})
+          </button>
+          {showAdvanced && (
+            <div className="bg-white border rounded overflow-hidden mt-2">
+              <div className="px-4 py-2 border-b bg-amber-50 text-xs text-amber-800">
+                Developer settings — model names, similarity thresholds, timeouts.
+                Changing these can have non-obvious effects on the digest. Leave
+                them alone unless you know what they do.
+              </div>
+              <div className="grid grid-cols-[1fr_140px_2fr] gap-3 px-4 py-2 border-b bg-gray-50 text-xs font-medium text-gray-600 uppercase">
+                <div>Name</div>
+                <div>Value</div>
+                <div>Description</div>
+              </div>
+              {advanced.map(({ r, i }) => (
+                <Row key={i} r={r} i={i} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
