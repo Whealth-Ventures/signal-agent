@@ -26,10 +26,10 @@ function safeEqual(a: string, b: string): boolean {
 // Single shared login. Credentials live only in Vercel env vars; anyone who
 // knows them can sign in. Replaces the old per-email magic-link allowlist.
 export function verifyCredentials(username: string, password: string): boolean {
-  const u = process.env.ADMIN_USERNAME;
-  const p = process.env.ADMIN_PASSWORD;
+  const u = process.env.ADMIN_USER;
+  const p = process.env.ADMIN_PWD;
   if (!u || !p) {
-    throw new Error("ADMIN_USERNAME / ADMIN_PASSWORD env vars not set");
+    throw new Error("ADMIN_USER / ADMIN_PWD env vars not set");
   }
   // Evaluate both halves before AND-ing so timing doesn't reveal whether the
   // username alone matched.

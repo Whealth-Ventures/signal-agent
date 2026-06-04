@@ -1,5 +1,28 @@
 # Signal Agent — Release Notes
 
+## v1.1.0 — "Simpler Sign-In" (2026-06-04)
+
+A quick fix to how you log in to the tuning page.
+
+### Sign-in no longer uses email links
+Some people weren't receiving the magic-link email, so they couldn't get in at
+all. We've removed email from sign-in entirely.
+
+There's now **one shared username and password** for the admin page. Anyone on
+the team can use it.
+
+**How to log in now:**
+- Go to **https://signal-agent-admin.vercel.app**
+- Enter the shared **username and password** (ask Ashwin for it).
+- That's it — no email, no waiting for a link.
+
+Everything else on the page works exactly as before. If you're ever locked out,
+the password can be changed centrally and you'll just sign in again with the new
+one.
+
+> Note: the magic-link / "enter your work email" steps in v1.0.0 below are now
+> replaced by the username + password above.
+
 ## v1.0.0 — "First Signal" (2026-05-29)
 
 The first major release of Signal Agent: a daily healthcare-news digest that

@@ -57,11 +57,11 @@ In the project settings → Environment Variables, add:
 | `GITHUB_REPO` | `signal-agent` |
 | `GITHUB_BRANCH` | `main` |
 | `AUTH_SECRET` | a random 32+ char string (e.g. `openssl rand -hex 32`) |
-| `ADMIN_USERNAME` | the shared login username, e.g. `admin` |
-| `ADMIN_PASSWORD` | a strong shared password |
+| `ADMIN_USER` | the shared login username, e.g. `admin` |
+| `ADMIN_PWD` | a strong shared password |
 
-Set them for all environments (Production / Preview / Development). `ADMIN_USERNAME`
-and `ADMIN_PASSWORD` are the only credentials — keep them out of the repo and share
+Set them for all environments (Production / Preview / Development). `ADMIN_USER`
+and `ADMIN_PWD` are the only credentials — keep them out of the repo and share
 them only with people who should have access.
 
 ### 6. Deploy
@@ -69,23 +69,23 @@ them only with people who should have access.
 - Trigger a deploy in Vercel (will happen automatically after env vars are set on next push, or click "Redeploy").
 - Once green, visit the deployment URL → enter the shared username + password → you're in.
 
-To rotate access (e.g. someone leaves), change `ADMIN_PASSWORD` in Vercel and redeploy —
+To rotate access (e.g. someone leaves), change `ADMIN_PWD` in Vercel and redeploy —
 everyone signs in again with the new password. No per-person allowlist to maintain.
 
 ## Local development
 
 ```bash
 cp .env.example .env.local
-# Fill in real values (same GITHUB_TOKEN; set ADMIN_USERNAME / ADMIN_PASSWORD to anything for local use)
+# Fill in real values (same GITHUB_TOKEN; set ADMIN_USER / ADMIN_PWD to anything for local use)
 npm install
 npm run dev
 ```
 
-Visit `http://localhost:3000` and sign in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env.local`.
+Visit `http://localhost:3000` and sign in with the `ADMIN_USER` / `ADMIN_PWD` from `.env.local`.
 
 ## How it works
 
-- **Auth**: a single shared login. `app/api/auth/login` checks the submitted username + password against the `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars (constant-time compare) and, on success, `lib/auth.ts` sets a 24-hour signed JWT session cookie. No DB, no email, no per-person allowlist.
+- **Auth**: a single shared login. `app/api/auth/login` checks the submitted username + password against the `ADMIN_USER` / `ADMIN_PWD` env vars (constant-time compare) and, on success, `lib/auth.ts` sets a 24-hour signed JWT session cookie. No DB, no email, no per-person allowlist.
 - **GitHub I/O**: `lib/github.ts` reads/writes files via Octokit. SHA round-trip prevents concurrent-edit overwrites — if the file changed since you loaded it, the write fails.
 - **XLSX**: `lib/xlsx.ts` parses 4 sheets into JSON on read, serializes JSON back to xlsx on save. Schema mirrors `src/tunables.py` in the agent — keep them in sync.
 - **Validation**: server-side. Invalid regex / invalid geo / empty sub-buckets / empty prompts are rejected before the commit.
