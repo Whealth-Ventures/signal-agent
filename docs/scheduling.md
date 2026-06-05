@@ -9,7 +9,10 @@ that's not good enough.
 The fix is two triggers, layered:
 
 1. **Primary — external pinger** fires `repository_dispatch` at exactly 10:00 IST.
-2. **Fallback — GitHub's cron** stays as a safety net (`'30 4 * * *'` UTC).
+2. **Fallback — GitHub's cron** stays as a safety net. It's set ~3 h early at
+   `'30 1 * * *'` UTC (01:30 UTC = 07:00 IST) because GitHub's cron slips: the
+   old 04:30 UTC fire was landing ~13:00 IST, so firing early makes the slipped
+   run land near 10:00 IST. (On a fast day the fallback may arrive earlier.)
 
 The workflow file (`.github/workflows/daily-digest.yml`) already wires both up.
 Only the external pinger needs setup.

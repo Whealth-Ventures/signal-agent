@@ -1,14 +1,16 @@
 name: Daily Digest
 
-# 10:00 IST = 04:30 UTC. GitHub's native cron is best-effort — historical runs
-# have slipped 30 min to several hours during peak load, and scheduled
-# workflows are auto-disabled on inactive repos. So we use TWO triggers:
+# Target delivery: 10:00 IST. Two triggers:
 #
 #   1. repository_dispatch (event_type: daily-digest) — fired by an external
-#      pinger (cron-job.org / EasyCron / similar) at exactly 10:00 IST. This
-#      is the primary trigger; far more punctual than GitHub's cron.
-#   2. schedule cron — fallback safety net so the digest still ships if the
-#      external pinger fails.
+#      pinger (cron-job.org / EasyCron / similar). This is the punctual path:
+#      set the pinger to 10:00 IST and the digest lands ~10:00 with no slip.
+#   2. schedule cron — fallback safety net. GitHub's native cron is best-effort
+#      and historically slips 30 min to ~3 h during peak load. We observed the
+#      old 04:30 UTC (10:00 IST) fire actually delivering ~13:00 IST, so we now
+#      fire at 01:30 UTC (07:00 IST) — ~3 h early — so the digest lands near
+#      10:00 IST despite the slip. On a fast day it may arrive earlier.
+#      (Scheduled workflows are also auto-disabled on inactive repos.)
 #
 # Concurrency below ensures the schedule fallback won't double-fire if the
 # external trigger already started the run.
@@ -18,7 +20,7 @@ on:
   repository_dispatch:
     types: [daily-digest]
   schedule:
-    - cron: '30 4 * * *'
+    - cron: '30 1 * * *'   # 01:30 UTC = 07:00 IST (early, to absorb GitHub cron slip)
   workflow_dispatch:
 
 permissions:
