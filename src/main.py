@@ -9,12 +9,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sqlite3
 import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import chromadb
 import httpx
@@ -349,9 +351,59 @@ def print_digest_to_console(ranking: ranker.RankingResult, digest_date: str) -> 
 
 # --- Pipeline -----------------------------------------------------------
 
+# Hard cap on how long the pipeline will idle waiting for the scheduled post
+# time. Protects against a mis-timed trigger (or a huge GitHub cron slip)
+# parking the job for hours — past this gap we just post as soon as we're ready.
+POST_AT_MAX_WAIT_S = 30 * 60
+
+
+def compute_post_at(spec: str | None, *, now_utc: datetime | None = None) -> datetime | None:
+    """Resolve a 'HH:MM' post-time (in config.DIGEST_TZ, for today) to a UTC
+    instant. Returns None if `spec` is blank or unparseable."""
+    if not spec or not spec.strip():
+        return None
+    try:
+        hh, mm = spec.strip().split(":")
+        hour, minute = int(hh), int(mm)
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            raise ValueError(spec)
+    except Exception:
+        _log({"step": "post_at_parse_failed", "spec": spec})
+        return None
+    tz = ZoneInfo(config.DIGEST_TZ)
+    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    target_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return target_local.astimezone(timezone.utc)
+
+
+def _wait_until_post_time(post_at: datetime) -> None:
+    """Hold until `post_at` so the digest lands at exactly the scheduled minute.
+    No-op if the time has passed; capped at POST_AT_MAX_WAIT_S so an over-early
+    trigger doesn't park the job for hours."""
+    delta = (post_at - datetime.now(timezone.utc)).total_seconds()
+    if delta <= 0:
+        return
+    if delta > POST_AT_MAX_WAIT_S:
+        _log({"step": "post_at_skipped_too_early", "wait_seconds": round(delta)})
+        _progress(
+            f"      built and ready; trigger fired {round(delta / 60)} min before "
+            f"the {post_at.isoformat()} post time (> {POST_AT_MAX_WAIT_S // 60} min "
+            f"cap) — posting now instead of idling."
+        )
+        return
+    _progress(
+        f"      built and ready; holding {round(delta)}s until the scheduled "
+        f"post time ({post_at.isoformat()})…"
+    )
+    _log({"step": "post_at_waiting", "wait_seconds": round(delta), "post_at": post_at.isoformat()})
+    time.sleep(delta)
+
+
 def run_pipeline(
     *,
     digest_date: str | None = None,
+    post_at: datetime | None = None,
+    force: bool = False,
     conn: sqlite3.Connection | None = None,
     chroma_client: chromadb.api.ClientAPI | None = None,
     perplexity_client: PerplexityClient | None = None,
@@ -530,6 +582,15 @@ def run_pipeline(
                 "elapsed_seconds": slack_result.elapsed_seconds,
             })
             digest_sent = slack_result.sent
+        elif not force and storage.has_sent_digest_for_date(digest_date, conn=conn):
+            # Another trigger (pinger vs. schedule fallback) already shipped
+            # today's digest. Don't post a second time. --force overrides.
+            _progress(
+                f"[5/5] Digest for {digest_date} already sent — skipping "
+                f"(idempotent; use --force to re-send)."
+            )
+            _log({"step": "skip_already_sent", "digest_date": digest_date})
+            digest_sent = True
         else:
             _progress(
                 f"[5/5] Slack: validating {len(ranking.flat)} URLs and posting…"
@@ -548,6 +609,11 @@ def run_pipeline(
                 )
             if own_conn:
                 conn.commit()
+
+            # Everything is built and persisted. If a scheduled post time was
+            # given, hold here until that minute so the message lands on time.
+            if post_at is not None:
+                _wait_until_post_time(post_at)
 
             slack_result = slack_client.post_digest(
                 ranking,
@@ -621,9 +687,18 @@ def main(argv: list[str] | None = None) -> int:
                       help="Run the full pipeline and post to Slack with a "
                            "[TEST] marker. Does NOT write a digest row to the "
                            "DB, so the test URLs don't enter the dedup window.")
+    p.add_argument("--post-at", default=os.environ.get("DIGEST_POST_AT"),
+                   help="Build everything, then hold until this HH:MM (in the "
+                        "configured digest timezone) before posting, so the "
+                        "message lands on time. Defaults to $DIGEST_POST_AT. "
+                        "Ignored once the time has passed or it's >30 min away.")
+    p.add_argument("--force", action="store_true",
+                   help="Post even if today's digest was already sent "
+                        "(bypasses the idempotency guard).")
     args = p.parse_args(argv)
 
     config.check_env()
+    post_at = compute_post_at(args.post_at)
     stats = run_pipeline(
         max_plans=args.max_plans,
         skip_rss=args.skip_rss,
@@ -631,6 +706,8 @@ def main(argv: list[str] | None = None) -> int:
         skip_url_validation=args.skip_url_validation,
         dry_run=args.dry_run,
         test_mode=args.test,
+        post_at=post_at,
+        force=args.force,
     )
     print()
     print(

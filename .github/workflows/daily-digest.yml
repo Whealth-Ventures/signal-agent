@@ -1,27 +1,33 @@
 name: Daily Digest
 
-# Target delivery: 10:00 IST. Two triggers:
+# Target delivery: 10:00 IST, sharp. The trigger fires a few minutes BEFORE
+# 10:00; the pipeline builds the whole digest, then holds (DIGEST_POST_AT, see
+# the run step) until exactly 10:00 IST to post — so delivery time doesn't
+# depend on how long the build took.
 #
+# Two triggers, both aimed at ~09:50 IST:
 #   1. repository_dispatch (event_type: daily-digest) — fired by an external
-#      pinger (cron-job.org / EasyCron / similar). This is the punctual path:
-#      set the pinger to 10:00 IST and the digest lands ~10:00 with no slip.
-#   2. schedule cron — fallback safety net. GitHub's native cron is best-effort
-#      and historically slips 30 min to ~3 h during peak load. We observed the
-#      old 04:30 UTC (10:00 IST) fire actually delivering ~13:00 IST, so we now
-#      fire at 01:30 UTC (07:00 IST) — ~3 h early — so the digest lands near
-#      10:00 IST despite the slip. On a fast day it may arrive earlier.
-#      (Scheduled workflows are also auto-disabled on inactive repos.)
+#      pinger (cron-job.org / EasyCron) at 09:50 IST. This is the punctual path.
+#   2. schedule cron — fallback safety net at 04:20 UTC (09:50 IST). GitHub's
+#      native cron slips (often late); when it fires before 10:00 the in-job
+#      hold still lands it at 10:00, and when it slips past 10:00 it posts
+#      immediately. (Scheduled workflows are also auto-disabled on inactive repos.)
 #
-# Concurrency below ensures the schedule fallback won't double-fire if the
-# external trigger already started the run.
+# Safe to fire both: the concurrency group serializes overlapping runs, and the
+# pipeline's idempotency guard skips posting if today's digest already went out.
 #
 # See docs/scheduling.md for the external pinger setup.
 on:
   repository_dispatch:
     types: [daily-digest]
   schedule:
-    - cron: '30 1 * * *'   # 01:30 UTC = 07:00 IST (early, to absorb GitHub cron slip)
+    - cron: '20 4 * * *'   # 04:20 UTC = 09:50 IST (then hold in-job until 10:00)
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Re-post even if today's digest already went out"
+        type: boolean
+        default: false
 
 permissions:
   # write so the feedback step can commit the regenerated proposals/pending.json
@@ -35,7 +41,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Headroom for the build (~3-5 min) plus the in-job hold until 10:00 IST
+    # (up to ~10 min when fired at 09:50) plus the feedback steps.
+    timeout-minutes: 30
 
     # The feedback loop (pull reactions → regenerate suggestions → commit) only
     # runs when a Blob token is configured. Until then these steps are skipped
@@ -83,7 +91,9 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_CHANNEL_LABEL: ${{ vars.SLACK_CHANNEL_LABEL }}
-        run: python src/main.py
+          # Build now, then hold until exactly 10:00 IST to post.
+          DIGEST_POST_AT: "10:00"
+        run: python src/main.py ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
 
       # --- Feedback loop (only when BLOB_READ_WRITE_TOKEN is configured) -------
 

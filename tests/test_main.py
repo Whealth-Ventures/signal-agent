@@ -103,6 +103,23 @@ class _PlanStub:
         self.track = track
 
 
+class ComputePostAtTest(unittest.TestCase):
+    def _utc(self, h, m=0):
+        return datetime(2026, 6, 5, h, m, tzinfo=timezone.utc)
+
+    def test_resolves_local_time_to_utc(self) -> None:
+        # config.DIGEST_TZ is Asia/Kolkata (+05:30): 10:00 IST == 04:30 UTC.
+        now = self._utc(4, 0)  # 09:30 IST same day
+        t = main_module.compute_post_at("10:00", now_utc=now)
+        self.assertIsNotNone(t)
+        self.assertEqual((t.hour, t.minute), (4, 30))
+        self.assertEqual(t.date(), now.date())
+
+    def test_blank_and_invalid_return_none(self) -> None:
+        for spec in (None, "", "  ", "nope", "25:00", "10:99"):
+            self.assertIsNone(main_module.compute_post_at(spec, now_utc=self._utc(4)))
+
+
 class ParseResponseTest(unittest.TestCase):
     def _resp(self, text: str, citations: tuple = ()) -> ChatResponse:
         return ChatResponse(

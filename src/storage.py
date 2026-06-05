@@ -434,6 +434,24 @@ def add_story_to_digest(
         )
 
 
+def has_sent_digest_for_date(
+    digest_date: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """True if a digest for `digest_date` has already been posted (status='sent').
+
+    Lets the pipeline stay idempotent when more than one trigger fires the same
+    day (external pinger + GitHub schedule fallback) — the second run sees the
+    digest already went out and skips re-posting."""
+    with _maybe_own(conn) as c:
+        row = c.execute(
+            "SELECT 1 FROM digests WHERE digest_date=? AND status='sent' LIMIT 1",
+            (digest_date,),
+        ).fetchone()
+    return row is not None
+
+
 def mark_digest_sent(
     digest_id: str,
     sent_at: datetime | None = None,

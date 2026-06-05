@@ -206,6 +206,34 @@ class DigestLifecycleTest(_DBTestBase):
         self.assertEqual(ds["rank"], 1)
         self.assertEqual(ds["reasoning"], "top story")
 
+    def test_has_sent_digest_for_date(self) -> None:
+        self.assertFalse(
+            storage.has_sent_digest_for_date("2026-05-05", conn=self.conn)
+        )
+        did = storage.create_digest("2026-05-05", ["a@x.com"], conn=self.conn)
+        self.conn.commit()
+        # Pending (not yet sent) → still False.
+        self.assertFalse(
+            storage.has_sent_digest_for_date("2026-05-05", conn=self.conn)
+        )
+        storage.mark_digest_sent(did, conn=self.conn)
+        self.conn.commit()
+        self.assertTrue(
+            storage.has_sent_digest_for_date("2026-05-05", conn=self.conn)
+        )
+        # A different date is unaffected.
+        self.assertFalse(
+            storage.has_sent_digest_for_date("2026-05-06", conn=self.conn)
+        )
+
+    def test_failed_digest_does_not_count_as_sent(self) -> None:
+        did = storage.create_digest("2026-05-07", ["a@x.com"], conn=self.conn)
+        storage.mark_digest_failed(did, "boom", conn=self.conn)
+        self.conn.commit()
+        self.assertFalse(
+            storage.has_sent_digest_for_date("2026-05-07", conn=self.conn)
+        )
+
     def test_mark_failed_sets_error(self) -> None:
         did = storage.create_digest("2026-05-05", ["a@x.com"], conn=self.conn)
         storage.mark_digest_failed(did, "SMTP timeout", conn=self.conn)
