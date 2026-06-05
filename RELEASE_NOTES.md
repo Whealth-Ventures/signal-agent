@@ -1,5 +1,44 @@
 # Signal Agent — Release Notes
 
+## v1.2.0 — "Sharper Signal" (2026-06-05)
+
+A batch of improvements to the digest itself, when it lands, the tuning page, and
+the thumbs-up/down feedback loop. Please try them and tell us what feels off.
+
+### 1. The digest is more consistent and better organized
+- **No more thin days.** Some mornings had ~10 stories, others ~25. It now aims
+  for a steady **18–22** — slow news days get topped up so the digest never feels
+  empty, busy days stay tight.
+- **Cleaner layout.** Fixed the double line under "Today's biggest stories" (now a
+  single divider).
+- **"Other healthcare news" is now grouped by topic** instead of one long list, so
+  the long-tail is easier to skim.
+
+### 2. It's built to land at 10:00 IST, on the dot
+The digest is now fully assembled a few minutes early and held until exactly
+**10:00 IST** to post — so arrival time no longer drifts with how long the run
+takes. (For this to be reliable to the minute, the external 10:00 trigger needs to
+be set up — see `docs/scheduling.md`.) A safety check also makes sure the digest
+can never be sent twice in a day.
+
+### 3. The tuning page is simpler
+The Settings tab now shows only the handful of knobs that are meaningful to
+adjust (how many stories, how long to avoid repeats, how many topics to explore,
+headline length, etc.), each with a plain-English label. The technical internals
+are tucked behind a **"Show advanced settings"** toggle. Priority Buckets and
+Source Tiers are unchanged.
+
+### 4. Your 👍 / 👎 are now visible — and feed back in
+- The **Suggestions** page has a new **"Recent reactions"** panel that shows your
+  Slack 👍/👎 within seconds of reacting, so you can confirm feedback is landing.
+- The agent now pulls those reactions in every day and turns the contrast between
+  liked and disliked digests into tuning suggestions automatically.
+- The bar to suggest a change is lower now: **one upvoted and one downvoted**
+  digest (was three of each).
+
+**In short:** steadier, tidier digests that aim to land at 10:00 sharp, a tuning
+page anyone can use, and feedback you can actually see. Have a play and let us know.
+
 ## v1.1.0 — "Simpler Sign-In" (2026-06-04)
 
 A quick fix to how you log in to the tuning page.
