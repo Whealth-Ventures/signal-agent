@@ -24,6 +24,10 @@ on:
     - cron: '20 4 * * *'   # 04:20 UTC = 09:50 IST (then hold in-job until 10:00)
   workflow_dispatch:
     inputs:
+      test:
+        description: "Test run — posts a [TEST]-marked digest immediately (no DB write, no dedup impact, ignores the 10:00 hold)"
+        type: boolean
+        default: false
       force:
         description: "Re-post even if today's digest already went out"
         type: boolean
@@ -93,7 +97,7 @@ jobs:
           SLACK_CHANNEL_LABEL: ${{ vars.SLACK_CHANNEL_LABEL }}
           # Build now, then hold until exactly 10:00 IST to post.
           DIGEST_POST_AT: "10:00"
-        run: python src/main.py ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
+        run: python src/main.py ${{ (github.event_name == 'workflow_dispatch' && inputs.test) && '--test' || '' }} ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
 
       # --- Feedback loop (only when BLOB_READ_WRITE_TOKEN is configured) -------
 
