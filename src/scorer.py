@@ -1,7 +1,8 @@
 """Layer 3: dedupe + relevance scoring.
 
-Pulls unscored signals from storage, drops URLs sent in the last 7 days,
-clusters near-duplicates by embedding cosine similarity, scores each cluster
+Pulls unscored signals from storage, drops URLs sent in the last N days
+(config.DEDUP_WINDOW_DAYS, default 30), clusters near-duplicates by embedding
+cosine similarity (order-independent, connected-components), scores each cluster
 against the firm's content corpus + deterministic boosters, then upserts
 Stories and links signals to them.
 """
@@ -129,38 +130,63 @@ def cluster_signals(
     embeddings: list[list[float]],
     threshold: float = SIMILARITY_THRESHOLD,
 ) -> list[list[int]]:
-    """Greedy clustering: returns list of clusters, each a list of indices.
+    """Order-independent near-duplicate clustering via connected components.
 
-    A signal joins the existing cluster whose centroid has the highest cosine
-    similarity above threshold; otherwise it starts a new cluster. Cosine is
-    computed in numpy: vectors are L2-normalized once, and a centroid's running
-    sum is tracked so cosine(new, centroid) = dot(new, sum) / ||sum|| in one
-    vector op per cluster.
+    Returns a list of clusters, each a sorted list of indices. Two signals are
+    linked when their cosine similarity exceeds `threshold`; any chain of links
+    (A~B, B~C ⇒ {A,B,C}) lands in one cluster. Implemented with union-find over
+    the full pairwise-similarity matrix, so the result depends only on the
+    embeddings and threshold — never on arrival order. This replaces the old
+    greedy "compare against a drifting centroid" pass, which could both
+    over-split (the same story slipping in twice) and over-merge depending on
+    the order signals happened to arrive in.
+
+    Cost is O(n²) in the number of signals; at the ~100-300 stories/run this
+    pipeline sees, that's a single small numpy matmul on already-normalized
+    vectors — negligible.
     """
     if not embeddings:
         return []
     normed = _l2_normalize(np.asarray(embeddings, dtype=np.float32))
-    cluster_sums: list[np.ndarray] = []
-    sum_norms: list[float] = []
-    members: list[list[int]] = []
-    for i in range(normed.shape[0]):
-        v = normed[i]
-        best_j = -1
-        if cluster_sums:
-            sums_mat = np.vstack(cluster_sums)
-            sims = (sums_mat @ v) / np.asarray(sum_norms, dtype=np.float32)
-            j = int(np.argmax(sims))
-            if float(sims[j]) > threshold:
-                best_j = j
-        if best_j == -1:
-            cluster_sums.append(v.copy())
-            sum_norms.append(1.0)
-            members.append([i])
-        else:
-            cluster_sums[best_j] = cluster_sums[best_j] + v
-            sum_norms[best_j] = float(np.linalg.norm(cluster_sums[best_j]))
-            members[best_j].append(i)
-    return members
+    n = normed.shape[0]
+    if n == 1:
+        return [[0]]
+
+    # Pairwise cosine = normed @ normed.T (rows are unit vectors).
+    sims = normed @ normed.T
+
+    # Union-find over pairs above threshold.
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        # Path compression.
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Attach larger root index under smaller for stable, deterministic roots.
+            lo, hi = (ra, rb) if ra < rb else (rb, ra)
+            parent[hi] = lo
+
+    # Only need the upper triangle (similarity is symmetric).
+    for i in range(n):
+        row = sims[i]
+        for j in range(i + 1, n):
+            if float(row[j]) > threshold:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    # Sort members within each cluster, and clusters by their smallest member,
+    # so output ordering is fully deterministic.
+    return [sorted(members) for _, members in sorted(groups.items())]
 
 
 def _source_tier_rank(url: str) -> int:

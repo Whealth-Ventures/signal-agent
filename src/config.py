@@ -56,6 +56,9 @@ def _env_int(name: str) -> int:
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY")
 PERPLEXITY_API_KEY = _env("PERPLEXITY_API_KEY")
+# Anthropic powers the single ranking/tiering/one-liner call (see ranker.py).
+# Optional: when unset, the ranker falls back to Perplexity sonar-reasoning-pro.
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
 
 SLACK_WEBHOOK_URL = _env("SLACK_WEBHOOK_URL")
 # Bot token + channel ID power the chat.postMessage path. When SLACK_BOT_TOKEN
@@ -87,6 +90,9 @@ DAILY_BUDGET_USD = _t.get_float("daily_budget_usd")
 # Digest shape
 MAX_DIGEST_ITEMS = _t.get_int("max_digest_items")
 TOP_SUMMARY_SIZE = _t.get_int("top_summary_size")
+# Max stories shown per priority bucket in the digest body (1-2 each). Keeps the
+# digest uniform day to day; the top-summary is separate and not bucketed.
+PER_BUCKET_MAX = _t.get_int("per_bucket_max", 2)
 # Floor: if normal S/A selection lands below this, the ranker backfills with the
 # best remaining Tier-B stories so slow news days don't produce a thin digest.
 # 0 disables the floor (pure threshold behaviour). Default 18 if the xlsx row
@@ -114,6 +120,13 @@ RANKER_SUMMARY_MAX_CHARS = _t.get_int("ranker_summary_max_chars")
 PERPLEXITY_MODEL_FETCH = _t.get_str("perplexity_model_fetch")
 PERPLEXITY_MODEL_RANK = _t.get_str("perplexity_model_rank")
 PERPLEXITY_RECENCY = _t.get_str("perplexity_recency")
+
+# Ranker vendor selection. "anthropic" routes the single ranking call to Claude;
+# "perplexity" keeps it on sonar-reasoning-pro. Either way, an unset
+# ANTHROPIC_API_KEY forces the Perplexity fallback (see ranker.py).
+RANKER_PROVIDER = _t.get_str("ranker_provider")
+ANTHROPIC_MODEL_RANK = _t.get_str("anthropic_model_rank")
+ANTHROPIC_MAX_TOKENS_RANK = _t.get_int("anthropic_max_tokens_rank", 4096)
 
 # Embeddings
 EMBEDDING_MODEL = _t.get_str("embedding_model")

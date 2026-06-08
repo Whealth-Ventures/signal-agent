@@ -375,9 +375,14 @@ def list_stories(
     min_score: float = 0.0,
     limit: int = 100,
     exclude_urls: Iterable[str] | None = None,
+    order_by_recency: bool = False,
     conn: sqlite3.Connection | None = None,
 ) -> list[Story]:
-    """Top stories by relevance_score.
+    """Top stories, by relevance_score (default) or by recency.
+
+    `order_by_recency=True` orders by published_at DESC instead — used by the
+    ranker, which no longer treats relevance as a ranking signal (magnitude
+    tiering + the topicality gate decide inclusion; see ranker.py / #5).
 
     `exclude_urls` is the dedup escape hatch the ranker uses to keep already-
     sent stories out of its candidate pool — without it, high-scoring
@@ -390,7 +395,8 @@ def list_stories(
         placeholders = ",".join("?" * len(excluded))
         sql += f" AND canonical_url NOT IN ({placeholders})"
         params.extend(excluded)
-    sql += " ORDER BY relevance_score DESC LIMIT ?"
+    order_col = "published_at" if order_by_recency else "relevance_score"
+    sql += f" ORDER BY {order_col} DESC LIMIT ?"
     params.append(limit)
     with _maybe_own(conn) as c:
         rows = c.execute(sql, params).fetchall()

@@ -107,9 +107,18 @@ class QueryPlansTest(unittest.TestCase):
         #  fda_regulatory: 2, hot_tas: 1, us_medicare: 1, ai_healthcare: 2).
         self.assertEqual(len(track_a), 13)
 
-    def test_track_b_matches_config(self) -> None:
+    def test_track_b_derived_from_rotation(self) -> None:
+        import math
         track_b = [p for p in self.plans if p.track == "B"]
-        self.assertEqual(len(track_b), config.TRACK_B_PLANS_PER_DAY)
+        subs = qp._all_non_priority_subs(qp.load_keywords())
+        # Plans/day is derived from the rotation length, capped by the
+        # track_b_plans_per_day budget guard.
+        expected = min(
+            math.ceil(len(subs) / config.TRACK_B_ROTATION_DAYS),
+            config.TRACK_B_PLANS_PER_DAY,
+        )
+        self.assertEqual(len(track_b), expected)
+        self.assertLessEqual(len(track_b), config.TRACK_B_PLANS_PER_DAY)
 
     def test_voice_plans_present(self) -> None:
         ids = {p.id for p in self.plans}

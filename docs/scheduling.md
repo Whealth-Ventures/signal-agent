@@ -1,29 +1,29 @@
-# Scheduling — getting the digest to fire at exactly 10:00 IST
+# Scheduling — getting the digest to fire at exactly 08:00 IST
 
 GitHub Actions' native `schedule:` cron is best-effort. Historical runs on this
-repo have slipped from 10:00 IST to 2:00 PM IST, and on a few days the run was
-skipped entirely (GitHub auto-disables scheduled workflows on inactive repos
-after 60 days). For a digest that the team reads first thing each morning,
-that's not good enough.
+repo have slipped by hours (e.g. an intended morning slot landing in the early
+afternoon), and on a few days the run was skipped entirely (GitHub auto-disables
+scheduled workflows on inactive repos after 60 days). For a digest that the team
+reads first thing each morning, that's not good enough.
 
 The fix has two parts: a punctual trigger, and an in-job hold so delivery time
 doesn't depend on how long the build takes.
 
-**Hold-until-10:00 (sharp delivery).** The trigger fires a few minutes *before*
-10:00. The pipeline fetches/scores/ranks the whole digest (~3 min), then holds
-until exactly 10:00 IST before posting to Slack. So the message lands at 10:00
-regardless of build duration. This is the `DIGEST_POST_AT="10:00"` env in the
+**Hold-until-08:00 (sharp delivery).** The trigger fires a few minutes *before*
+08:00. The pipeline fetches/scores/ranks the whole digest (~3 min), then holds
+until exactly 08:00 IST before posting to Slack. So the message lands at 08:00
+regardless of build duration. This is the `DIGEST_POST_AT="08:00"` env in the
 workflow's run step (→ `--post-at`); the hold is capped at 30 min, so an
 over-early or badly-slipped trigger just posts as soon as it's ready instead of
 idling. Set `DIGEST_POST_AT` empty to disable and post immediately.
 
-**Two triggers, both aimed at ~09:50 IST:**
+**Two triggers, both aimed at ~07:50 IST:**
 
-1. **Primary — external pinger** fires `repository_dispatch` at **09:50 IST**.
-   Punctual; this is the path that gives sharp 10:00 delivery.
-2. **Fallback — GitHub's cron** at `'20 4 * * *'` UTC (09:50 IST). GitHub's cron
-   slips, so it often fires late; when it fires before 10:00 the in-job hold
-   still lands it at 10:00, and when it slips past 10:00 it posts immediately.
+1. **Primary — external pinger** fires `repository_dispatch` at **07:50 IST**.
+   Punctual; this is the path that gives sharp 08:00 delivery.
+2. **Fallback — GitHub's cron** at `'20 2 * * *'` UTC (07:50 IST). GitHub's cron
+   slips, so it often fires late; when it fires before 08:00 the in-job hold
+   still lands it at 08:00, and when it slips past 08:00 it posts immediately.
 
 Firing both is safe: the `daily-digest` concurrency group serializes overlapping
 runs, and the pipeline's **idempotency guard** (`has_sent_digest_for_date`) skips
@@ -42,8 +42,8 @@ this up. Only the external pinger needs setup.
    - Copy the token (`github_pat_…`) — you'll paste it into cron-job.org.
 3. In cron-job.org, create a new cronjob:
    - **URL**: `https://api.github.com/repos/<owner>/signal-agent/dispatches`
-   - **Schedule**: `09:50` daily, timezone **Asia/Kolkata** (the pipeline holds
-     until 10:00 before posting — fire ~10 min early so the build finishes first)
+   - **Schedule**: `07:50` daily, timezone **Asia/Kolkata** (the pipeline holds
+     until 08:00 before posting — fire ~10 min early so the build finishes first)
    - **Request method**: `POST`
    - **Headers**:
      - `Accept: application/vnd.github+json`

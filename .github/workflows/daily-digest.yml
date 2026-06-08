@@ -1,16 +1,16 @@
 name: Daily Digest
 
-# Target delivery: 10:00 IST, sharp. The trigger fires a few minutes BEFORE
-# 10:00; the pipeline builds the whole digest, then holds (DIGEST_POST_AT, see
-# the run step) until exactly 10:00 IST to post — so delivery time doesn't
+# Target delivery: 08:00 IST, sharp. The trigger fires a few minutes BEFORE
+# 08:00; the pipeline builds the whole digest, then holds (DIGEST_POST_AT, see
+# the run step) until exactly 08:00 IST to post — so delivery time doesn't
 # depend on how long the build took.
 #
-# Two triggers, both aimed at ~09:50 IST:
+# Two triggers, both aimed at ~07:50 IST:
 #   1. repository_dispatch (event_type: daily-digest) — fired by an external
-#      pinger (cron-job.org / EasyCron) at 09:50 IST. This is the punctual path.
-#   2. schedule cron — fallback safety net at 04:20 UTC (09:50 IST). GitHub's
-#      native cron slips (often late); when it fires before 10:00 the in-job
-#      hold still lands it at 10:00, and when it slips past 10:00 it posts
+#      pinger (cron-job.org / EasyCron) at 07:50 IST. This is the punctual path.
+#   2. schedule cron — fallback safety net at 02:20 UTC (07:50 IST). GitHub's
+#      native cron slips (often late); when it fires before 08:00 the in-job
+#      hold still lands it at 08:00, and when it slips past 08:00 it posts
 #      immediately. (Scheduled workflows are also auto-disabled on inactive repos.)
 #
 # Safe to fire both: the concurrency group serializes overlapping runs, and the
@@ -21,11 +21,11 @@ on:
   repository_dispatch:
     types: [daily-digest]
   schedule:
-    - cron: '20 4 * * *'   # 04:20 UTC = 09:50 IST (then hold in-job until 10:00)
+    - cron: '20 2 * * *'   # 02:20 UTC = 07:50 IST (then hold in-job until 08:00)
   workflow_dispatch:
     inputs:
       test:
-        description: "Test run — posts a [TEST]-marked digest immediately (no DB write, no dedup impact, ignores the 10:00 hold)"
+        description: "Test run — posts a [TEST]-marked digest immediately (no DB write, no dedup impact, ignores the 08:00 hold)"
         type: boolean
         default: false
       force:
@@ -45,8 +45,8 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Headroom for the build (~3-5 min) plus the in-job hold until 10:00 IST
-    # (up to ~10 min when fired at 09:50) plus the feedback steps.
+    # Headroom for the build (~3-5 min) plus the in-job hold until 08:00 IST
+    # (up to ~10 min when fired at 07:50) plus the feedback steps.
     timeout-minutes: 30
 
     # The feedback loop (pull reactions → regenerate suggestions → commit) only
@@ -95,8 +95,11 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_CHANNEL_LABEL: ${{ vars.SLACK_CHANNEL_LABEL }}
-          # Build now, then hold until exactly 10:00 IST to post.
-          DIGEST_POST_AT: "10:00"
+          # Anthropic powers the single ranking call. Optional: if this secret
+          # is unset, ranker.py automatically falls back to Perplexity.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Build now, then hold until exactly 08:00 IST to post.
+          DIGEST_POST_AT: "08:00"
         run: python src/main.py ${{ (github.event_name == 'workflow_dispatch' && inputs.test) && '--test' || '' }} ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
 
       # --- Feedback loop (only when BLOB_READ_WRITE_TOKEN is configured) -------

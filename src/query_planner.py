@@ -9,18 +9,22 @@ of QueryPlans split into four tracks:
   the ventures/clinical split). These run every day and pull all keywords from
   the relevant sub-buckets, not 3 samples.
 
-  Track B — ~15 rotation plans covering the long tail of non-priority
-  sub-buckets. Deterministic 14-day cycle keyed on the digest date.
+  Track B — rotation plans covering the long tail of non-priority sub-buckets.
+  Plans/day is derived from `track_b_rotation_days` so the whole long-tail
+  universe is covered every N days (default 7 → ~35 plans/day), capped by
+  `track_b_plans_per_day` for budget safety. Deterministic, keyed on the date.
 
   Voice — 2 plans (India + US) naming Tier-1 voices from voices.xlsx.
 
   Firm — 1 plan naming PE/VC firms from the `New Additions` tab (PE/Strategics
   coverage anchor — distinct from the bucket-keyword Track A plan).
 
-~31 plans/day total. Pure functions; same Excel + same date → same plans.
+~51 plans/day total at a 7-day rotation. Pure functions; same Excel + same
+date → same plans.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date as date_cls
 from functools import lru_cache
@@ -68,6 +72,11 @@ class Voice:
     reach_indicator: str
     linkedin_url: str
     geography: Literal["India", "US"]
+    # Optional feed URL (column J). Most voices post on LinkedIn/X with no RSS,
+    # but some have a Substack / blog / podcast feed. When present, rss_fetcher
+    # pulls it directly — a far more reliable signal than asking Perplexity to
+    # find what they posted. Blank for voices without a feed.
+    rss_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,7 +221,7 @@ def load_voices() -> list[Voice]:
         for r in rows[3:]:
             if _is_blank(r):
                 continue
-            cells = list(r) + [None] * max(0, 9 - len(r))
+            cells = list(r) + [None] * max(0, 10 - len(r))
             name = _s(cells[1])
             if not name:
                 continue
@@ -226,6 +235,7 @@ def load_voices() -> list[Voice]:
                 reach_indicator=_s(cells[6]),
                 linkedin_url=_s(cells[7]),
                 geography=geo,
+                rss_url=_s(cells[9]),
             ))
     return out
 
@@ -566,7 +576,15 @@ def _build_track_b_plans(
     today: date_cls,
 ) -> list[QueryPlan]:
     all_subs = _all_non_priority_subs(kws)
-    picks = _rotation_pick(all_subs, today, config.TRACK_B_PLANS_PER_DAY)
+    # Plans/day is DERIVED from the desired rotation length so the full long-tail
+    # universe is covered every `track_b_rotation_days` days. (Previously
+    # track_b_rotation_days was dead config and the period was an implicit
+    # ceil(len / track_b_plans_per_day); now rotation_days is the real knob and
+    # track_b_plans_per_day is a safety cap that protects the Perplexity budget.)
+    rotation_days = max(1, config.TRACK_B_ROTATION_DAYS)
+    derived = math.ceil(len(all_subs) / rotation_days) if all_subs else 0
+    plans_per_day = min(derived, config.TRACK_B_PLANS_PER_DAY) if derived else 0
+    picks = _rotation_pick(all_subs, today, plans_per_day)
     plans: list[QueryPlan] = []
     for bucket, sub_bucket, geo in picks:
         keywords = _track_b_keywords_for(bucket, sub_bucket, geo, kws)

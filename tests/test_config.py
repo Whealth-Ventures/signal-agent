@@ -41,19 +41,21 @@ class ConfigConstantsTest(unittest.TestCase):
     def test_budget_constants(self) -> None:
         self.assertEqual(config.MAX_PERPLEXITY_CALLS_PER_DAY, 60)
         self.assertEqual(config.DEDUP_WINDOW_DAYS, 30)
-        self.assertEqual(config.MAX_DIGEST_ITEMS, 40)
+        self.assertEqual(config.MAX_DIGEST_ITEMS, 22)
         self.assertEqual(config.TOP_SUMMARY_SIZE, 5)
 
     def test_track_b_constants(self) -> None:
-        self.assertEqual(config.TRACK_B_PLANS_PER_DAY, 18)
-        self.assertEqual(config.TRACK_B_ROTATION_DAYS, 14)
+        # track_b_plans_per_day is now a budget-safety CAP; the actual plans/day
+        # is derived from the rotation length (7-day full cycle).
+        self.assertEqual(config.TRACK_B_PLANS_PER_DAY, 40)
+        self.assertEqual(config.TRACK_B_ROTATION_DAYS, 7)
 
     def test_embedding_model(self) -> None:
         self.assertEqual(config.EMBEDDING_MODEL, "text-embedding-3-small")
 
     def test_schedule(self) -> None:
         self.assertEqual(config.DIGEST_TZ, "Asia/Kolkata")
-        self.assertEqual(config.DIGEST_HOUR_LOCAL, 10)
+        self.assertEqual(config.DIGEST_HOUR_LOCAL, 8)
 
     def test_prompts_load_from_disk(self) -> None:
         # Both prompts come from prompts/*.md, not inline strings.

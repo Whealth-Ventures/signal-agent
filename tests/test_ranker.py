@@ -24,6 +24,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Fixed timestamp so recency (the new primary within-tier sort, post-#5) ties
+# across fixtures and the score-based selection assertions still hold. Pass
+# `published_at` explicitly to test recency ordering.
+_FIXED_TS = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+
+
 def _mk_story(
     slug: str,
     *,
@@ -31,14 +37,17 @@ def _mk_story(
     summary: str = "",
     priority_bucket: str | None = None,
     geo: str | None = None,
+    published_at: datetime | None = None,
 ) -> Story:
     url = f"https://e.example/{slug}"
     return Story(
         id=story_id(url),
         canonical_url=url,
-        canonical_title=f"Story {slug}",
-        canonical_summary=summary or f"Summary for {slug}.",
-        published_at=_utcnow(),
+        # Healthcare-worded so the ranker's topicality gate (is_healthcare, now
+        # on the main path per #5) keeps these fixtures as candidates.
+        canonical_title=f"Hospital deal {slug}",
+        canonical_summary=summary or f"Healthcare funding news about {slug}.",
+        published_at=published_at or _FIXED_TS,
         relevance_score=score,
         priority_bucket=priority_bucket,
         geo=geo,
@@ -95,7 +104,8 @@ class BuildPromptTest(unittest.TestCase):
         long = "x" * 1000
         grouped = ranker._group_for_prompt([_mk_story("a", summary=long)])
         prompt = ranker.build_prompt(grouped)
-        self.assertLess(prompt.count("x"), 300)
+        # Summary is truncated to RANKER_SUMMARY_MAX_CHARS (350) before the prompt.
+        self.assertLess(prompt.count("x"), config.RANKER_SUMMARY_MAX_CHARS + 10)
 
 
 # --- JSON extraction ---------------------------------------------------
@@ -146,48 +156,69 @@ class ParseRankedTest(unittest.TestCase):
             {"story_id": a.id, "tier": "A", "one_liner": "Decent news"},
             {"story_id": c.id, "tier": "C", "one_liner": "Drop me"},
         ]})
-        decisions, fallback = ranker.parse_ranked(text, self.by_id)
+        decisions, buckets, fallback = ranker.parse_ranked(text, self.by_id)
         self.assertFalse(fallback)
         self.assertEqual(decisions[b.id], ("S", "Big news"))
         self.assertEqual(decisions[a.id], ("A", "Decent news"))
         self.assertEqual(decisions[c.id], ("C", "Drop me"))
 
     def test_garbage_marks_fallback(self) -> None:
-        decisions, fallback = ranker.parse_ranked("not json", self.by_id)
+        decisions, buckets, fallback = ranker.parse_ranked("not json", self.by_id)
         self.assertTrue(fallback)
         self.assertEqual(decisions, {})
+        self.assertEqual(buckets, {})
 
     def test_unknown_id_dropped(self) -> None:
         text = json.dumps({"stories": [
             {"story_id": "definitely_not_an_id", "tier": "S", "one_liner": "x"},
         ]})
-        decisions, _ = ranker.parse_ranked(text, self.by_id)
+        decisions, _buckets, _ = ranker.parse_ranked(text, self.by_id)
         self.assertEqual(decisions, {})
 
     def test_invalid_tier_dropped(self) -> None:
         text = json.dumps({"stories": [
             {"story_id": self.stories[0].id, "tier": "D", "one_liner": "x"},
         ]})
-        decisions, _ = ranker.parse_ranked(text, self.by_id)
+        decisions, _buckets, _ = ranker.parse_ranked(text, self.by_id)
         self.assertEqual(decisions, {})
+
+    def test_bucket_parsed_when_valid(self) -> None:
+        a = self.stories[0]
+        text = json.dumps({"stories": [
+            {"story_id": a.id, "tier": "S", "one_liner": "x",
+             "bucket": "fda_regulatory"},
+        ]})
+        decisions, buckets, _ = ranker.parse_ranked(text, self.by_id)
+        self.assertEqual(buckets[a.id], "fda_regulatory")
+
+    def test_invalid_bucket_ignored(self) -> None:
+        a = self.stories[0]
+        text = json.dumps({"stories": [
+            {"story_id": a.id, "tier": "S", "one_liner": "x",
+             "bucket": "not_a_real_bucket"},
+        ]})
+        decisions, buckets, _ = ranker.parse_ranked(text, self.by_id)
+        self.assertIn(a.id, decisions)
+        self.assertNotIn(a.id, buckets)
 
 
 # --- Selection ---------------------------------------------------------
 
 class SelectionTest(unittest.TestCase):
-    def test_keep_all_s(self) -> None:
-        stories = [
-            _mk_story("s1", priority_bucket="venture_ipo", score=0.5),
-            _mk_story("s2", priority_bucket="venture_ipo", score=0.6),
-        ]
+    """Uniform per-bucket selection: fixed top summary + up to per_bucket_max
+    per bucket, no 'Other', top stories not duplicated into their bucket."""
+
+    def test_per_bucket_cap(self) -> None:
+        # 3 stories in one bucket, no top pulled → body capped at per_bucket_max.
+        stories = [_mk_story(f"s{i}", priority_bucket="venture_ipo")
+                   for i in range(3)]
         grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("S", "y"),
-        }
-        by_priority, other = ranker._select(grouped, decisions, max_total=40)
+        decisions = {s.id: ("A", "x") for s in stories}
+        top, by_priority = ranker._select(
+            grouped, decisions, per_bucket_max=2, top_summary_size=0,
+        )
+        self.assertEqual(top, [])
         self.assertEqual(len(by_priority["venture_ipo"]), 2)
-        self.assertEqual(other, [])
 
     def test_drop_tier_c(self) -> None:
         stories = [
@@ -195,126 +226,69 @@ class SelectionTest(unittest.TestCase):
             _mk_story("s2", priority_bucket="venture_ipo"),
         ]
         grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("C", "drop"),
-        }
-        by_priority, _ = ranker._select(grouped, decisions, max_total=40)
-        self.assertEqual(len(by_priority["venture_ipo"]), 1)
+        decisions = {stories[0].id: ("S", "x"), stories[1].id: ("C", "drop")}
+        _, by_priority = ranker._select(
+            grouped, decisions, per_bucket_max=2, top_summary_size=0,
+        )
+        ids = {r.story.id for r in by_priority.get("venture_ipo", [])}
+        self.assertIn(stories[0].id, ids)
+        self.assertNotIn(stories[1].id, ids)
 
-    def test_b_kept_only_when_category_otherwise_empty(self) -> None:
-        # First bucket has S+B → only S survives.
-        # Second bucket has only B → that B survives (category would be empty).
-        stories = [
-            _mk_story("s1", priority_bucket="venture_ipo"),
-            _mk_story("s2", priority_bucket="venture_ipo"),
-            _mk_story("s3", priority_bucket="ai_healthcare"),
-        ]
-        grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("B", "y"),
-            stories[2].id: ("B", "z"),
-        }
-        by_priority, _ = ranker._select(grouped, decisions, max_total=40)
-        self.assertEqual(len(by_priority["venture_ipo"]), 1)
-        self.assertEqual(by_priority["venture_ipo"][0].story.id, stories[0].id)
-        self.assertEqual(len(by_priority["ai_healthcare"]), 1)
-
-    def test_empty_other_isnt_artificially_filled(self) -> None:
-        stories = [_mk_story("s1", priority_bucket=None)]
-        grouped = ranker._group_for_prompt(stories)
-        decisions = {stories[0].id: ("B", "x")}
-        _, other = ranker._select(grouped, decisions, max_total=40)
-        # Other is never elevated by the "category empty → keep one B" rule.
-        self.assertEqual(other, [])
-
-    def test_target_min_zero_is_pure_threshold(self) -> None:
-        # One S and three B in the same category, no floor → only the S survives.
+    def test_top_not_duplicated_in_bucket(self) -> None:
+        # The top-summary pick is pulled OUT of its bucket body (no dup).
         stories = [
             _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
-            _mk_story("b1", priority_bucket="venture_ipo", score=0.8),
-            _mk_story("b2", priority_bucket="venture_ipo", score=0.7),
-            _mk_story("b3", priority_bucket="venture_ipo", score=0.6),
+            _mk_story("s2", priority_bucket="venture_ipo", score=0.8),
         ]
         grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("B", "y"),
-            stories[2].id: ("B", "z"),
-            stories[3].id: ("B", "w"),
-        }
-        by_priority, _ = ranker._select(grouped, decisions, max_total=40, target_min=0)
-        self.assertEqual(len(by_priority["venture_ipo"]), 1)
+        decisions = {stories[0].id: ("S", "x"), stories[1].id: ("A", "y")}
+        top, by_priority = ranker._select(
+            grouped, decisions, per_bucket_max=2, top_summary_size=1,
+        )
+        self.assertEqual(len(top), 1)
+        top_ids = {r.story.id for r in top}
+        body_ids = {r.story.id for r in by_priority.get("venture_ipo", [])}
+        self.assertTrue(top_ids.isdisjoint(body_ids))
 
-    def test_backfill_to_floor_with_tier_b(self) -> None:
-        # One S and three B; floor of 3 → backfill the two best B to reach 3.
-        stories = [
-            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
-            _mk_story("b1", priority_bucket="venture_ipo", score=0.85),
-            _mk_story("b2", priority_bucket="venture_ipo", score=0.80),
-            _mk_story("b3", priority_bucket="venture_ipo", score=0.40),
-        ]
-        grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("B", "y"),
-            stories[2].id: ("B", "z"),
-            stories[3].id: ("B", "w"),
-        }
-        by_priority, _ = ranker._select(grouped, decisions, max_total=40, target_min=3)
-        chosen = by_priority["venture_ipo"]
-        self.assertEqual(len(chosen), 3)
-        ids = {r.story.id for r in chosen}
-        # Highest-scoring B backfilled; the 0.40 one left out.
-        self.assertIn(stories[1].id, ids)
-        self.assertIn(stories[2].id, ids)
-        self.assertNotIn(stories[3].id, ids)
-
-    def test_backfill_never_resurrects_tier_c(self) -> None:
-        # Floor is high but the only leftovers are Tier-C → they stay dropped.
-        stories = [
-            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
-            _mk_story("c1", priority_bucket="venture_ipo", score=0.8),
-            _mk_story("c2", priority_bucket="venture_ipo", score=0.7),
-        ]
-        grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("C", "drop"),
-            stories[2].id: ("C", "drop"),
-        }
-        by_priority, _ = ranker._select(grouped, decisions, max_total=40, target_min=10)
-        self.assertEqual(len(by_priority["venture_ipo"]), 1)
-
-    def test_backfill_respects_max_total(self) -> None:
-        # Floor above the ceiling → ceiling wins.
-        stories = [
-            _mk_story(f"s{i}", priority_bucket="venture_ipo", score=0.9 - i * 0.01)
-            for i in range(6)
-        ]
+    def test_bucket_empty_when_sole_story_promoted(self) -> None:
+        # A bucket whose only story is promoted to the top shows nothing in the
+        # body (we never duplicate; can't manufacture a second story).
+        stories = [_mk_story("s1", priority_bucket="venture_ipo")]
         grouped = ranker._group_for_prompt(stories)
         decisions = {stories[0].id: ("S", "x")}
-        decisions.update({s.id: ("B", "b") for s in stories[1:]})
-        by_priority, _ = ranker._select(grouped, decisions, max_total=3, target_min=10)
-        self.assertEqual(len(by_priority["venture_ipo"]), 3)
+        top, by_priority = ranker._select(
+            grouped, decisions, per_bucket_max=2, top_summary_size=1,
+        )
+        self.assertEqual(len(top), 1)
+        self.assertNotIn("venture_ipo", by_priority)
 
-    def test_backfill_spans_categories_including_other(self) -> None:
-        # Floor pulls the best leftover B regardless of category, incl. Other.
+    def test_unbucketed_stories_ignored(self) -> None:
+        # _select only ever surfaces the 8 priority buckets — a story with no
+        # bucket (OTHER_KEY) produces nothing. (rank_stories force-buckets
+        # upstream so this doesn't happen in practice.)
+        stories = [_mk_story("s1", priority_bucket=None)]
+        grouped = ranker._group_for_prompt(stories)
+        decisions = {stories[0].id: ("S", "x")}
+        top, by_priority = ranker._select(
+            grouped, decisions, per_bucket_max=2, top_summary_size=5,
+        )
+        self.assertEqual(top, [])
+        self.assertEqual(by_priority, {})
+
+    def test_distinct_buckets_each_capped(self) -> None:
         stories = [
-            _mk_story("s1", priority_bucket="venture_ipo", score=0.9),
-            _mk_story("b_other", priority_bucket=None, score=0.88),
+            _mk_story("v1", priority_bucket="venture_ipo"),
+            _mk_story("v2", priority_bucket="venture_ipo"),
+            _mk_story("v3", priority_bucket="venture_ipo"),
+            _mk_story("a1", priority_bucket="ai_healthcare"),
         ]
         grouped = ranker._group_for_prompt(stories)
-        decisions = {
-            stories[0].id: ("S", "x"),
-            stories[1].id: ("B", "y"),
-        }
-        by_priority, other = ranker._select(
-            grouped, decisions, max_total=40, target_min=2,
+        decisions = {s.id: ("A", "x") for s in stories}
+        _, by_priority = ranker._select(
+            grouped, decisions, per_bucket_max=2, top_summary_size=0,
         )
-        self.assertEqual(len(by_priority["venture_ipo"]), 1)
-        self.assertEqual(len(other), 1)  # the Other B was backfilled to hit the floor
+        self.assertEqual(len(by_priority["venture_ipo"]), 2)
+        self.assertEqual(len(by_priority["ai_healthcare"]), 1)
 
 
 class TopSummaryTest(unittest.TestCase):

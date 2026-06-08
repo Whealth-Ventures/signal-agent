@@ -15,7 +15,7 @@ For a one-page map of "I want to change X, where do I go?", see [EDITING.md](EDI
 These are the highest-impact tweaks. Editing them is a copy edit, not a code change.
 
 ### `prompts/ranker_system.md`
-System message sent to `sonar-reasoning-pro` on every digest run.
+System message sent to the ranking model (Claude, or Perplexity sonar-reasoning-pro on fallback) on every digest run.
 - **What it controls:** tone, audience framing ("you are an editor for a VC firm"), how strictly the model interprets the magnitude rubric, output format constraint (JSON only).
 - **When to tweak:** when the digest feels off-tone (too marketing-y, too breathless, too dry), or when the model is ignoring the rubric.
 
@@ -33,9 +33,10 @@ All grouped by purpose below. Defaults shown. To change a value: open `inputs/tu
 - `daily_budget_usd = 3.0` — soft budget reference, currently used only for logging.
 
 ### Digest shape
-- `max_digest_items = 22` — ceiling on total ranked stories. With `target_digest_min` as the floor, most days land in a tight band just under this.
-- `target_digest_min = 18` — floor on total ranked stories. If the normal keep-all-S / keep-A selection lands below this, the ranker backfills with the best remaining Tier-B stories (highest tier→score first, across every category including "Other") until the floor is hit or candidates run out. This is what keeps slow news days from collapsing to ~10 stories. Tier-C is never backfilled, so quality holds. Set to `0` to disable the floor and get pure threshold behaviour. Keep it below `max_digest_items`.
-- `top_summary_size = 5` — count of stories promoted into the "Today's biggest stories" section at the top of the Slack post.
+- `max_digest_items = 22` — overall safety ceiling on total ranked stories. With the per-bucket rule below, a full day lands at `top_summary_size + 8 × per_bucket_max` (≈ 5 + 16 = 21), so this rarely binds.
+- `per_bucket_max = 2` — **the uniformity knob.** Each of the 8 priority buckets shows 1–2 stories (this cap), so the digest body is consistent day to day and no bucket dominates. A bucket is empty only when it genuinely has no story that day. Top-summary stories are pulled out of their bucket (never duplicated).
+- `top_summary_size = 5` — count of stories promoted into the "Today's biggest stories" section at the top of the Slack post. This is a flat highlight list — NOT broken out by category.
+- `target_digest_min = 18` — legacy floor knob; no longer used by the per-bucket selection (kept for reference). Digest size is now governed by `top_summary_size` + `per_bucket_max`.
 
 ### Dedup
 - `dedup_window_days = 30` — how far back "recently sent" goes. Three different filters use it: URL dedup at signal ingestion, ranker candidate filter, and the cross-day embedding similarity check. Raise if you keep seeing repeats; lower if fresh-but-still-relevant stories are being squeezed out.
@@ -67,30 +68,34 @@ The first three (`tier1_voice`, `trusted_publication`, `firm_mention`) have a bl
 
 The pattern column for the other boosters is a Python regex matched case-insensitively against the title + summary.
 
-**Tuning intuition:** boosters shape the *ordering* of candidates inside the ranker pool, but they don't directly determine what's in the digest. The LLM + magnitude rubric does final selection. If a category feels under-represented (e.g. M&A), raising its booster makes more M&A stories survive to the ranker; the rubric still has the final say. The ranker pool is currently 200 stories cap.
+**Tuning intuition:** boosters shape the *ordering* of candidates inside the ranker pool, but they don't directly determine what's in the digest. The LLM + magnitude rubric does final selection. Note that since #5, relevance/boosters no longer gate or order the digest (recency + magnitude tiering do) — boosters now only affect the audit score and the recency-tiebreak. The ranker candidate pool is recency-ordered, ~120 stories cap.
 
 ### Ranker prompt mechanics
-- `min_candidate_score = 0.0` — pre-filter on relevance_score before the LLM sees stories. 0.0 = no pre-filter. Worth raising only if cheap pre-filtering becomes important; otherwise the magnitude rubric is the right place to gate.
+- `min_candidate_score = 0.0` — deprecated as a gate. Relevance no longer filters candidates; a deterministic healthcare topicality gate (`topicality.py`) does. Leave at 0.0.
 - `one_liner_max_chars = 120` — hard cap on the one-line headline. Forces newsroom punchiness.
-- `ranker_summary_max_chars = 220` — how much of each story's summary the prompt shows the LLM.
+- `ranker_summary_max_chars = 400` — how much of each story's summary the ranker reads when writing the one-liner. 300–400 gives the model enough context for accurate, precise headlines (raised from 220).
 
 ### Models
-- `perplexity_model_fetch = sonar-pro` — used for the 30+-plan fetch sweep.
-- `perplexity_model_rank = sonar-reasoning-pro` — used for the single ranking call.
+- `perplexity_model_fetch = sonar-pro` — used for the fetch sweep.
+- `ranker_provider = anthropic` — which vendor runs the single ranking call: `anthropic` (Claude) or `perplexity`. Auto-falls back to Perplexity if `ANTHROPIC_API_KEY` is unset.
+- `anthropic_model_rank = claude-sonnet-4-5` — Claude model for the ranking call (when provider is anthropic).
+- `anthropic_max_tokens_rank = 4096` — max output tokens for the ranking call (must fit the JSON for the whole candidate pool).
+- `perplexity_model_rank = sonar-reasoning-pro` — the ranking model used only when falling back to Perplexity.
 - `perplexity_recency = day` — recency filter on the fetch sweep.
 - `embedding_model = text-embedding-3-small` — for both content-corpus indexing and signal embedding. Switching models requires re-indexing the corpus.
 
 ### HTTP
 - `http_timeout_s = 30` — default for fetch calls.
-- `http_timeout_rank_s = 120` — looser for `sonar-reasoning-pro` (it does extended chain-of-thought).
+- `http_timeout_rank_s = 120` — looser timeout for the ranking call (extended reasoning).
 - `http_max_retries = 4`
 - `url_validation_timeout_s = 10` — HEAD validation budget per story before posting.
 
 ### Schedule
-- `digest_tz = Asia/Kolkata`, `digest_hour_local = 10` — the *intended* fire time (10am IST). The actual cron is in `.github/workflows/daily-digest.yml` (set to 04:30 UTC). GitHub Actions cron is best-effort with documented delays of 5–60+ minutes.
+- `digest_tz = Asia/Kolkata`, `digest_hour_local = 8` — the *intended* fire time (8am IST). The actual cron is in `.github/workflows/daily-digest.yml` (schedule at 02:20 UTC = 07:50 IST, then an in-job hold until 08:00). GitHub Actions cron is best-effort with documented delays of 5–60+ minutes — see `docs/scheduling.md` for the punctual external-pinger setup.
 
 ### Track B rotation
-- `track_b_plans_per_day = 18`, `track_b_rotation_days = 14` — non-priority sub-buckets cycle through a 14-day rotation, 18 picks per day. Tuned so all ~245 (sub-bucket × geo) combinations are covered within the cycle.
+- `track_b_rotation_days = 7` — the full-cycle length. Plans/day is **derived** from this (`ceil(non-priority subs / rotation_days)` ≈ 35/day at 7 days), so all ~245 (sub-bucket × geo) combinations are covered within the cycle. Lower it to cover the long tail faster, at higher Perplexity cost.
+- `track_b_plans_per_day = 40` — a **safety cap** on the derived plans/day, protecting the Perplexity budget. It no longer sets the count directly.
 
 ## Structural levers in `inputs/tuning.xlsx`
 

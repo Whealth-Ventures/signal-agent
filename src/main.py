@@ -1,8 +1,8 @@
-"""src/main.py — orchestrator. Run from cron at 10am IST.
+"""src/main.py — orchestrator. Run from cron at 8am IST.
 
 Wires the daily pipeline together: setup → fetch (Perplexity + RSS) → save →
-score → rank → console + email → persist digest. Returns exit code 0 if the
-email was sent, 1 otherwise.
+score → rank → console + Slack → persist digest. Returns exit code 0 if the
+Slack post was sent, 1 otherwise.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from perplexity_client import (
 )
 from query_planner import QueryPlan, build_query_plans
 from ranker import _extract_json
-from rss_fetcher import fetch_all_newsletters
+from rss_fetcher import fetch_all_newsletters, fetch_all_voice_feeds
 
 PERPLEXITY_HEADROOM = 2  # leave room for ranker (1 call) + 1 retry/buffer
 
@@ -291,12 +291,13 @@ def ensure_content_indexed(
 
 
 def _geo_tag(geo: str | None) -> str:
-    """Compact tag used in console preview + Slack: '[IND] ' / '[US]  ' / ''."""
+    """Compact tag used in console preview: every story is tagged India/US/Global
+    (Global is the default for missing/unknown geo)."""
     if geo == "India":
         return "[IND] "
     if geo == "US":
-        return "[US]  "
-    return ""
+        return "[US] "
+    return "[GLOBAL] "
 
 
 def _priority_display(key: str | None) -> str:
@@ -471,15 +472,20 @@ def run_pipeline(
             _progress("[2/5] RSS sweep: skipped (--skip-rss)")
             _log({"step": "rss_fetch_skipped"})
         else:
-            _progress("[2/5] RSS sweep: fetching newsletters…")
-            rss_signals = fetch_all_newsletters(http=http_client)
+            _progress("[2/5] RSS sweep: fetching newsletters + voice feeds…")
+            newsletter_signals = fetch_all_newsletters(http=http_client)
+            voice_signals = fetch_all_voice_feeds(http=http_client)
+            rss_signals = newsletter_signals + voice_signals
             _progress(
-                f"      done: {len(rss_signals)} signals in "
-                f"{time.monotonic() - t0:.1f}s"
+                f"      done: {len(rss_signals)} signals "
+                f"({len(newsletter_signals)} newsletter, {len(voice_signals)} voice) "
+                f"in {time.monotonic() - t0:.1f}s"
             )
             _log({
                 "step": "rss_fetch_done",
                 "signals_collected": len(rss_signals),
+                "newsletter_signals": len(newsletter_signals),
+                "voice_signals": len(voice_signals),
                 "elapsed_seconds": round(time.monotonic() - t0, 2),
             })
 

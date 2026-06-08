@@ -124,13 +124,14 @@ class GeoTagTest(unittest.TestCase):
         self.assertEqual(slack_client._geo_tag("India"), "[IND] ")
 
     def test_us_tag(self) -> None:
-        self.assertEqual(slack_client._geo_tag("US"), "[US]  ")
+        self.assertEqual(slack_client._geo_tag("US"), "[US] ")
 
-    def test_global_has_no_tag(self) -> None:
-        self.assertEqual(slack_client._geo_tag("Global"), "")
+    def test_global_tag(self) -> None:
+        self.assertEqual(slack_client._geo_tag("Global"), "[GLOBAL] ")
 
-    def test_none_has_no_tag(self) -> None:
-        self.assertEqual(slack_client._geo_tag(None), "")
+    def test_none_defaults_to_global(self) -> None:
+        # Every story is tagged now; missing/unknown geo → Global.
+        self.assertEqual(slack_client._geo_tag(None), "[GLOBAL] ")
 
 
 class BulletTest(unittest.TestCase):
@@ -142,13 +143,13 @@ class BulletTest(unittest.TestCase):
         # Source name is NEVER in the bullet, only the (Link) hyperlink.
         self.assertNotIn("e.example", b.replace("https://e.example/a", ""))
 
-    def test_format_global_has_no_tag(self) -> None:
+    def test_format_global_has_global_tag(self) -> None:
         r = _mk_ranked("a", one_liner="x", geo="Global")
         b = slack_client._bullet(r)
+        # Global now gets an explicit tag too (no untagged bullets).
+        self.assertTrue(b.startswith("• [GLOBAL] x"))
         self.assertNotIn("[IND]", b)
         self.assertNotIn("[US]", b)
-        self.assertNotIn("[GLB]", b)
-        self.assertNotIn("[Global]", b)
 
 
 class BuildBlocksTest(unittest.TestCase):

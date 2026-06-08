@@ -4,9 +4,12 @@ Discovers each newsletter's feed URL via heuristics (/feed, /rss, /feed.xml,
 /atom.xml) and falls back to <link rel="alternate"> in the site HTML. Filters
 entries to the last N hours (default 24) and emits Signal objects.
 
-Voices are NOT chased here — most tier-1 voices publish on LinkedIn/X with no
-RSS, and the spreadsheet has no rss_url column. They're covered by tier-1
-voice-anchored Perplexity queries (module 2) instead.
+Voices with an `rss_url` (column J of the Top Voices tabs) ARE chased here via
+`fetch_all_voice_feeds()` — many publish on a Substack / blog / podcast with a
+real feed, which is far more reliable than asking Perplexity to find what they
+posted. Voices without a feed (most LinkedIn/X-only voices) are still covered by
+the tier-1 voice-anchored Perplexity queries (module 2) instead. Note: LinkedIn
+itself has no usable feed, so LinkedIn-only voices can't be chased directly.
 
 In production `fetch_all_newsletters()` runs newsletter discovery+fetch
 concurrently via httpx.AsyncClient under an asyncio.Semaphore. Tests that
@@ -31,7 +34,7 @@ from bs4 import BeautifulSoup
 
 import config
 from models import Signal
-from query_planner import Newsletter, load_newsletters
+from query_planner import Newsletter, load_newsletters, load_voices
 
 USER_AGENT = "SignalAgent/0.1 (healthcare news digest)"
 SUMMARY_MAX_CHARS = 500
@@ -304,6 +307,36 @@ def fetch_all_newsletters(
     return asyncio.run(_fetch_all_newsletters_async(
         since_hours=since_hours, newsletters=newsletters,
     ))
+
+
+def _voices_as_feeds() -> list[Newsletter]:
+    """Voices that have an rss_url, wrapped as Newsletter objects so they reuse
+    the same discovery+parse machinery. `type_='voice'` tags their origin."""
+    out: list[Newsletter] = []
+    for v in load_voices():
+        url = (v.rss_url or "").strip()
+        if not url:
+            continue
+        out.append(Newsletter(
+            name=v.name, geography=v.geography, type_="voice",
+            author=v.name, description=v.role, reach=v.reach_indicator, url=url,
+        ))
+    return out
+
+
+def fetch_all_voice_feeds(
+    *,
+    since_hours: int = 24,
+    http: httpx.Client | None = None,
+) -> list[Signal]:
+    """Fetch the feeds of voices that have an rss_url. Returns [] when no voice
+    has a feed configured, so this is a safe no-op until the column is filled."""
+    feeds = _voices_as_feeds()
+    if not feeds:
+        return []
+    return fetch_all_newsletters(
+        since_hours=since_hours, http=http, newsletters=feeds,
+    )
 
 
 def _fetch_all_newsletters_sync(

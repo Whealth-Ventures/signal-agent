@@ -50,11 +50,13 @@ MAX_SECTION_CHARS = 2900     # actual limit is 3000; small headroom
 # serial HEAD-with-GET-fallback was a 10-30s blocker.
 URL_VALIDATION_CONCURRENCY = 10
 
-# Geo tag prefixes used in bullets. Empty string for global / unknown — per
-# user instruction, only India and US get explicit tags.
+# Geo tag prefixes used in bullets. EVERY story is tagged — India, US, or
+# Global — with Global as the default when geo is missing/unknown (e.g. RSS or
+# voice items), so the reader always sees a geography in front of the headline.
 _GEO_TAG: dict[str, str] = {
-    "India": "[IND] ",
-    "US":    "[US]  ",
+    "India":  "[IND] ",
+    "US":     "[US] ",
+    "Global": "[GLOBAL] ",
 }
 
 
@@ -125,7 +127,7 @@ def _escape_mrkdwn(s: str) -> str:
 
 
 def _geo_tag(geo: str | None) -> str:
-    return _GEO_TAG.get(geo or "", "")
+    return _GEO_TAG.get(geo or "Global", "[GLOBAL] ")
 
 
 def _bullet(r: RankedStory) -> str:
@@ -388,7 +390,12 @@ def _post_via_api(
                 "Authorization": f"Bearer {bot_token}",
                 "Content-Type": "application/json; charset=utf-8",
             },
-            json={"channel": channel_id, "text": text, "blocks": blocks},
+            # unfurl_links/unfurl_media false → no link preview cards under the
+            # digest; the (Link) hyperlinks stay, just without the previews.
+            json={
+                "channel": channel_id, "text": text, "blocks": blocks,
+                "unfurl_links": False, "unfurl_media": False,
+            },
         )
     except httpx.HTTPError as e:
         return False, None, f"{type(e).__name__}: {e}", None, None
@@ -414,7 +421,11 @@ def _post_via_webhook(
 ) -> tuple[bool, int | None, str | None]:
     """POST to incoming webhook. Returns (ok, http_status, error). No ts."""
     try:
-        resp = h.post(url, json={"text": text, "blocks": blocks})
+        # unfurl_links/unfurl_media false → suppress link preview cards.
+        resp = h.post(url, json={
+            "text": text, "blocks": blocks,
+            "unfurl_links": False, "unfurl_media": False,
+        })
     except httpx.HTTPError as e:
         return False, None, f"{type(e).__name__}: {e}"
     status = resp.status_code
