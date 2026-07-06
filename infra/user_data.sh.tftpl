@@ -1,8 +1,9 @@
 #!/bin/bash
 # signal-agent EC2 bootstrap (Amazon Linux 2023). Runs once at first boot.
 # Installs the toolchain, creates the app user/dirs, writes the non-secret deploy
-# config, sets up a token-less git credential helper, then attempts a first
-# clone + deploy. Real deploys thereafter go through SSM (deploy/deploy.sh).
+# config, and installs sa-fetch.sh (pulls the built artifact from S3). Deploys
+# are PUSH: Jenkins uploads a workspace tarball to S3 and SSM runs sa-fetch.sh +
+# deploy/deploy.sh. The box never talks to GitHub.
 set -euxo pipefail
 exec > >(tee -a /var/log/signal-agent-bootstrap.log) 2>&1
 
@@ -42,11 +43,10 @@ cat > /etc/signal-agent.env <<CFG
 REGION=${region}
 APP_DIR=${app_dir}
 APP_USER=${app_user}
-REPO_URL=${repo_url}
-BRANCH=${branch}
 AGENT_SECRET=${agent_secret}
 ADMIN_SECRET=${admin_secret}
 FEEDBACK_BUCKET=${feedback_bucket}
+ARTIFACT_KEY=artifacts/signal-agent/latest.tgz
 ADMIN_PORT=${admin_port}
 ADMIN_DOMAIN=${admin_domain}
 DIGEST_POST_AT=${digest_post_at}
@@ -54,53 +54,42 @@ DIGEST_ONCALENDAR=${digest_calendar}
 CFG
 chmod 644 /etc/signal-agent.env
 
-# --- token-less git credential helper -----------------------------------------
-# Fetches the GitHub read PAT from Secrets Manager on demand; nothing persisted.
-# Repo URL carries the username (x-access-token@...), so git only asks for the
-# password, which this returns.
-cat > /usr/local/bin/sa-git-askpass.sh <<'ASK'
+# --- artifact fetch (PUSH model; the box never talks to GitHub) ----------------
+# Downloads a workspace tarball from S3 and extracts it over $APP_DIR/repo.
+# data/, .venv, and admin/node_modules are NOT in the tarball, so they survive
+# (fast incremental rebuilds; SQLite + Chroma state preserved). Arg 1 overrides
+# the S3 key (Jenkins passes a specific commit); default = latest.
+cat > /usr/local/bin/sa-fetch.sh <<'FETCH'
 #!/bin/bash
 set -euo pipefail
 source /etc/signal-agent.env
-aws secretsmanager get-secret-value --region "$REGION" --secret-id "$AGENT_SECRET" \
-  --query SecretString --output text | jq -r '.GITHUB_TOKEN'
-ASK
-chmod 755 /usr/local/bin/sa-git-askpass.sh
+KEY="$${1:-$ARTIFACT_KEY}"
+case "$KEY" in
+  s3://*) URI="$KEY" ;;
+  *)      URI="s3://$FEEDBACK_BUCKET/$KEY" ;;
+esac
+mkdir -p "$APP_DIR/repo"
+aws s3 cp "$URI" /tmp/sa-app.tgz --region "$REGION"
+tar -xzf /tmp/sa-app.tgz -C "$APP_DIR/repo"
+rm -f /tmp/sa-app.tgz
+chown -R "$APP_USER:$APP_USER" "$APP_DIR/repo"
+FETCH
+chmod 755 /usr/local/bin/sa-fetch.sh
 
-# --- first clone (best-effort; no-op until the real PAT is in the secret) ------
-cat > /usr/local/bin/sa-bootstrap.sh <<'BOOT'
-#!/bin/bash
-# Idempotent: clone the repo if it isn't there yet. Safe to re-run via SSM.
-set -euo pipefail
-source /etc/signal-agent.env
-if [ -d "$APP_DIR/repo/.git" ]; then exit 0; fi
-export GIT_ASKPASS=/usr/local/bin/sa-git-askpass.sh
-TOKEN="$(/usr/local/bin/sa-git-askpass.sh || true)"
-if [ -z "$TOKEN" ] || [ "$TOKEN" = "REPLACE_ME" ] || [ "$TOKEN" = "null" ]; then
-  echo "GITHUB_TOKEN not set in $AGENT_SECRET yet — skipping clone."
-  exit 0
-fi
-AUTH_URL="https://x-access-token@$${REPO_URL#https://}"
-sudo -u "$APP_USER" GIT_ASKPASS=/usr/local/bin/sa-git-askpass.sh \
-  git clone --branch "$BRANCH" "$AUTH_URL" "$APP_DIR/repo"
-BOOT
-chmod 755 /usr/local/bin/sa-bootstrap.sh
-
-/usr/local/bin/sa-bootstrap.sh || true
-
-# Run the first deploy only if the clone succeeded and the PAT is real.
-if [ -x "${app_dir}/repo/deploy/deploy.sh" ]; then
-  "${app_dir}/repo/deploy/deploy.sh" "${branch}" || true
+# First fetch + deploy (best-effort; no-op until Jenkins has pushed an artifact).
+if /usr/local/bin/sa-fetch.sh 2>/dev/null && [ -x "${app_dir}/repo/deploy/deploy.sh" ]; then
+  "${app_dir}/repo/deploy/deploy.sh" || true
 fi
 
 %{ if orglife_enabled ~}
 # =============================================================================
 # orglife-bot co-tenant — a Slack Socket Mode helpdesk that shares this box.
 # Separate repo + separate Terraform state; here we only prepare its runtime:
-# a dedicated `${orglife_app_user}` user, an ISOLATED Node ${orglife_node_major}
-# (the system Node 20 above lacks node:sqlite, which its ticket store needs), a
-# git askpass, and an idempotent bootstrap. Deploys mirror signal-agent's:
-# Jenkins -> SSM -> ob-bootstrap.sh -> repo/deploy/deploy.sh.
+# a dedicated `${orglife_app_user}` user and an ISOLATED Node ${orglife_node_major}
+# (the system Node 20 above lacks node:sqlite, which its ticket store needs).
+# Deploys are PUSH, same as signal-agent: Jenkins uploads a workspace tarball
+# to S3 (artifacts/orglife-bot/) and SSM runs ob-fetch.sh + deploy/deploy.sh.
+# The box never talks to GitHub.
 # =============================================================================
 
 # Non-secret deploy config sourced by the orglife deploy scripts.
@@ -108,27 +97,16 @@ cat > /etc/orglife-bot.env <<CFG
 REGION=${region}
 APP_DIR=${orglife_app_dir}
 APP_USER=${orglife_app_user}
-REPO_URL=${orglife_repo_url}
-BRANCH=${orglife_branch}
 ORGLIFE_SECRET=${orglife_secret}
+ARTIFACT_BUCKET=${feedback_bucket}
+ARTIFACT_KEY=artifacts/orglife-bot/latest.tgz
 NODE_MAJOR=${orglife_node_major}
 NODE_BIN=/usr/local/bin/node${orglife_node_major}
 CFG
 chmod 644 /etc/orglife-bot.env
 
-# Token-less git askpass — returns the GitHub read PAT (GITHUB_TOKEN) from the
-# orglife-bot secret on demand; nothing persisted. Empty = try a public clone.
-cat > /usr/local/bin/ob-git-askpass.sh <<'ASK'
-#!/bin/bash
-set -euo pipefail
-source /etc/orglife-bot.env
-aws secretsmanager get-secret-value --region "$REGION" --secret-id "$ORGLIFE_SECRET" \
-  --query SecretString --output text 2>/dev/null | jq -r '.GITHUB_TOKEN // empty'
-ASK
-chmod 755 /usr/local/bin/ob-git-askpass.sh
-
-# Idempotent bootstrap: ensure the isolated Node, the app user/dirs, and the
-# repo clone. Safe to re-run via SSM (Jenkins calls this before deploy.sh).
+# Idempotent bootstrap: ensure the isolated Node and the app user/dirs. Safe to
+# re-run via SSM (Jenkins calls this before ob-fetch.sh + deploy.sh).
 cat > /usr/local/bin/ob-bootstrap.sh <<'BOOT'
 #!/bin/bash
 set -euo pipefail
@@ -148,29 +126,35 @@ if ! "$NODE_BIN" --version >/dev/null 2>&1; then
 fi
 
 # 2. App user + dirs. data/ persists across redeploys (SQLite ticket store);
-#    repo/ is re-checked-out each deploy.
+#    repo/ is refreshed from the S3 artifact each deploy.
 id -u "$APP_USER" &>/dev/null || useradd --system --create-home --shell /bin/bash "$APP_USER"
-mkdir -p "$APP_DIR/shared" "$APP_DIR/data"
+mkdir -p "$APP_DIR/shared" "$APP_DIR/data" "$APP_DIR/repo"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
-
-# 3. Clone the repo if not present yet (token if private, else public).
-if [ ! -d "$APP_DIR/repo/.git" ]; then
-  TOKEN="$(/usr/local/bin/ob-git-askpass.sh || true)"
-  if [ -z "$TOKEN" ] || [ "$TOKEN" = "REPLACE_ME" ] || [ "$TOKEN" = "null" ]; then
-    sudo -u "$APP_USER" git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR/repo" \
-      || echo "orglife clone failed — if the repo is private set GITHUB_TOKEN in $ORGLIFE_SECRET"
-  else
-    AUTH_URL="https://x-access-token@$${REPO_URL#https://}"
-    sudo -u "$APP_USER" GIT_ASKPASS=/usr/local/bin/ob-git-askpass.sh \
-      git clone --branch "$BRANCH" "$AUTH_URL" "$APP_DIR/repo" || true
-  fi
-fi
 BOOT
 chmod 755 /usr/local/bin/ob-bootstrap.sh
 
-# First bootstrap + deploy (best-effort; no-ops until the secret/PAT are set).
+# Artifact fetch (PUSH model) — mirrors sa-fetch.sh. Extraction is in place over
+# $APP_DIR/repo (tarball excludes node_modules; data/ lives outside repo/).
+cat > /usr/local/bin/ob-fetch.sh <<'FETCH'
+#!/bin/bash
+set -euo pipefail
+source /etc/orglife-bot.env
+KEY="$${1:-$ARTIFACT_KEY}"
+case "$KEY" in
+  s3://*) URI="$KEY" ;;
+  *)      URI="s3://$ARTIFACT_BUCKET/$KEY" ;;
+esac
+mkdir -p "$APP_DIR/repo"
+aws s3 cp "$URI" /tmp/ob-app.tgz --region "$REGION"
+tar -xzf /tmp/ob-app.tgz -C "$APP_DIR/repo"
+rm -f /tmp/ob-app.tgz
+chown -R "$APP_USER:$APP_USER" "$APP_DIR/repo"
+FETCH
+chmod 755 /usr/local/bin/ob-fetch.sh
+
+# First bootstrap + fetch + deploy (best-effort; no-op until Jenkins has pushed).
 /usr/local/bin/ob-bootstrap.sh || true
-if [ -x "${orglife_app_dir}/repo/deploy/deploy.sh" ]; then
-  "${orglife_app_dir}/repo/deploy/deploy.sh" "${orglife_branch}" || true
+if /usr/local/bin/ob-fetch.sh 2>/dev/null && [ -x "${orglife_app_dir}/repo/deploy/deploy.sh" ]; then
+  "${orglife_app_dir}/repo/deploy/deploy.sh" || true
 fi
 %{ endif ~}

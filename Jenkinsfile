@@ -59,18 +59,30 @@ pipeline {
         // withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-whealth']]) {
         sh '''
           set -eu
+          BUCKET="$(aws ssm get-parameter --region "$AWS_REGION" \
+                    --name "/$PROJECT/$APP_ENV/feedback-bucket" --query Parameter.Value --output text)"
           IID="$(aws ssm get-parameter --region "$AWS_REGION" \
-                  --name "/$PROJECT/$APP_ENV/instance-id" \
-                  --query Parameter.Value --output text)"
-          echo "Deploying $GIT_COMMIT to $IID"
+                  --name "/$PROJECT/$APP_ENV/instance-id" --query Parameter.Value --output text)"
+          KEY="artifacts/signal-agent/${GIT_COMMIT}.tgz"
 
+          # PUSH model: package the reviewed workspace and upload to S3. Build
+          # artifacts (.venv/.next/node_modules) and data/ are excluded — the box
+          # rebuilds and keeps its own state. The box never talks to GitHub.
+          echo "Packaging workspace -> s3://$BUCKET/$KEY"
+          tar czf /tmp/sa-app.tgz \
+            --exclude=./.git --exclude=./.venv --exclude=./admin/node_modules \
+            --exclude=./admin/.next --exclude=./data --exclude=./__pycache__ \
+            --exclude='*.pyc' .
+          aws s3 cp /tmp/sa-app.tgz "s3://$BUCKET/$KEY" --region "$AWS_REGION"
+          aws s3 cp "s3://$BUCKET/$KEY" "s3://$BUCKET/artifacts/signal-agent/latest.tgz" --region "$AWS_REGION"
+          rm -f /tmp/sa-app.tgz
+
+          echo "Deploying $KEY to $IID"
           CMD_ID="$(aws ssm send-command \
-            --region "$AWS_REGION" \
-            --instance-ids "$IID" \
-            --document-name AWS-RunShellScript \
-            --comment "signal-agent deploy ${GIT_COMMIT}" \
+            --region "$AWS_REGION" --instance-ids "$IID" \
+            --document-name AWS-RunShellScript --comment "signal-agent deploy ${GIT_COMMIT}" \
             --timeout-seconds 900 \
-            --parameters commands="[\\"sudo /usr/local/bin/sa-bootstrap.sh\\",\\"sudo /opt/signal-agent/repo/deploy/deploy.sh ${GIT_COMMIT}\\"]" \
+            --parameters '{"commands":["/usr/local/bin/sa-fetch.sh '"$KEY"'","/opt/signal-agent/repo/deploy/deploy.sh"]}' \
             --query Command.CommandId --output text)"
           echo "SSM command: $CMD_ID"
 

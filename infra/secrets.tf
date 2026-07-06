@@ -5,7 +5,7 @@
 
 resource "aws_secretsmanager_secret" "agent" {
   name        = local.secret_agent_name
-  description = "signal-agent daily digest runtime env (LLM keys, Slack, GitHub read PAT)."
+  description = "signal-agent daily digest runtime env (LLM keys + Slack)."
 }
 
 resource "aws_secretsmanager_secret_version" "agent_placeholder" {
@@ -18,9 +18,8 @@ resource "aws_secretsmanager_secret_version" "agent_placeholder" {
     SLACK_BOT_TOKEN     = ""
     SLACK_CHANNEL_ID    = ""
     SLACK_CHANNEL_LABEL = "#signal"
-    # Read-only fine-grained PAT (Contents: Read on Whealth-Ventures/signal-agent).
-    # Used to clone the private repo and to pull inputs/ + prompts/ each run.
-    GITHUB_TOKEN = "REPLACE_ME"
+    # PUSH deploy: the box gets its code as an S3 artifact from Jenkins, so no
+    # GitHub credential is needed here.
   })
 
   lifecycle {

@@ -3,21 +3,17 @@
 # systemd unit injects the runtime env (API keys, FEEDBACK_S3_BUCKET, etc.) via
 # EnvironmentFile=/opt/signal-agent/shared/agent.env.
 #
-# Before running it refreshes ONLY the data surface (inputs/ + prompts/) from
-# GitHub, so tuning/prompt edits made in the admin UI take effect the next
-# morning WITHOUT shipping unreviewed code. Code is deployed only via deploy.sh.
+# PUSH model: the box runs the inputs/ + prompts/ that shipped in the last
+# deploy. Tuning/prompt edits made in the admin UI (which commits them to the
+# repo) take effect on the NEXT deploy — the admin's commit to main triggers the
+# pipeline. The box never talks to GitHub.
 set -euo pipefail
 
 source /etc/signal-agent.env
 export PATH=/usr/local/bin:/usr/bin:/bin:$PATH
-export GIT_ASKPASS=/usr/local/bin/sa-git-askpass.sh
 
 REPO="$APP_DIR/repo"
 cd "$REPO"
-
-echo ">> refreshing inputs/ + prompts/ from origin/$BRANCH"
-git fetch --prune origin "$BRANCH" || true
-git checkout "origin/$BRANCH" -- inputs prompts || echo "WARN: data refresh skipped"
 
 echo ">> running digest (post-at ${DIGEST_POST_AT:-immediate})"
 .venv/bin/python src/main.py --post-at "${DIGEST_POST_AT:-}"

@@ -1,9 +1,8 @@
 #!/bin/bash
-# Deploy signal-agent on the EC2 box. Invoked by Jenkins via SSM Run Command
-# (as root) with the git ref to deploy, e.g.:  deploy.sh <commit-sha>
-#
-# Steps: ensure repo -> checkout ref -> materialize env from Secrets Manager ->
-# build agent venv + admin -> (re)install systemd units -> restart services.
+# Build + restart signal-agent from the artifact already extracted at
+# $APP_DIR/repo. PUSH model: Jenkins uploads a workspace tarball to S3 and the
+# SSM command runs sa-fetch.sh (download + extract) then this script. The box
+# never talks to GitHub.
 #
 # NOTE: no `set -x` — this handles secret JSON and must not echo it to the SSM
 # command output / CloudWatch.
@@ -12,24 +11,8 @@ set -euo pipefail
 source /etc/signal-agent.env
 export PATH=/usr/local/bin:/usr/bin:/bin:$PATH
 
-REF="${1:-$BRANCH}"
 REPO="$APP_DIR/repo"
-ASKPASS=/usr/local/bin/sa-git-askpass.sh
-
-echo ">> ensuring repo is present"
-/usr/local/bin/sa-bootstrap.sh
-test -d "$REPO/.git" || { echo "ERROR: repo not cloned — is GITHUB_TOKEN set in $AGENT_SECRET?"; exit 1; }
-
-echo ">> checking out $REF"
-runuser -u "$APP_USER" -- env GIT_ASKPASS="$ASKPASS" PATH="$PATH" bash -c "
-  set -euo pipefail
-  cd '$REPO'
-  git remote set-url origin 'https://x-access-token@${REPO_URL#https://}'
-  git fetch --prune origin '$BRANCH'
-  target='$REF'; [ \"\$target\" = '$BRANCH' ] && target='origin/$BRANCH'
-  git checkout -f \"\$target\"
-  git --no-pager log -1 --oneline
-"
+test -f "$REPO/requirements.txt" || { echo "ERROR: no artifact at $REPO — did sa-fetch.sh run?"; exit 1; }
 
 echo ">> materializing env files from Secrets Manager"
 AGENT_JSON="$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$AGENT_SECRET" --query SecretString --output text)"

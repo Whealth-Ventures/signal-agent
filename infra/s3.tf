@@ -48,4 +48,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "feedback" {
     filter { prefix = "state/" }
     noncurrent_version_expiration { noncurrent_days = 14 }
   }
+
+  # Deploy artifacts (PUSH model). Keep ~30 days of per-commit tarballs for
+  # rollback; expire superseded latest.tgz versions quickly.
+  rule {
+    id     = "expire-old-artifacts"
+    status = "Enabled"
+    filter { prefix = "artifacts/" }
+    expiration { days = 30 }
+    noncurrent_version_expiration { noncurrent_days = 7 }
+  }
 }

@@ -88,9 +88,20 @@ data "aws_iam_policy_document" "jenkins_deploy" {
     resources = ["*"]
   }
   statement {
-    sid       = "ResolveInstanceId"
-    actions   = ["ssm:GetParameter"]
-    resources = ["arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.env}/*"]
+    sid     = "ResolveInstanceId"
+    actions = ["ssm:GetParameter"]
+    # Covers the orglife-bot co-tenant params too (/orglife-bot/<env>/*): its
+    # pipeline deploys to this same box with this same policy.
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.env}/*",
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/orglife-bot/${var.env}/*",
+    ]
+  }
+  # PUSH model: upload the built workspace tarball for the box to fetch.
+  statement {
+    sid       = "UploadArtifacts"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${aws_s3_bucket.feedback.arn}/artifacts/*"]
   }
 }
 

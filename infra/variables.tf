@@ -138,7 +138,7 @@ variable "orglife_enabled" {
 
 variable "orglife_repo_url" {
   type    = string
-  default = "https://github.com/ashwin-krishnan-2070/orglife-bot.git"
+  default = "https://github.com/Whealth-Ventures/orglife-bot.git"
 }
 
 variable "orglife_branch" {
