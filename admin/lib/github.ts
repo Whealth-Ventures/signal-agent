@@ -54,11 +54,9 @@ export async function writeFile(
   }
 
   const buf = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
-  // The commit author/committer EMAIL must be the Vercel project owner, or
-  // Vercel (Hobby plan) blocks the auto-deploy with "commit author does not
-  // have contributing access". The editor's real identity is preserved in the
-  // author NAME and in the commit message for audit.
-  const ownerEmail = process.env.GIT_COMMIT_EMAIL || "ashwinknan@gmail.com";
+  // Commit author/committer EMAIL. The editor's real identity is preserved in
+  // the author NAME and in the commit message for audit.
+  const ownerEmail = process.env.GIT_COMMIT_EMAIL || "signal-agent@whealthventures.com";
   await gh.repos.createOrUpdateFileContents({
     owner,
     repo: name,

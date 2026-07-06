@@ -1,6 +1,6 @@
 # Signal Agent — Admin UI
 
-A small Next.js app for tuning the [`signal-agent`](https://github.com/ashwinknan/signal-agent) daily healthcare digest. Magic-link auth, no DB, auto-commits to the agent repo on save.
+A small Next.js app for tuning the [`signal-agent`](https://github.com/Whealth-Ventures/signal-agent) daily healthcare digest. Magic-link auth, no DB, auto-commits to the agent repo on save.
 
 ## What it edits
 
@@ -53,7 +53,7 @@ In the project settings → Environment Variables, add:
 | Name | Value |
 |---|---|
 | `GITHUB_TOKEN` | the `github_pat_...` from step 2 |
-| `GITHUB_OWNER` | `ashwinknan` (or whoever owns the agent repo) |
+| `GITHUB_OWNER` | `Whealth-Ventures` (or whoever owns the agent repo) |
 | `GITHUB_REPO` | `signal-agent` |
 | `GITHUB_BRANCH` | `main` |
 | `AUTH_SECRET` | a random 32+ char string (e.g. `openssl rand -hex 32`) |

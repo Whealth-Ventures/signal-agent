@@ -6,7 +6,7 @@ provider "aws" {
       Project   = var.project
       Env       = var.env
       ManagedBy = "terraform"
-      Repo      = "ashwinknan/signal-agent"
+      Repo      = "Whealth-Ventures/signal-agent"
       Owner     = "himanshu.khutiyare"
     }
   }

@@ -18,7 +18,7 @@ resource "aws_secretsmanager_secret_version" "agent_placeholder" {
     SLACK_BOT_TOKEN     = ""
     SLACK_CHANNEL_ID    = ""
     SLACK_CHANNEL_LABEL = "#signal"
-    # Read-only fine-grained PAT (Contents: Read on ashwinknan/signal-agent).
+    # Read-only fine-grained PAT (Contents: Read on Whealth-Ventures/signal-agent).
     # Used to clone the private repo and to pull inputs/ + prompts/ each run.
     GITHUB_TOKEN = "REPLACE_ME"
   })
@@ -37,7 +37,7 @@ resource "aws_secretsmanager_secret_version" "admin_placeholder" {
   secret_id = aws_secretsmanager_secret.admin.id
   secret_string = jsonencode({
     GITHUB_TOKEN         = "REPLACE_ME" # Contents: Read & Write (admin commits tuning/prompts)
-    GITHUB_OWNER         = "ashwinknan"
+    GITHUB_OWNER         = "Whealth-Ventures"
     GITHUB_REPO          = "signal-agent"
     GITHUB_BRANCH        = "main"
     GIT_COMMIT_EMAIL     = "signal-agent@whealthventures.com"

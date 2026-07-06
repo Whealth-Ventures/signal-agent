@@ -45,6 +45,17 @@ data "aws_iam_policy_document" "instance" {
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = ["${aws_s3_bucket.feedback.arn}/*"]
   }
+
+  # orglife-bot co-tenant: let the box read orglife-bot's runtime secret (owned
+  # by orglife-bot/infra) so its deploy.sh can materialize the env file.
+  dynamic "statement" {
+    for_each = var.orglife_enabled ? [1] : []
+    content {
+      sid       = "ReadOrglifeSecrets"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = [local.orglife_secret_arn_glob]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "instance" {

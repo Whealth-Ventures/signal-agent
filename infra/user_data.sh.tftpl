@@ -92,3 +92,85 @@ chmod 755 /usr/local/bin/sa-bootstrap.sh
 if [ -x "${app_dir}/repo/deploy/deploy.sh" ]; then
   "${app_dir}/repo/deploy/deploy.sh" "${branch}" || true
 fi
+
+%{ if orglife_enabled ~}
+# =============================================================================
+# orglife-bot co-tenant — a Slack Socket Mode helpdesk that shares this box.
+# Separate repo + separate Terraform state; here we only prepare its runtime:
+# a dedicated `${orglife_app_user}` user, an ISOLATED Node ${orglife_node_major}
+# (the system Node 20 above lacks node:sqlite, which its ticket store needs), a
+# git askpass, and an idempotent bootstrap. Deploys mirror signal-agent's:
+# Jenkins -> SSM -> ob-bootstrap.sh -> repo/deploy/deploy.sh.
+# =============================================================================
+
+# Non-secret deploy config sourced by the orglife deploy scripts.
+cat > /etc/orglife-bot.env <<CFG
+REGION=${region}
+APP_DIR=${orglife_app_dir}
+APP_USER=${orglife_app_user}
+REPO_URL=${orglife_repo_url}
+BRANCH=${orglife_branch}
+ORGLIFE_SECRET=${orglife_secret}
+NODE_MAJOR=${orglife_node_major}
+NODE_BIN=/usr/local/bin/node${orglife_node_major}
+CFG
+chmod 644 /etc/orglife-bot.env
+
+# Token-less git askpass — returns the GitHub read PAT (GITHUB_TOKEN) from the
+# orglife-bot secret on demand; nothing persisted. Empty = try a public clone.
+cat > /usr/local/bin/ob-git-askpass.sh <<'ASK'
+#!/bin/bash
+set -euo pipefail
+source /etc/orglife-bot.env
+aws secretsmanager get-secret-value --region "$REGION" --secret-id "$ORGLIFE_SECRET" \
+  --query SecretString --output text 2>/dev/null | jq -r '.GITHUB_TOKEN // empty'
+ASK
+chmod 755 /usr/local/bin/ob-git-askpass.sh
+
+# Idempotent bootstrap: ensure the isolated Node, the app user/dirs, and the
+# repo clone. Safe to re-run via SSM (Jenkins calls this before deploy.sh).
+cat > /usr/local/bin/ob-bootstrap.sh <<'BOOT'
+#!/bin/bash
+set -euo pipefail
+source /etc/orglife-bot.env
+
+# 1. Isolated Node (leaves signal-agent's system Node 20 untouched).
+if ! "$NODE_BIN" --version >/dev/null 2>&1; then
+  base="https://nodejs.org/dist/latest-v$NODE_MAJOR.x"
+  file="$(curl -fsSL "$base/" | grep -oE "node-v$NODE_MAJOR\.[0-9]+\.[0-9]+-linux-x64\.tar\.xz" | head -1)"
+  test -n "$file"
+  curl -fsSL "$base/$file" -o /tmp/node$NODE_MAJOR.tar.xz
+  mkdir -p /opt/nodejs && rm -rf /opt/nodejs/node$NODE_MAJOR
+  tar -xJf /tmp/node$NODE_MAJOR.tar.xz -C /opt/nodejs
+  mv /opt/nodejs/node-v*-linux-x64 /opt/nodejs/node$NODE_MAJOR
+  ln -sf /opt/nodejs/node$NODE_MAJOR/bin/node "$NODE_BIN"
+  rm -f /tmp/node$NODE_MAJOR.tar.xz
+fi
+
+# 2. App user + dirs. data/ persists across redeploys (SQLite ticket store);
+#    repo/ is re-checked-out each deploy.
+id -u "$APP_USER" &>/dev/null || useradd --system --create-home --shell /bin/bash "$APP_USER"
+mkdir -p "$APP_DIR/shared" "$APP_DIR/data"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+
+# 3. Clone the repo if not present yet (token if private, else public).
+if [ ! -d "$APP_DIR/repo/.git" ]; then
+  TOKEN="$(/usr/local/bin/ob-git-askpass.sh || true)"
+  if [ -z "$TOKEN" ] || [ "$TOKEN" = "REPLACE_ME" ] || [ "$TOKEN" = "null" ]; then
+    sudo -u "$APP_USER" git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR/repo" \
+      || echo "orglife clone failed — if the repo is private set GITHUB_TOKEN in $ORGLIFE_SECRET"
+  else
+    AUTH_URL="https://x-access-token@$${REPO_URL#https://}"
+    sudo -u "$APP_USER" GIT_ASKPASS=/usr/local/bin/ob-git-askpass.sh \
+      git clone --branch "$BRANCH" "$AUTH_URL" "$APP_DIR/repo" || true
+  fi
+fi
+BOOT
+chmod 755 /usr/local/bin/ob-bootstrap.sh
+
+# First bootstrap + deploy (best-effort; no-ops until the secret/PAT are set).
+/usr/local/bin/ob-bootstrap.sh || true
+if [ -x "${orglife_app_dir}/repo/deploy/deploy.sh" ]; then
+  "${orglife_app_dir}/repo/deploy/deploy.sh" "${orglife_branch}" || true
+fi
+%{ endif ~}

@@ -99,7 +99,7 @@ variable "wildcard_cert_arn" {
 
 variable "github_repo_url" {
   type    = string
-  default = "https://github.com/ashwinknan/signal-agent.git"
+  default = "https://github.com/Whealth-Ventures/signal-agent.git"
 }
 
 variable "github_branch" {

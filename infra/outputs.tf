@@ -35,5 +35,10 @@ output "admin_secret_name" {
 
 output "jenkins_deploy_policy_arn" {
   value       = aws_iam_policy.jenkins_deploy.arn
-  description = "Attach to the Jenkins role/user so the pipeline can deploy via SSM."
+  description = "Attach to the Jenkins role/user. Covers BOTH signal-agent and the orglife-bot co-tenant (same box, same SendCommand target)."
+}
+
+output "orglife_instance_id_param" {
+  value       = var.orglife_enabled ? aws_ssm_parameter.orglife_instance_id[0].name : null
+  description = "SSM param orglife-bot's Jenkins reads for the shared instance-id."
 }

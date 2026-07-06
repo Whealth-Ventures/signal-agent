@@ -46,7 +46,7 @@ Everything runs on **one EC2 box** in the existing `xponentiate-vpc`
 
 ### 0. Prerequisites
 - Terraform ≥ 1.11, AWS CLI, `AWS_PROFILE=Whealth`, `AWS_REGION=ap-south-1`.
-- Two GitHub fine-grained PATs on `ashwinknan/signal-agent`:
+- Two GitHub fine-grained PATs on `Whealth-Ventures/signal-agent`:
   - **read PAT** (Contents: Read) — for the box to clone + pull.
   - **read/write PAT** (Contents: Read & Write) — for the admin UI to commit
     tuning/prompt edits. (Can be the same token if you prefer.)
@@ -79,7 +79,7 @@ aws secretsmanager put-secret-value --secret-id signal-agent/prod/agent-env \
 aws secretsmanager put-secret-value --secret-id signal-agent/prod/admin-env \
   --secret-string '{
     "GITHUB_TOKEN":"github_pat_READ_WRITE",
-    "GITHUB_OWNER":"ashwinknan","GITHUB_REPO":"signal-agent","GITHUB_BRANCH":"main",
+    "GITHUB_OWNER":"Whealth-Ventures","GITHUB_REPO":"signal-agent","GITHUB_BRANCH":"main",
     "GIT_COMMIT_EMAIL":"signal-agent@whealthventures.com",
     "AUTH_SECRET":"'"$(openssl rand -hex 32)"'",
     "ADMIN_USER":"admin","ADMIN_PWD":"a-strong-password",
@@ -101,7 +101,7 @@ aws ssm send-command --instance-ids "$IID" --document-name AWS-RunShellScript \
 Watch it: `aws ssm get-command-invocation --command-id <id> --instance-id "$IID"`.
 
 ### 4. Jenkins pipeline
-- New **Multibranch Pipeline** pointed at `ashwinknan/signal-agent` (Jenkinsfile
+- New **Multibranch Pipeline** pointed at `Whealth-Ventures/signal-agent` (Jenkinsfile
   at repo root). It validates every branch/PR and deploys on `main`.
 - Give Jenkins AWS access: attach the Terraform output
   `jenkins_deploy_policy_arn` to the Jenkins EC2 instance role, **or** bind an
