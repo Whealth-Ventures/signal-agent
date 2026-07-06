@@ -14,6 +14,10 @@ export PATH=/usr/local/bin:/usr/bin:/bin:$PATH
 REPO="$APP_DIR/repo"
 test -f "$REPO/requirements.txt" || { echo "ERROR: no artifact at $REPO — did sa-fetch.sh run?"; exit 1; }
 
+# Defensive: systemd ExecStart's run-digest.sh needs the exec bit regardless of
+# what modes the tarball carried.
+chmod 755 "$REPO/deploy/"*.sh
+
 echo ">> materializing env files from Secrets Manager"
 AGENT_JSON="$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$AGENT_SECRET" --query SecretString --output text)"
 ADMIN_JSON="$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$ADMIN_SECRET" --query SecretString --output text)"

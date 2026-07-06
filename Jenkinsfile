@@ -91,7 +91,7 @@ pipeline {
             --region "$AWS_REGION" --instance-ids "$IID" \
             --document-name AWS-RunShellScript --comment "signal-agent deploy ${GIT_COMMIT}" \
             --timeout-seconds 900 \
-            --parameters '{"commands":["/usr/local/bin/sa-fetch.sh '"$KEY"'","/opt/signal-agent/repo/deploy/deploy.sh"]}' \
+            --parameters '{"commands":["/usr/local/bin/sa-fetch.sh '"$KEY"'","bash /opt/signal-agent/repo/deploy/deploy.sh"]}' \
             --query Command.CommandId --output text)"
           echo "SSM command: $CMD_ID"
 

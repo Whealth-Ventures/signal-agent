@@ -39,18 +39,20 @@ mkdir -p ${app_dir}/shared
 chown -R ${app_user}:${app_user} ${app_dir}
 
 # --- non-secret deploy config (sourced by all deploy scripts) -----------------
+# Values are quoted: this file is `source`d by bash and some values contain
+# spaces (e.g. the systemd OnCalendar spec).
 cat > /etc/signal-agent.env <<CFG
-REGION=${region}
-APP_DIR=${app_dir}
-APP_USER=${app_user}
-AGENT_SECRET=${agent_secret}
-ADMIN_SECRET=${admin_secret}
-FEEDBACK_BUCKET=${feedback_bucket}
-ARTIFACT_KEY=artifacts/signal-agent/latest.tgz
-ADMIN_PORT=${admin_port}
-ADMIN_DOMAIN=${admin_domain}
-DIGEST_POST_AT=${digest_post_at}
-DIGEST_ONCALENDAR=${digest_calendar}
+REGION="${region}"
+APP_DIR="${app_dir}"
+APP_USER="${app_user}"
+AGENT_SECRET="${agent_secret}"
+ADMIN_SECRET="${admin_secret}"
+FEEDBACK_BUCKET="${feedback_bucket}"
+ARTIFACT_KEY="artifacts/signal-agent/latest.tgz"
+ADMIN_PORT="${admin_port}"
+ADMIN_DOMAIN="${admin_domain}"
+DIGEST_POST_AT="${digest_post_at}"
+DIGEST_ONCALENDAR="${digest_calendar}"
 CFG
 chmod 644 /etc/signal-agent.env
 
