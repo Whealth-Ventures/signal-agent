@@ -27,6 +27,15 @@ pipeline {
 
   stages {
     stage('Agent — tests') {
+      environment {
+        // tests/test_config.py preflights that a configured env exists (on a
+        // dev machine that's the real .env). CI has no secrets by design —
+        // real values live in Secrets Manager and reach the box at deploy
+        // time — so provide correctly-shaped placeholders here.
+        OPENAI_API_KEY     = 'ci-placeholder'
+        PERPLEXITY_API_KEY = 'ci-placeholder'
+        SLACK_WEBHOOK_URL  = 'https://hooks.slack.com/services/CI/PLACEHOLDER/ci'
+      }
       steps {
         sh '''
           set -eu
