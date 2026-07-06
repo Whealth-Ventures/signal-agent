@@ -1,0 +1,11 @@
+[Unit]
+Description=Run signal-agent daily (02:20 UTC = 07:50 IST; app holds until 08:00 IST)
+
+[Timer]
+# Box is pinned to UTC. deploy.sh stamps this line from the Terraform config.
+OnCalendar=*-*-* 02:20:00
+Persistent=true
+Unit=signal-agent.service
+
+[Install]
+WantedBy=timers.target

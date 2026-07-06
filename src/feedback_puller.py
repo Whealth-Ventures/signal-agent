@@ -1,12 +1,14 @@
-"""Pull Slack-event blobs from Vercel Blob into local SQLite.
+"""Pull Slack-event objects from S3 into local SQLite.
 
-The admin app's /api/slack/events receiver writes one blob per Slack event
-(reaction_added, reaction_removed, message.channels) under events/YYYY-MM-DD/.
-This module lists what's new since the last cursor, downloads each blob,
-joins to the digests table by slack_ts to recover digest_id, and persists
-rows to the `feedback` table.
+The admin app's /api/slack/events receiver writes one object per Slack event
+(reaction_added, reaction_removed, message.channels) under events/YYYY-MM-DD/
+in the FEEDBACK_S3_BUCKET. This module lists what's new since the last cursor,
+downloads each object, joins to the digests table by slack_ts to recover
+digest_id, and persists rows to the `feedback` table.
 
 Idempotent: event_id is the primary key, so re-runs are no-ops.
+
+(Formerly backed by Vercel Blob; migrated to S3 for the AWS deployment.)
 """
 from __future__ import annotations
 
@@ -15,13 +17,12 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import httpx
+import boto3
 
 import config
 import storage
 
-_LIST_URL = "https://vercel.com/api/blob"
-_LIST_PREFIX = "events/"
+_PREFIX = "events/"
 
 
 @dataclass(frozen=True)
@@ -32,35 +33,41 @@ class PullResult:
     cursor_advanced_to: str | None
 
 
-def _headers() -> dict[str, str]:
-    token = config.BLOB_READ_WRITE_TOKEN
-    if not token:
-        raise RuntimeError("BLOB_READ_WRITE_TOKEN not set in .env")
-    return {"Authorization": f"Bearer {token}"}
+def _bucket() -> str:
+    if not config.FEEDBACK_S3_BUCKET:
+        raise RuntimeError("FEEDBACK_S3_BUCKET not set in env")
+    return config.FEEDBACK_S3_BUCKET
 
 
-def _list_blobs(http: httpx.Client) -> list[dict]:
-    """List all blobs under events/. Follows pagination via `cursor`."""
-    blobs: list[dict] = []
-    params: dict[str, str] = {"prefix": _LIST_PREFIX}
+def _client():
+    return boto3.client("s3", region_name=config.AWS_REGION or None)
+
+
+def _list_objects(s3, bucket: str) -> list[dict]:
+    """List all objects under events/. Follows pagination via ContinuationToken."""
+    out: list[dict] = []
+    token: str | None = None
     while True:
-        r = http.get(_LIST_URL, headers=_headers(), params=params)
-        r.raise_for_status()
-        data = r.json()
-        blobs.extend(data.get("blobs") or [])
-        if not data.get("hasMore"):
+        kwargs = {"Bucket": bucket, "Prefix": _PREFIX}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+        for o in resp.get("Contents", []):
+            out.append({"key": o["Key"], "last_modified": o["LastModified"]})
+        if resp.get("IsTruncated"):
+            token = resp.get("NextContinuationToken")
+        else:
             break
-        cursor = data.get("cursor")
-        if not cursor:
-            break
-        params = {"prefix": _LIST_PREFIX, "cursor": cursor}
-    return blobs
+    return out
 
 
-def _download(http: httpx.Client, url: str) -> dict:
-    r = http.get(url, headers=_headers())
-    r.raise_for_status()
-    return r.json()
+def _download(s3, bucket: str, key: str) -> dict:
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    return json.loads(resp["Body"].read())
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _get_cursor(conn: sqlite3.Connection) -> str | None:
@@ -94,7 +101,7 @@ def _digest_id_for_slack_ts(
 
 def _extract(ev: dict) -> tuple[str, str | None, str | None, str | None, str | None]:
     """Return (event_type, slack_user, reaction, slack_ts, slack_channel)
-    from a stored blob payload. The puller stores the full raw payload too."""
+    from a stored payload. The puller stores the full raw payload too."""
     event_type = ev.get("type") or "unknown"
     inner = ev.get("event") or {}
     user = inner.get("user")
@@ -107,33 +114,33 @@ def _extract(ev: dict) -> tuple[str, str | None, str | None, str | None, str | N
 
 def pull(
     *,
-    http: httpx.Client | None = None,
+    s3=None,
     conn: sqlite3.Connection | None = None,
 ) -> PullResult:
-    """Pull new events from Vercel Blob into the feedback table. Idempotent."""
-    own_http = http is None
-    h = http or httpx.Client(timeout=30.0)
+    """Pull new events from S3 into the feedback table. Idempotent."""
+    client = s3 or _client()
+    bucket = _bucket()
     own_conn = conn is None
     c = conn or storage.connect()
     try:
         storage.init_db(conn=c)
         cursor = _get_cursor(c)
 
-        blobs = _list_blobs(h)
-        # Sort by uploadedAt ascending so cursor advances monotonically.
-        blobs.sort(key=lambda b: b.get("uploadedAt") or "")
+        objs = _list_objects(client, bucket)
+        # Sort by last_modified ascending so the cursor advances monotonically.
+        objs.sort(key=lambda o: o["last_modified"])
 
         new_count = 0
         linked = 0
         max_received_at = cursor
 
-        for b in blobs:
-            uploaded_at = b.get("uploadedAt") or ""
-            if cursor and uploaded_at <= cursor:
+        for o in objs:
+            lm = _iso(o["last_modified"])
+            if cursor and lm <= cursor:
                 continue
-            payload = _download(h, b["url"])
+            payload = _download(client, bucket, o["key"])
             event_id = payload.get("event_id")
-            received_at = payload.get("received_at") or uploaded_at
+            received_at = payload.get("received_at") or lm
             if not event_id:
                 continue
             event_type, user, reaction, slack_ts, slack_channel = _extract(payload)
@@ -156,8 +163,8 @@ def pull(
             except sqlite3.IntegrityError:
                 # Already pulled (event_id PRIMARY KEY collision). Skip.
                 pass
-            if uploaded_at and (not max_received_at or uploaded_at > max_received_at):
-                max_received_at = uploaded_at
+            if not max_received_at or lm > max_received_at:
+                max_received_at = lm
 
         if max_received_at and max_received_at != cursor:
             _set_cursor(c, max_received_at)
@@ -165,14 +172,12 @@ def pull(
             c.commit()
 
         return PullResult(
-            listed=len(blobs),
+            listed=len(objs),
             new_events=new_count,
             linked_to_digest=linked,
             cursor_advanced_to=max_received_at,
         )
     finally:
-        if own_http:
-            h.close()
         if own_conn:
             c.close()
 

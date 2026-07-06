@@ -1,0 +1,18 @@
+[Unit]
+Description=signal-agent admin UI (Next.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signal
+Group=signal
+WorkingDirectory=/opt/signal-agent/repo/admin
+EnvironmentFile=/opt/signal-agent/repo/admin/.env.production
+# PORT (from .env.production) is honored by `next start`.
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

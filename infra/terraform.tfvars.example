@@ -1,0 +1,7 @@
+# All variables already default to the discovered Whealth landing zone, so this
+# file is optional. Copy to terraform.tfvars only to override.
+
+# instance_type      = "t3a.medium"   # bump if admin `next build` OOMs on small
+# admin_domain       = "signal-admin.xponentiate.com"
+# ssh_ingress_cidrs  = "1.2.3.4/32"    # break-glass SSH; default is SSM-only
+# github_branch      = "main"

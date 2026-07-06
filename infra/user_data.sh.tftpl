@@ -1,0 +1,94 @@
+#!/bin/bash
+# signal-agent EC2 bootstrap (Amazon Linux 2023). Runs once at first boot.
+# Installs the toolchain, creates the app user/dirs, writes the non-secret deploy
+# config, sets up a token-less git credential helper, then attempts a first
+# clone + deploy. Real deploys thereafter go through SSM (deploy/deploy.sh).
+set -euxo pipefail
+exec > >(tee -a /var/log/signal-agent-bootstrap.log) 2>&1
+
+timedatectl set-timezone UTC
+
+# --- toolchain ----------------------------------------------------------------
+dnf update -y
+dnf install -y git jq tar gzip unzip gcc gcc-c++ make \
+  python3.11 python3.11-pip python3.11-devel
+
+# Node 20 (Next 14 needs >=18.17)
+curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+dnf install -y nodejs
+
+# AWS CLI v2 (AL2023 doesn't ship it)
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install --update
+rm -rf /tmp/awscliv2.zip /tmp/aws
+
+# --- swap (build headroom on a 2 GB box) --------------------------------------
+if [ ! -f /swapfile ]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# --- app user + dirs ----------------------------------------------------------
+id -u ${app_user} &>/dev/null || useradd --system --create-home --shell /bin/bash ${app_user}
+mkdir -p ${app_dir}/shared
+chown -R ${app_user}:${app_user} ${app_dir}
+
+# --- non-secret deploy config (sourced by all deploy scripts) -----------------
+cat > /etc/signal-agent.env <<CFG
+REGION=${region}
+APP_DIR=${app_dir}
+APP_USER=${app_user}
+REPO_URL=${repo_url}
+BRANCH=${branch}
+AGENT_SECRET=${agent_secret}
+ADMIN_SECRET=${admin_secret}
+FEEDBACK_BUCKET=${feedback_bucket}
+ADMIN_PORT=${admin_port}
+ADMIN_DOMAIN=${admin_domain}
+DIGEST_POST_AT=${digest_post_at}
+DIGEST_ONCALENDAR=${digest_calendar}
+CFG
+chmod 644 /etc/signal-agent.env
+
+# --- token-less git credential helper -----------------------------------------
+# Fetches the GitHub read PAT from Secrets Manager on demand; nothing persisted.
+# Repo URL carries the username (x-access-token@...), so git only asks for the
+# password, which this returns.
+cat > /usr/local/bin/sa-git-askpass.sh <<'ASK'
+#!/bin/bash
+set -euo pipefail
+source /etc/signal-agent.env
+aws secretsmanager get-secret-value --region "$REGION" --secret-id "$AGENT_SECRET" \
+  --query SecretString --output text | jq -r '.GITHUB_TOKEN'
+ASK
+chmod 755 /usr/local/bin/sa-git-askpass.sh
+
+# --- first clone (best-effort; no-op until the real PAT is in the secret) ------
+cat > /usr/local/bin/sa-bootstrap.sh <<'BOOT'
+#!/bin/bash
+# Idempotent: clone the repo if it isn't there yet. Safe to re-run via SSM.
+set -euo pipefail
+source /etc/signal-agent.env
+if [ -d "$APP_DIR/repo/.git" ]; then exit 0; fi
+export GIT_ASKPASS=/usr/local/bin/sa-git-askpass.sh
+TOKEN="$(/usr/local/bin/sa-git-askpass.sh || true)"
+if [ -z "$TOKEN" ] || [ "$TOKEN" = "REPLACE_ME" ] || [ "$TOKEN" = "null" ]; then
+  echo "GITHUB_TOKEN not set in $AGENT_SECRET yet — skipping clone."
+  exit 0
+fi
+AUTH_URL="https://x-access-token@$${REPO_URL#https://}"
+sudo -u "$APP_USER" GIT_ASKPASS=/usr/local/bin/sa-git-askpass.sh \
+  git clone --branch "$BRANCH" "$AUTH_URL" "$APP_DIR/repo"
+BOOT
+chmod 755 /usr/local/bin/sa-bootstrap.sh
+
+/usr/local/bin/sa-bootstrap.sh || true
+
+# Run the first deploy only if the clone succeeded and the PAT is real.
+if [ -x "${app_dir}/repo/deploy/deploy.sh" ]; then
+  "${app_dir}/repo/deploy/deploy.sh" "${branch}" || true
+fi

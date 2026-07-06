@@ -1,0 +1,15 @@
+[Unit]
+Description=signal-agent daily healthcare digest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=signal
+Group=signal
+WorkingDirectory=/opt/signal-agent/repo
+EnvironmentFile=/opt/signal-agent/shared/agent.env
+ExecStart=/opt/signal-agent/repo/deploy/run-digest.sh
+# Build (~3 min) + hold-until-08:00 (up to ~30 min) + feedback/backup.
+TimeoutStartSec=3600
+Nice=5

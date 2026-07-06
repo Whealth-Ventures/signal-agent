@@ -220,8 +220,8 @@ function RecentReactions() {
         <div className="px-4 py-3 text-sm text-red-700">
           Couldn’t read reactions: {state.message}
           <div className="text-xs text-gray-500 mt-1">
-            Usually means <code>BLOB_READ_WRITE_TOKEN</code> isn’t set in Vercel,
-            or no reactions have been captured yet.
+            Usually means <code>FEEDBACK_S3_BUCKET</code> isn’t set (or the
+            instance role can’t read it), or no reactions have been captured yet.
           </div>
         </div>
       )}

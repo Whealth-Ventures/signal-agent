@@ -69,8 +69,12 @@ SLACK_BOT_TOKEN = _env("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = _env("SLACK_CHANNEL_ID")
 SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
 
-# Vercel Blob read/write token — used by the feedback puller to fetch
-# Slack-event blobs written by the admin app's receiver.
+# S3 store for Slack-reaction feedback events (written by the admin app's
+# /api/slack/events receiver, read by feedback_puller). Replaces Vercel Blob.
+FEEDBACK_S3_BUCKET = _env("FEEDBACK_S3_BUCKET")
+AWS_REGION = _env("AWS_REGION") or _env("AWS_DEFAULT_REGION")
+
+# Deprecated (Vercel Blob) — retained only so old configs don't KeyError.
 BLOB_READ_WRITE_TOKEN = _env("BLOB_READ_WRITE_TOKEN")
 
 
