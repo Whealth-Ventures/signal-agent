@@ -51,7 +51,11 @@ export default function TuningPage() {
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.error || `error ${res.status}`);
       setStatus("ready");
-      setMsg("Saved. Next cron run will pick it up.");
+      setMsg(
+        j.deploy?.triggered
+          ? `Saved. ${j.deploy.detail} — live in a few minutes.`
+          : `Saved to git. ${j.deploy?.detail || "Run a deploy to apply."}`,
+      );
     } catch (e: any) {
       setStatus("error");
       setMsg(e.message);

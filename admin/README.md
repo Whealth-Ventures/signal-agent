@@ -4,6 +4,7 @@ A small Next.js app for tuning the [`signal-agent`](https://github.com/Whealth-V
 
 ## What it edits
 
+- **Sources**: `inputs/voices.xlsx` in the agent repo — the publications, top voices, org pages, and PE/VC firms the agent watches. Add a publication (e.g. ET, VCCircle) with its URL and the fetcher auto-discovers its RSS feed. Five tabs matching the xlsx sheets; parse/serialize preserve the exact column layout the agent's positional loaders (`src/query_planner.py`) depend on, so edits are round-trip safe (`node lib/voices.check.mjs`).
 - **Tuning**: `inputs/tuning.xlsx` in the agent repo — every numeric knob, regex booster, priority bucket, and source tier. Edited as form fields (4 tabs matching the 4 xlsx sheets).
 - **Prompts**: `prompts/ranker_system.md` and `prompts/magnitude_rubric.md` — edited as plain textareas.
 
@@ -90,6 +91,28 @@ Visit `http://localhost:3000` and sign in with the `ADMIN_USER` / `ADMIN_PWD` fr
 - **XLSX**: `lib/xlsx.ts` parses 4 sheets into JSON on read, serializes JSON back to xlsx on save. Schema mirrors `src/tunables.py` in the agent — keep them in sync.
 - **Validation**: server-side. Invalid regex / invalid geo / empty sub-buckets / empty prompts are rejected before the commit.
 - **Audit**: each save is its own commit; the shared login name is recorded in the commit author name and message. `git log inputs/tuning.xlsx` and `git log prompts/` show the history. (The committer email is always the Vercel project owner so Hobby-plan deploys aren't blocked.)
+
+## Auto-deploy on save
+
+The box runs the inputs/prompts from the **last deploy** and never pulls from
+GitHub (push model). So a commit alone doesn't go live. When these env vars are
+set (in the admin secret → materialized into `.env.production` by `deploy.sh`),
+every successful save also pings Jenkins to run the deploy pipeline, so the
+change is live in a few minutes:
+
+| Name | Value |
+|---|---|
+| `DEPLOY_TRIGGER_URL` | Jenkins build URL, e.g. `https://<jenkins>/job/signal-agent/job/main/build` (multibranch) or a `buildByToken` URL. **Unset ⇒ auto-deploy off** — saves still commit; you deploy manually. |
+| `DEPLOY_TRIGGER_TOKEN` | optional — appended as `?token=…` (Jenkins "Trigger builds remotely" token, or buildByToken). |
+| `DEPLOY_TRIGGER_AUTH` | optional — `user:apiToken` for Basic auth (Jenkins API-token auth is CSRF-crumb exempt). |
+
+Jenkins side: either enable **Trigger builds remotely** on the job (set the same
+token in `DEPLOY_TRIGGER_TOKEN`), or create a Jenkins **API token** for a user
+with Build permission and put `user:token` in `DEPLOY_TRIGGER_AUTH`. The trigger
+is fire-and-forget: if it fails, the save still succeeds (the commit is durable)
+and the UI says so — you can deploy manually.
+
+`node lib/deploy.check.mjs` checks the URL/token/auth assembly.
 
 ## Adding new tunables
 

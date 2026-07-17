@@ -26,6 +26,16 @@ export default async function Home() {
       <main className="max-w-5xl mx-auto px-6 py-10">
         <div className="grid md:grid-cols-3 gap-4">
           <Link
+            href="/sources"
+            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
+          >
+            <h2 className="font-semibold mb-1">Sources</h2>
+            <p className="text-sm text-gray-600">
+              Add or remove the publications, voices, and firms the agent
+              watches (e.g. ET, VCCircle). RSS feeds are auto-discovered.
+            </p>
+          </Link>
+          <Link
             href="/tuning"
             className="block p-6 bg-white border rounded-lg hover:border-gray-400"
           >
@@ -62,7 +72,9 @@ export default async function Home() {
           <code>{process.env.GITHUB_OWNER || "signal-agent"}/
             {process.env.GITHUB_REPO || "signal-agent"}@
             {process.env.GITHUB_BRANCH || "main"}</code>.
-          The next cron run (10am IST) will pick them up.
+          {" "}and, when auto-deploy is configured, kick a deploy so the change
+          goes live within a few minutes (otherwise it applies on the next
+          deploy).
         </p>
       </main>
     </div>

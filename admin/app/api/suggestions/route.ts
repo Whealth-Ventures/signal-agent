@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { readFile, writeFile } from "@/lib/github";
+import { triggerDeploy } from "@/lib/deploy";
 import { parseTuning, serializeTuning } from "@/lib/xlsx";
 
 const PENDING_PATH = "proposals/pending.json";
@@ -93,7 +94,15 @@ export async function POST(req: NextRequest) {
       `feedback: ${body.action} proposal ${proposal.id} (${session.email})`,
       session.email,
     );
-    return NextResponse.json({ ok: true });
+    // Accepting a proposal edits tuning.xlsx — deploy so the box picks it up.
+    // Rejecting only updates the proposals ledger (regenerated each run), so no
+    // deploy is needed.
+    let deploy;
+    if (body.action === "accept") {
+      try { deploy = await triggerDeploy(); }
+      catch (e: any) { deploy = { triggered: false, detail: e.message || "trigger failed" }; }
+    }
+    return NextResponse.json({ ok: true, deploy });
   } catch (e: any) {
     console.error(`POST /api/suggestions ${body.action} failed:`, e);
     return NextResponse.json({ error: e.message || "action failed" }, { status: 500 });

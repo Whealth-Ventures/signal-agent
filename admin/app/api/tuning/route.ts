@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { readFile, writeFile } from "@/lib/github";
+import { triggerDeploy } from "@/lib/deploy";
 import { parseTuning, serializeTuning, Tuning } from "@/lib/xlsx";
 
 const TUNING_PATH = "inputs/tuning.xlsx";
@@ -74,7 +75,10 @@ export async function POST(req: NextRequest) {
       `tune: update tuning.xlsx via admin UI (${session.email})`,
       session.email,
     );
-    return NextResponse.json({ ok: true });
+    let deploy;
+    try { deploy = await triggerDeploy(); }
+    catch (e: any) { deploy = { triggered: false, detail: e.message || "trigger failed" }; }
+    return NextResponse.json({ ok: true, deploy });
   } catch (e: any) {
     console.error("POST /api/tuning failed:", e);
     return NextResponse.json({ error: e.message || "write failed" }, { status: 500 });

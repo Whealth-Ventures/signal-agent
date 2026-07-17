@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { readFile, writeFile } from "@/lib/github";
+import { triggerDeploy } from "@/lib/deploy";
 
 const RANKER_PATH = "prompts/ranker_system.md";
 const RUBRIC_PATH = "prompts/magnitude_rubric.md";
@@ -56,7 +57,10 @@ export async function POST(req: NextRequest) {
       `prompt: update magnitude_rubric.md via admin UI (${session.email})`,
       session.email,
     );
-    return NextResponse.json({ ok: true });
+    let deploy;
+    try { deploy = await triggerDeploy(); }
+    catch (e: any) { deploy = { triggered: false, detail: e.message || "trigger failed" }; }
+    return NextResponse.json({ ok: true, deploy });
   } catch (e: any) {
     console.error("POST /api/prompts failed:", e);
     return NextResponse.json({ error: e.message || "write failed" }, { status: 500 });
