@@ -442,12 +442,13 @@ def post_digest(
     webhook_url: str | None = None,
     bot_token: str | None = None,
     channel_id: str | None = None,
+    channel_label: str | None = None,
     http: httpx.Client | None = None,
     skip_url_validation: bool = False,
     test_mode: bool = False,
 ) -> SlackResult:
     start = time.monotonic()
-    channel_label = config.SLACK_CHANNEL_LABEL
+    channel_label = channel_label or config.SLACK_CHANNEL_LABEL
 
     # Prefer chat.postMessage when bot token + channel id are configured (gives
     # us a message ts to join Slack reactions back to the digest). Fall back to

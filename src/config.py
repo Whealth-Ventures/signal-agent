@@ -69,6 +69,15 @@ SLACK_BOT_TOKEN = _env("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = _env("SLACK_CHANNEL_ID")
 SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
 
+# Two-channel split (same bot/app): the India run posts to the India channel,
+# the US run to the US channel. Both fall back to the single SLACK_CHANNEL_ID so
+# a legacy (--geo both) deploy keeps working unchanged. The bot must be invited
+# to each channel.
+SLACK_CHANNEL_ID_INDIA = _env("SLACK_CHANNEL_ID_INDIA") or SLACK_CHANNEL_ID
+SLACK_CHANNEL_ID_US = _env("SLACK_CHANNEL_ID_US") or SLACK_CHANNEL_ID
+SLACK_CHANNEL_LABEL_INDIA = _env("SLACK_CHANNEL_LABEL_INDIA") or "Signal Agent India"
+SLACK_CHANNEL_LABEL_US = _env("SLACK_CHANNEL_LABEL_US") or "Signal Agent US"
+
 # S3 store for Slack-reaction feedback events (written by the admin app's
 # /api/slack/events receiver, read by feedback_puller). Replaces Vercel Blob.
 FEEDBACK_S3_BUCKET = _env("FEEDBACK_S3_BUCKET")
@@ -141,9 +150,15 @@ HTTP_TIMEOUT_RANK_S = _t.get_int("http_timeout_rank_s")
 HTTP_MAX_RETRIES = _t.get_int("http_max_retries")
 URL_VALIDATION_TIMEOUT_S = _t.get_int("url_validation_timeout_s")
 
-# Schedule (digest sent at 10am IST)
+# Schedule. DIGEST_TZ is the India/default post timezone (from tuning.xlsx,
+# Asia/Kolkata). The US channel posts 08:00 in its own timezone; kept as an
+# env-overridable constant (not a tuning row) since it's a deploy concern like
+# DIGEST_POST_AT. compute_post_at() resolves 08:00 in each tz to a UTC instant,
+# so DST is handled automatically by ZoneInfo.
 DIGEST_TZ = _t.get_str("digest_tz")
 DIGEST_HOUR_LOCAL = _t.get_int("digest_hour_local")
+DIGEST_TZ_INDIA = _env("DIGEST_TZ_INDIA") or DIGEST_TZ
+DIGEST_TZ_US = _env("DIGEST_TZ_US") or "America/New_York"
 
 # Track B rotation
 TRACK_B_PLANS_PER_DAY = _t.get_int("track_b_plans_per_day")

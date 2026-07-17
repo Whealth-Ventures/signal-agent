@@ -1,94 +1,86 @@
-# Scheduling — getting the digest to fire at exactly 08:00 IST
+# Scheduling — two channels, each at 08:00 local time
 
-GitHub Actions' native `schedule:` cron is best-effort. Historical runs on this
-repo have slipped by hours (e.g. an intended morning slot landing in the early
-afternoon), and on a few days the run was skipped entirely (GitHub auto-disables
-scheduled workflows on inactive repos after 60 days). For a digest that the team
-reads first thing each morning, that's not good enough.
+The digest runs on the **EC2 box** (Whealth AWS account, `ap-south-1`), driven by
+**systemd timers**. There is no GitHub Actions cron and no external pinger in the
+live path — the box owns its own schedule. (See `infra/README.md` for the full
+deployment picture.)
 
-The fix has two parts: a punctual trigger, and an in-job hold so delivery time
-doesn't depend on how long the build takes.
+The agent posts **two geo-scoped digests to two channels** from the same app:
 
-**Hold-until-08:00 (sharp delivery).** The trigger fires a few minutes *before*
-08:00. The pipeline fetches/scores/ranks the whole digest (~3 min), then holds
-until exactly 08:00 IST before posting to Slack. So the message lands at 08:00
-regardless of build duration. This is the `DIGEST_POST_AT="08:00"` env in the
-workflow's run step (→ `--post-at`); the hold is capped at 30 min, so an
-over-early or badly-slipped trigger just posts as soon as it's ready instead of
-idling. Set `DIGEST_POST_AT` empty to disable and post immediately.
+| Geo run | Content | Channel | Timer | Fires (UTC) | Posts at |
+|---------|---------|---------|-------|-------------|----------|
+| `india` | India + Global | Signal Agent India | `signal-agent.timer` | `02:20` | 08:00 Asia/Kolkata |
+| `us`    | US + Global    | Signal Agent US    | `signal-agent-us.timer` | `11:50` | 08:00 America/New_York |
 
-**Two triggers, both aimed at ~07:50 IST:**
+`Global` stories (all AI-in-Healthcare, Hot-TAs, cross-cutting) and unclassified
+RSS items go to **both** channels; India-only and US-only stories go to their own
+channel. Each channel gets its own deep sweep (see `docs/EDITING.md` → geo depth),
+so each is a full digest — not the old single digest split in half.
 
-1. **Primary — external pinger** fires `repository_dispatch` at **07:50 IST**.
-   Punctual; this is the path that gives sharp 08:00 delivery.
-2. **Fallback — GitHub's cron** at `'20 2 * * *'` UTC (07:50 IST). GitHub's cron
-   slips, so it often fires late; when it fires before 08:00 the in-job hold
-   still lands it at 08:00, and when it slips past 08:00 it posts immediately.
+Getting a sharp 08:00 delivery has two parts: a punctual trigger, and an in-app
+hold so delivery time doesn't depend on how long the build takes.
 
-Firing both is safe: the `daily-digest` concurrency group serializes overlapping
-runs, and the pipeline's **idempotency guard** (`has_sent_digest_for_date`) skips
-posting if today's digest already went out — so you never get two digests.
+**The timers (punctual trigger).** Each timer fires its `.service`, which runs
+`deploy/run-digest.sh <geo>` → `python src/main.py --geo <geo> --post-at "$DIGEST_POST_AT"`.
+`Persistent=true` means a run missed while the box was down fires on next boot.
 
-The workflow file (`.github/workflows/daily-digest.yml`) already wires all of
-this up. Only the external pinger needs setup.
+**Hold-until-08:00 (sharp delivery).** The timer fires *before* 08:00 local. The
+pipeline fetches/scores/ranks (~3–9 min), then holds until exactly 08:00 **in that
+geo's timezone** before posting — `main.py` resolves `DIGEST_POST_AT="08:00"` in
+`Asia/Kolkata` (india) or `America/New_York` (us, DST-aware via `ZoneInfo`). The
+US timer fires at a fixed 11:50 UTC while 08:00 ET moves an hour across DST, so
+the hold can be up to ~70 min; the cap (`POST_AT_MAX_WAIT_S`) is 90 min to cover
+the winter gap. Set `DIGEST_POST_AT` empty to disable the hold and post now.
 
-## Setup — cron-job.org (free, recommended)
+A double-send is prevented by the pipeline's **per-channel idempotency guard**
+(`has_sent_digest_for_date(..., slack_channel=...)`): if today's digest for *that
+channel* already went out, a second run skips it — the India and US channels are
+tracked independently. (Re-send deliberately with `--force`.)
 
-1. Sign up at <https://cron-job.org> (free tier covers this use case easily).
-2. Create a Personal Access Token on GitHub:
-   - Settings → Developer settings → Personal access tokens → Fine-grained tokens
-   - Repository access: **Only this repo** (`<owner>/signal-agent`)
-   - Permissions: **Actions: Read & Write** + **Contents: Read**
-   - Copy the token (`github_pat_…`) — you'll paste it into cron-job.org.
-3. In cron-job.org, create a new cronjob:
-   - **URL**: `https://api.github.com/repos/<owner>/signal-agent/dispatches`
-   - **Schedule**: `07:50` daily, timezone **Asia/Kolkata** (the pipeline holds
-     until 08:00 before posting — fire ~10 min early so the build finishes first)
-   - **Request method**: `POST`
-   - **Headers**:
-     - `Accept: application/vnd.github+json`
-     - `Authorization: Bearer <your_pat>`
-     - `X-GitHub-Api-Version: 2022-11-28`
-     - `Content-Type: application/json`
-   - **Request body** (raw):
-     ```json
-     {"event_type": "daily-digest"}
-     ```
-   - **Notifications**: turn on email-on-failure so you hear about ping failures.
-4. Save and run once with "Test now" to confirm it triggers the workflow.
+## Changing the time
 
-## Alternatives
+Both the timer and the hold are stamped at deploy time from the Terraform config,
+so change them there — editing the box by hand gets overwritten on the next
+deploy.
 
-- **EasyCron**, **cronitor.io**, **Pipedream** — same pattern, pick whichever
-  you prefer.
-- **Cloud Scheduler (GCP) / EventBridge (AWS) / Azure Logic Apps** — fine if
-  you already have a cloud account.
-- **Self-hosted** — a `systemd` timer or even a Mac launchd job on a machine
-  that's always on. Cheapest and most reliable, but you own the uptime.
+- **Fire time** → `OnCalendar` in `deploy/signal-agent.timer` (India, from
+  Terraform `digest_oncalendar_utc`) and `deploy/signal-agent-us.timer` (US, from
+  `digest_oncalendar_us_utc`). deploy.sh stamps both. Keep each ~10 min before the
+  *earliest* target instant in UTC (US = 08:00 EDT = 12:00 UTC → fire 11:50).
+- **Post time / hold** → `DIGEST_POST_AT` (Terraform → `agent.env`), a single
+  `HH:MM` (`08:00`) that `main.py` resolves in each geo's own timezone.
+- **US timezone** → `DIGEST_TZ_US` env (default `America/New_York`); India uses
+  `digest_tz` from `inputs/tuning.xlsx` (`Asia/Kolkata`).
 
 ## How to verify it's working
 
-After the first scheduled run:
+On the box:
 
 ```bash
-gh run list --workflow daily-digest.yml --limit 5
+systemctl list-timers signal-agent.timer signal-agent-us.timer   # next fire + last run
+journalctl -u signal-agent.service -n 200 --no-pager       # last India run's logs
+journalctl -u signal-agent-us.service -n 200 --no-pager    # last US run's logs
 ```
 
-Look at the **Event** column — it should say `repository_dispatch` for runs
-triggered by the external pinger (not `schedule`). If you see `schedule`, the
-fallback fired because the external pinger missed; check the pinger's logs.
+`run-digest.sh` logs `>> running digest geo=<geo>` on start and
+`>> run-digest done (geo=<geo>)` on success. The pipeline's own logs are under
+`data/logs/` in the app's repo checkout (`/opt/signal-agent/repo`).
 
-## What about the GitHub cron — why keep it?
+## Run it off-schedule
 
-Defense in depth. If the external pinger service has an outage, or your PAT
-expires, the GitHub schedule still gets the digest out (just possibly late).
-Two layers stop a double-send: the concurrency group `daily-digest` serializes
-overlapping runs, and the idempotency guard skips posting once today's digest
-has been sent — so even non-overlapping triggers can't produce two digests.
-(Re-send deliberately with the workflow's **Run workflow → force** input.)
+```bash
+sudo systemctl start signal-agent.service      # India now, respecting the hold
+sudo systemctl start signal-agent-us.service   # US now, respecting the hold
+```
 
-## Disabling the fallback
+For a test post that ignores the hold and doesn't touch dedup history, run
+`main.py --geo india --test` (or `--geo us --test`) directly as the `signal` user
+(see HOW_IT_WORKS.md → "Running it yourself").
 
-If you don't want the fallback (e.g. external pinger is rock-solid and you
-prefer single source of truth), remove the `schedule:` block from
-`.github/workflows/daily-digest.yml`. The `repository_dispatch` trigger stays.
+## The legacy GitHub Actions workflow
+
+`.github/workflows/daily-digest.yml` still contains a `schedule:` cron and a
+`repository_dispatch` trigger from the pre-AWS setup. It is **not** the live
+scheduler — the box never talks to GitHub for scheduling, and the digest fires
+from the systemd timer above. Treat the workflow as legacy; if you want a single
+source of truth, disable its `schedule:` trigger.

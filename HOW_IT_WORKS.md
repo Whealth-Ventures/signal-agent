@@ -38,7 +38,7 @@ The agent sends two written instructions to the AI on every run. They live as pl
 - `docs/` — these files, plus:
   - `docs/EDITING.md` — a quick "I want to change X, where do I go?" index
   - `docs/TUNING.md` — knob-by-knob detail for `inputs/tuning.xlsx`
-  - `docs/scheduling.md` — how the 8am IST cron is set up
+  - `docs/scheduling.md` — how the 8am IST run is scheduled (systemd timer on the EC2 box)
 - `tests/` — automated tests for the code.
 
 ---
@@ -58,7 +58,7 @@ There are four kinds of searches:
 
 That's ~51 well-phrased questions ready to send out.
 
-This step is 100% deterministic — give it the same Excels and it produces the same 34 questions, every time. No AI involved here.
+This step is 100% deterministic — give it the same Excels and it produces the same ~51 questions, every time. No AI involved here.
 
 ### Step 2 — Run the searches
 
@@ -135,7 +135,7 @@ For a one-page "where do I edit X?" index, see [`docs/EDITING.md`](docs/EDITING.
 | `python src/main.py` | Full run — fetches, scores, ranks, posts to Slack |
 | `python src/main.py --test` | Same, but Slack post is marked `[TEST]` and doesn't enter the 30-day dedup history |
 | `python src/main.py --dry-run` | Skip Slack entirely; the Slack-formatted post gets written to `data/logs/dry_run_digest_<date>.json` |
-| `python src/main.py --max-plans 3` | Run only the first 3 of 34 search questions (fast iteration) |
+| `python src/main.py --max-plans 3` | Run only the first 3 of ~51 search questions (fast iteration) |
 | `python src/main.py --skip-rss` | Skip the RSS pull (saves ~30s) |
 | `python src/main.py --skip-url-validation` | Skip the link-check before posting |
 

@@ -409,16 +409,20 @@ def create_digest(
     digest_date: str,
     recipients: Iterable[str],
     *,
+    slack_channel: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> str:
+    # slack_channel is stamped at creation (not just on send) so the per-channel
+    # idempotency guard can tell India's digest apart from US's on the same date.
     digest_id = str(uuid.uuid4())
     with _maybe_own(conn) as c:
         c.execute(
             """INSERT INTO digests
-               (id, digest_date, created_at, sent_at, status, recipients, error)
-               VALUES (?, ?, ?, NULL, 'pending', ?, NULL)""",
+               (id, digest_date, created_at, sent_at, status, recipients, error,
+                slack_channel)
+               VALUES (?, ?, ?, NULL, 'pending', ?, NULL, ?)""",
             (digest_id, digest_date, _iso(_utcnow()),
-             json.dumps(list(recipients))),
+             json.dumps(list(recipients)), slack_channel),
         )
     return digest_id
 
@@ -443,18 +447,30 @@ def add_story_to_digest(
 def has_sent_digest_for_date(
     digest_date: str,
     *,
+    slack_channel: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
     """True if a digest for `digest_date` has already been posted (status='sent').
 
     Lets the pipeline stay idempotent when more than one trigger fires the same
-    day (external pinger + GitHub schedule fallback) — the second run sees the
-    digest already went out and skips re-posting."""
+    day (external pinger + schedule fallback) — the second run sees the digest
+    already went out and skips re-posting.
+
+    When `slack_channel` is given the guard is per-channel, so the India and US
+    channels are tracked independently on the same date (a sent India digest
+    doesn't suppress the US one). When omitted it's date-only (legacy)."""
     with _maybe_own(conn) as c:
-        row = c.execute(
-            "SELECT 1 FROM digests WHERE digest_date=? AND status='sent' LIMIT 1",
-            (digest_date,),
-        ).fetchone()
+        if slack_channel:
+            row = c.execute(
+                "SELECT 1 FROM digests WHERE digest_date=? AND status='sent' "
+                "AND slack_channel=? LIMIT 1",
+                (digest_date, slack_channel),
+            ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT 1 FROM digests WHERE digest_date=? AND status='sent' LIMIT 1",
+                (digest_date,),
+            ).fetchone()
     return row is not None
 
 

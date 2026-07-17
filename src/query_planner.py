@@ -574,8 +574,16 @@ def _track_b_keywords_for(
 def _build_track_b_plans(
     kws: list[KeywordRow],
     today: date_cls,
+    geo: str = "both",
 ) -> list[QueryPlan]:
     all_subs = _all_non_priority_subs(kws)
+    # Geo-scope the rotation universe BEFORE picking, so each geo run gets a full
+    # `plans_per_day` rotation of ITS OWN sub-buckets (deeper per-geo coverage)
+    # instead of sharing one rotation across both geos and then filtering.
+    if geo == "india":
+        all_subs = [s for s in all_subs if s[2] == "India"]
+    elif geo == "us":
+        all_subs = [s for s in all_subs if s[2] == "US"]
     # Plans/day is DERIVED from the desired rotation length so the full long-tail
     # universe is covered every `track_b_rotation_days` days. (Previously
     # track_b_rotation_days was dead config and the period was an implicit
@@ -666,18 +674,31 @@ def _build_firm_plans() -> list[QueryPlan]:
 
 # --- Orchestrator ------------------------------------------------------
 
-def build_query_plans(*, today: date_cls | None = None) -> list[QueryPlan]:
+def build_query_plans(
+    *, today: date_cls | None = None, geo: str = "both",
+) -> list[QueryPlan]:
     """Compose Track A + Track B + Voice + Firm plans for the given date.
 
     `today` defaults to UTC today — pass a fixed date for reproducible tests.
+
+    `geo` scopes the sweep for the two-channel split:
+      - "both"  (default) → every plan, legacy single-channel behaviour.
+      - "india" → India + Global plans only (Global = AI, Hot-TAs, cross-cutting).
+      - "us"    → US + Global plans only.
+    Track B is scoped to the geo's own sub-bucket universe (see _build_track_b_plans)
+    so each geo run gets a full, deep rotation; Track A / voice / firm plans are
+    post-filtered by their geography below.
     """
     today = today or date_cls.today()
     kws = load_keywords()
     plans: list[QueryPlan] = []
     plans.extend(_build_track_a_plans(kws))
-    plans.extend(_build_track_b_plans(kws, today))
+    plans.extend(_build_track_b_plans(kws, today, geo))
     plans.extend(_build_voice_plans())
     plans.extend(_build_firm_plans())
+    if geo != "both":
+        allowed = {"India", "Global"} if geo == "india" else {"US", "Global"}
+        plans = [p for p in plans if p.geography in allowed]
     return plans
 
 

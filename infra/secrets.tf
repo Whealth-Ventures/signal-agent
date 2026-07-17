@@ -16,8 +16,12 @@ resource "aws_secretsmanager_secret_version" "agent_placeholder" {
     ANTHROPIC_API_KEY   = "REPLACE_ME"
     SLACK_WEBHOOK_URL   = "REPLACE_ME"
     SLACK_BOT_TOKEN     = ""
-    SLACK_CHANNEL_ID    = ""
+    SLACK_CHANNEL_ID    = "" # legacy single channel (used by --geo both)
     SLACK_CHANNEL_LABEL = "#signal"
+    # Two-channel split (same bot). Both fall back to SLACK_CHANNEL_ID if unset.
+    # The bot must be invited to each channel.
+    SLACK_CHANNEL_ID_INDIA = ""
+    SLACK_CHANNEL_ID_US    = ""
     # PUSH deploy: the box gets its code as an S3 artifact from Jenkins, so no
     # GitHub credential is needed here.
   })

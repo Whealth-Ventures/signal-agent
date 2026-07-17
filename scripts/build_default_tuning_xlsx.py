@@ -33,9 +33,11 @@ DEFAULT_OUT = ROOT / "inputs" / "tuning.xlsx"
 SETTINGS: list[tuple[str, object, str]] = [
     # Budget
     ("max_perplexity_calls_per_day", 60,
-     "Hard cap on Perplexity API calls per day across fetch + ranker."),
-    ("daily_budget_usd", 3.0,
-     "Soft budget reference; currently used only in logging."),
+     "Hard cap on Perplexity API calls per day. Enforced PER GEO RUN: the India "
+     "and US runs each get their own count, so total capacity is ~2x this."),
+    ("daily_budget_usd", 6.0,
+     "Soft budget reference; currently used only in logging. ~2x now that India "
+     "and US each run a deep sweep."),
 
     # Digest shape
     ("max_digest_items", 22,
@@ -94,14 +96,14 @@ SETTINGS: list[tuple[str, object, str]] = [
 
     # Schedule
     ("digest_tz", "Asia/Kolkata",
-     "Intended fire timezone (the actual cron is in .github/workflows/daily-digest.yml)."),
-    ("digest_hour_local", 10,
+     "Intended fire timezone (the actual schedule is the systemd timer in deploy/signal-agent.timer)."),
+    ("digest_hour_local", 8,
      "Intended fire hour, local time."),
 
     # Track B rotation
-    ("track_b_plans_per_day", 18,
+    ("track_b_plans_per_day", 40,
      "Non-priority sub-buckets sampled per day from the rotation."),
-    ("track_b_rotation_days", 14,
+    ("track_b_rotation_days", 7,
      "Full-cycle length of the Track B rotation."),
 ]
 

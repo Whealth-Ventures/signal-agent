@@ -1,0 +1,17 @@
+[Unit]
+Description=signal-agent daily healthcare digest (US + Global → Signal Agent US)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=signal
+Group=signal
+WorkingDirectory=/opt/signal-agent/repo
+EnvironmentFile=/opt/signal-agent/shared/agent.env
+ExecStart=/opt/signal-agent/repo/deploy/run-digest.sh us
+# Build (~3 min) + hold-until-08:00 America/New_York. The timer fires at a fixed
+# UTC while 08:00 ET moves an hour across DST, so the hold can be up to ~90 min
+# (fired ~10 min before the EDT instant → holds to the EST instant in winter).
+TimeoutStartSec=3600
+Nice=5

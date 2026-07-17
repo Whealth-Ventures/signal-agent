@@ -1,0 +1,14 @@
+[Unit]
+Description=Run signal-agent US digest daily (11:50 UTC; app holds until 08:00 America/New_York, DST-aware)
+
+[Timer]
+# Box is pinned to UTC. deploy.sh stamps this line from the Terraform config
+# ($DIGEST_ONCALENDAR_US). 11:50 UTC is ~10 min before 08:00 EDT (12:00 UTC) and
+# ~70 min before 08:00 EST (13:00 UTC); main.py resolves 08:00 in America/New_York
+# and holds until then (POST_AT_MAX_WAIT_S = 90 min covers the winter gap).
+OnCalendar=*-*-* 11:50:00
+Persistent=true
+Unit=signal-agent-us.service
+
+[Install]
+WantedBy=timers.target

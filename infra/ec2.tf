@@ -34,9 +34,10 @@ resource "aws_instance" "app" {
     admin_secret    = local.secret_admin_name
     feedback_bucket = local.feedback_bucket
     admin_port      = var.admin_port
-    digest_post_at  = var.digest_post_at_ist
-    digest_calendar = var.digest_oncalendar_utc
-    admin_domain    = var.admin_domain
+    digest_post_at     = var.digest_post_at_ist
+    digest_calendar    = var.digest_oncalendar_utc
+    digest_calendar_us = var.digest_oncalendar_us_utc
+    admin_domain       = var.admin_domain
 
     # orglife-bot co-tenant (prepared only when orglife_enabled).
     orglife_enabled    = var.orglife_enabled

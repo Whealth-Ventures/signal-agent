@@ -88,8 +88,12 @@ def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _log_path() -> Path:
-    return config.LOGS_DIR / f"perplexity_{_today_str()}.jsonl"
+def _log_path(scope: str = "") -> Path:
+    # Per-(date, scope) call log. The daily cap is enforced by counting 200s in
+    # this file, so scoping the filename (scope="india"/"us") gives each geo run
+    # its own independent budget even when both run on the same UTC date.
+    suffix = f"_{scope}" if scope else ""
+    return config.LOGS_DIR / f"perplexity{suffix}_{_today_str()}.jsonl"
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -100,8 +104,8 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     return (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
 
 
-def _count_billable_calls_today() -> int:
-    p = _log_path()
+def _count_billable_calls_today(scope: str = "") -> int:
+    p = _log_path(scope)
     if not p.exists():
         return 0
     n = 0
@@ -134,7 +138,10 @@ class PerplexityClient:
         api_key: str | None = None,
         http: httpx.Client | None = None,
         no_wait_for_tests: bool = False,
+        scope: str = "",
     ) -> None:
+        # scope ("india"/"us"/"") isolates the daily call-count budget per geo run.
+        self._scope = scope
         self._api_key = api_key if api_key is not None else config.PERPLEXITY_API_KEY
         if not self._api_key:
             raise RuntimeError("PERPLEXITY_API_KEY is not set")
@@ -156,7 +163,7 @@ class PerplexityClient:
 
     def _ensure_counter_loaded(self) -> None:
         if self._calls_today is None:
-            self._calls_today = _count_billable_calls_today()
+            self._calls_today = _count_billable_calls_today(self._scope)
 
     @property
     def calls_today(self) -> int:
@@ -457,5 +464,5 @@ class PerplexityClient:
         }
         if error:
             rec["error"] = error[:500]
-        with _log_path().open("a", encoding="utf-8") as f:
+        with _log_path(self._scope).open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")

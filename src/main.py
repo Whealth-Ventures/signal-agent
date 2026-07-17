@@ -307,6 +307,30 @@ def _priority_display(key: str | None) -> str:
     return "Other"
 
 
+@dataclass(frozen=True)
+class GeoTarget:
+    """Resolved routing for one --geo value: which channel to post to and which
+    story geos belong there."""
+    geo: str                       # "india" | "us" | "both"
+    channel_id: str
+    channel_label: str
+    allowed: frozenset[str] | None  # None = keep all (legacy "both")
+
+
+def _resolve_geo(geo: str) -> GeoTarget:
+    geo = (geo or "both").lower()
+    if geo == "india":
+        return GeoTarget("india", config.SLACK_CHANNEL_ID_INDIA,
+                         config.SLACK_CHANNEL_LABEL_INDIA,
+                         frozenset({"India", "Global"}))
+    if geo == "us":
+        return GeoTarget("us", config.SLACK_CHANNEL_ID_US,
+                         config.SLACK_CHANNEL_LABEL_US,
+                         frozenset({"US", "Global"}))
+    return GeoTarget("both", config.SLACK_CHANNEL_ID,
+                     config.SLACK_CHANNEL_LABEL, None)
+
+
 def print_digest_to_console(ranking: ranker.RankingResult, digest_date: str) -> None:
     """Preview of the locked Slack layout: top-5 summary, then per-category
     sections (hidden when empty), then Other at the bottom."""
@@ -353,14 +377,19 @@ def print_digest_to_console(ranking: ranker.RankingResult, digest_date: str) -> 
 # --- Pipeline -----------------------------------------------------------
 
 # Hard cap on how long the pipeline will idle waiting for the scheduled post
-# time. Protects against a mis-timed trigger (or a huge GitHub cron slip)
-# parking the job for hours — past this gap we just post as soon as we're ready.
-POST_AT_MAX_WAIT_S = 30 * 60
+# time. Protects against a mis-timed trigger (or a huge cron slip) parking the
+# job for hours — past this gap we just post as soon as we're ready. Sized for
+# the US timer, which fires at a fixed UTC while 08:00 America/New_York moves an
+# hour across DST: firing ~10 min before the EDT instant leaves up to a ~70 min
+# hold until the EST instant, so the cap must exceed that.
+POST_AT_MAX_WAIT_S = 90 * 60
 
 
-def compute_post_at(spec: str | None, *, now_utc: datetime | None = None) -> datetime | None:
-    """Resolve a 'HH:MM' post-time (in config.DIGEST_TZ, for today) to a UTC
-    instant. Returns None if `spec` is blank or unparseable."""
+def compute_post_at(
+    spec: str | None, *, now_utc: datetime | None = None, tz: str | None = None,
+) -> datetime | None:
+    """Resolve a 'HH:MM' post-time (in `tz`, default config.DIGEST_TZ, for today)
+    to a UTC instant. Returns None if `spec` is blank or unparseable."""
     if not spec or not spec.strip():
         return None
     try:
@@ -371,7 +400,7 @@ def compute_post_at(spec: str | None, *, now_utc: datetime | None = None) -> dat
     except Exception:
         _log({"step": "post_at_parse_failed", "spec": spec})
         return None
-    tz = ZoneInfo(config.DIGEST_TZ)
+    tz = ZoneInfo(tz or config.DIGEST_TZ)
     now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
     target_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
     return target_local.astimezone(timezone.utc)
@@ -416,8 +445,10 @@ def run_pipeline(
     skip_rss: bool = False,
     dry_run: bool = False,
     test_mode: bool = False,
+    geo: str = "both",
 ) -> PipelineStats:
     start = time.monotonic()
+    target = _resolve_geo(geo)
     digest_date = digest_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     own_conn = conn is None
     if own_conn:
@@ -433,13 +464,17 @@ def run_pipeline(
             ensure_content_indexed(chroma_client=chroma_client, embedder=embedder)
 
         # 1) Perplexity sweep
-        plans = build_query_plans()
+        plans = build_query_plans(geo=target.geo)
         if max_plans is not None:
             plans = plans[:max_plans]
         if perplexity_client is None:
-            perplexity_client = PerplexityClient()
+            # Scope the daily call budget per geo so the India and US runs (same
+            # UTC date) don't share/starve each other's cap.
+            perplexity_client = PerplexityClient(
+                scope="" if target.geo == "both" else target.geo,
+            )
         _progress(
-            f"[1/5] Perplexity sweep: {len(plans)} plans  "
+            f"[1/5] Perplexity sweep ({target.geo}): {len(plans)} plans  "
             f"({perplexity_client.remaining_today} of "
             f"{config.MAX_PERPLEXITY_CALLS_PER_DAY} calls remaining today)"
         )
@@ -537,6 +572,22 @@ def run_pipeline(
             "elapsed_seconds": ranking.elapsed_seconds,
         })
 
+        # 5b) Route by geo. India channel keeps India+Global, US keeps US+Global
+        # (Global — incl. all AI/Hot-TA news — and unclassified RSS go to both).
+        if target.allowed is not None:
+            before = len(ranking.flat)
+            ranking = ranker.filter_by_geo(ranking, set(target.allowed))
+            _log({
+                "step": "geo_filter",
+                "geo": target.geo,
+                "kept": len(ranking.flat),
+                "dropped": before - len(ranking.flat),
+            })
+            _progress(
+                f"      geo={target.geo}: kept {len(ranking.flat)} of {before} "
+                f"stories for #{target.channel_label}"
+            )
+
         # 6) Console
         print_digest_to_console(ranking, digest_date)
 
@@ -562,11 +613,13 @@ def run_pipeline(
             # squeeze out tomorrow's real digest.
             _progress(
                 f"[5/5] Test post: validating {len(ranking.flat)} URLs and "
-                f"posting to Slack with [TEST] marker…"
+                f"posting to #{target.channel_label} with [TEST] marker…"
             )
             slack_result = slack_client.post_digest(
                 ranking,
                 digest_date=digest_date,
+                channel_id=target.channel_id or None,
+                channel_label=target.channel_label,
                 http=http_client,
                 skip_url_validation=skip_url_validation,
                 test_mode=True,
@@ -588,21 +641,27 @@ def run_pipeline(
                 "elapsed_seconds": slack_result.elapsed_seconds,
             })
             digest_sent = slack_result.sent
-        elif not force and storage.has_sent_digest_for_date(digest_date, conn=conn):
-            # Another trigger (pinger vs. schedule fallback) already shipped
-            # today's digest. Don't post a second time. --force overrides.
+        elif not force and storage.has_sent_digest_for_date(
+            digest_date, slack_channel=target.channel_id or None, conn=conn,
+        ):
+            # This channel's digest for today already shipped (a re-trigger, or
+            # the other geo already ran). Don't post twice. --force overrides.
+            # Guard is per-channel, so India shipping doesn't suppress US.
             _progress(
-                f"[5/5] Digest for {digest_date} already sent — skipping "
-                f"(idempotent; use --force to re-send)."
+                f"[5/5] Digest for {digest_date} → #{target.channel_label} "
+                f"already sent — skipping (idempotent; use --force to re-send)."
             )
-            _log({"step": "skip_already_sent", "digest_date": digest_date})
+            _log({"step": "skip_already_sent", "digest_date": digest_date,
+                  "geo": target.geo, "channel": target.channel_id})
             digest_sent = True
         else:
             _progress(
-                f"[5/5] Slack: validating {len(ranking.flat)} URLs and posting…"
+                f"[5/5] Slack: validating {len(ranking.flat)} URLs and posting "
+                f"to #{target.channel_label}…"
             )
             digest_id = storage.create_digest(
-                digest_date, (config.SLACK_CHANNEL_LABEL,), conn=conn,
+                digest_date, (target.channel_label,),
+                slack_channel=target.channel_id or None, conn=conn,
             )
             # Persistence: flat order (top → priority sections → other), rank
             # is the position in that flat list. `domain` repurposed to store
@@ -624,6 +683,8 @@ def run_pipeline(
             slack_result = slack_client.post_digest(
                 ranking,
                 digest_date=digest_date,
+                channel_id=target.channel_id or None,
+                channel_label=target.channel_label,
                 http=http_client,
                 skip_url_validation=skip_url_validation,
             )
@@ -701,10 +762,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true",
                    help="Post even if today's digest was already sent "
                         "(bypasses the idempotency guard).")
+    p.add_argument("--geo", default=os.environ.get("DIGEST_GEO", "both"),
+                   choices=["india", "us", "both"],
+                   help="Which geo to research + which channel to post. "
+                        "'india' → India+Global → Signal Agent India; "
+                        "'us' → US+Global → Signal Agent US; "
+                        "'both' (default) → everything → single channel. "
+                        "Defaults to $DIGEST_GEO.")
     args = p.parse_args(argv)
 
     config.check_env()
-    post_at = compute_post_at(args.post_at)
+    # US posts 08:00 in America/New_York; India + legacy 'both' in DIGEST_TZ.
+    post_tz = config.DIGEST_TZ_US if args.geo == "us" else config.DIGEST_TZ_INDIA
+    post_at = compute_post_at(args.post_at, tz=post_tz)
     stats = run_pipeline(
         max_plans=args.max_plans,
         skip_rss=args.skip_rss,
@@ -714,6 +784,7 @@ def main(argv: list[str] | None = None) -> int:
         test_mode=args.test,
         post_at=post_at,
         force=args.force,
+        geo=args.geo,
     )
     print()
     print(

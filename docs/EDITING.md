@@ -47,6 +47,32 @@ To add a ninth category: add a row with a unique kebab-case `key`, a display nam
 
 To bump a source up: cut its row, paste it higher. To add a new trusted outlet: add the host (no `https://`, no `www.`).
 
+## Two channels (India / US split)
+
+The agent posts a geo-scoped digest to two Slack channels from the same app,
+selected by `python src/main.py --geo {india,us,both}`:
+
+- **`india`** → India + Global stories → **Signal Agent India** (08:00 IST)
+- **`us`** → US + Global stories → **Signal Agent US** (08:00 America/New_York)
+- **`both`** (default) → everything → single channel (legacy)
+
+`Global` (all AI-in-Healthcare, Hot-TAs, cross-cutting) and unclassified RSS go
+to **both** channels. Each geo run does its own deep sweep (Track B is scoped to
+that geo's sub-bucket universe), so each channel is a full digest.
+
+Where to change things:
+
+- **Channel IDs** → env / AWS Secrets Manager (`signal-agent/prod/agent-env`):
+  `SLACK_CHANNEL_ID_INDIA`, `SLACK_CHANNEL_ID_US` (both fall back to
+  `SLACK_CHANNEL_ID`). The same `SLACK_BOT_TOKEN` powers both — the bot must be
+  **invited to each channel** (`/invite @signal_agent`).
+- **Channel labels** → `SLACK_CHANNEL_LABEL_INDIA` / `_US`.
+- **Post times / timezones** → see `docs/scheduling.md` (`DIGEST_POST_AT`,
+  `DIGEST_TZ` for India, `DIGEST_TZ_US` for US; two systemd timers).
+- **Per-geo depth** → `track_b_plans_per_day` / `track_b_rotation_days` in
+  `inputs/tuning.xlsx` now apply per geo run. Lower `track_b_rotation_days` (or
+  raise `max_digest_items`) to pack each channel deeper.
+
 ## Everything else is unchanged
 
 - `inputs/keywords.xlsx` — single `Master Keywords` tab; columns Bucket / Sub-bucket / Keyword / Geo.

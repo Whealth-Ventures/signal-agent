@@ -580,3 +580,28 @@ def _empty_result(start: float) -> RankingResult:
         candidates_count=0, used_fallback=False,
         cost_usd=0.0, elapsed_seconds=elapsed, flat=(),
     )
+
+
+def filter_by_geo(r: RankingResult, allowed: set[str]) -> RankingResult:
+    """Return a copy of `r` keeping only stories whose geo is in `allowed`.
+
+    Used to route one ranking into two geo channels. `allowed` is e.g.
+    {"India", "Global"} for the India channel. A story with geo=None (RSS /
+    unknown) is treated as Global and kept for BOTH channels, matching the
+    console's `_geo_tag` default — so unclassified items are never dropped.
+    Empty buckets are pruned; top_summary is filtered (not recomputed) — the
+    two runs are already geo-scoped at fetch time, so this is mostly a safety
+    net against cross-geo RSS bleed. ponytail: filter, don't re-rank per geo.
+    """
+    def keep(rs: RankedStory) -> bool:
+        return rs.story.geo is None or rs.story.geo in allowed
+
+    by_priority = {k: [x for x in v if keep(x)] for k, v in r.by_priority.items()}
+    by_priority = {k: v for k, v in by_priority.items() if v}
+    return replace(
+        r,
+        top_summary=[x for x in r.top_summary if keep(x)],
+        by_priority=by_priority,
+        other=[x for x in r.other if keep(x)],
+        flat=tuple(x for x in r.flat if keep(x)),
+    )

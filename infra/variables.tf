@@ -113,12 +113,19 @@ variable "github_branch" {
 # then holds until 08:00 IST (DIGEST_POST_AT) before posting.
 variable "digest_oncalendar_utc" {
   type    = string
-  default = "*-*-* 02:20:00"
+  default = "*-*-* 02:20:00" # India timer: ~07:50 IST, app holds to 08:00 IST
+}
+
+# US timer: ~11:50 UTC. main.py resolves 08:00 in America/New_York and holds to
+# it, so this only needs to fire shortly before the earliest (EDT) instant.
+variable "digest_oncalendar_us_utc" {
+  type    = string
+  default = "*-*-* 11:50:00"
 }
 
 variable "digest_post_at_ist" {
   type    = string
-  default = "08:00"
+  default = "08:00" # HH:MM resolved per-geo in its own timezone by main.py
 }
 
 # --- orglife-bot co-tenant ----------------------------------------------------

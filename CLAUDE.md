@@ -2,10 +2,17 @@
 
 ## What this is
 A daily healthcare news digest agent for a VC firm (W Health Ventures / 2070 Health).
-Runs autonomously, posts to a Slack channel at 8am IST every day. Typical digest
-is 15–25 stories grouped by category, with a 5-story "Today's biggest stories"
-section at the top. Every story is tagged India/US/Global and bucketed under one
-of the 8 priority buckets (no "Other" section).
+Runs autonomously and posts **two geo-scoped digests from the same app**: an
+India digest (India + Global) to **Signal Agent India** at 08:00 IST, and a US
+digest (US + Global) to **Signal Agent US** at 08:00 America/New_York. Each is a
+full 15–25 story digest grouped by category with a 5-story "Today's biggest
+stories" section on top. Every story is tagged India/US/Global and bucketed under
+one of the 8 priority buckets (no "Other" section). Global/cross-cutting stories
+(all AI-in-Healthcare, Hot-TAs) and unclassified RSS go to BOTH channels.
+
+Run selection is by `--geo {india,us,both}` (default `both` = legacy single
+channel). Each geo run does its own deep sweep and posts to its own channel; the
+two runs fire from separate systemd timers (see `docs/scheduling.md`).
 
 ## Inputs
 - `inputs/keywords.xlsx` — single `Master Keywords` tab with columns Bucket / Sub-bucket / Keyword / Geo; ~2,240 keywords.
@@ -31,12 +38,14 @@ of the 8 priority buckets (no "Other" section).
 - `src/ranker.py` — single reasoning call (Claude or Perplexity), magnitude-rubric tiering + bucket assignment; topicality-gated candidates.
 - `src/anthropic_client.py` — Claude transport for the ranking call (Perplexity-compatible `complete()`; auto-skipped when no key).
 - `src/topicality.py` — deterministic healthcare lexicon gate; now runs on every ranker path.
-- `src/slack_client.py` — Block Kit formatter + Slack Incoming Webhook poster; concurrent URL validation.
-- `src/main.py` — orchestrator (this is what cron triggers).
+- `src/slack_client.py` — Block Kit formatter + Slack poster (chat.postMessage with per-channel `channel_id`, or webhook); concurrent URL validation.
+- `src/main.py` — orchestrator (this is what the systemd timers trigger). `--geo` selects the sweep + target channel; `ranker.filter_by_geo` routes stories; `compute_post_at(spec, tz=...)` resolves 08:00 in each geo's timezone.
 
 ## Key constraints
 - Total Perplexity calls per day must stay under 60 (enforced). The ranker no longer counts against this — it runs on Claude — so the budget is fetch-only (~51 plans at a 7-day Track B rotation).
 - Must NOT repeat stories sent in the last 30 days (URL filter + cross-day embedding similarity check; window configurable via `dedup_window_days` in `inputs/tuning.xlsx`).
+- Perplexity budget (`max_perplexity_calls_per_day`) is enforced PER GEO RUN — the India and US runs each get their own daily count (per-`(date, geo)` log file), so same-day runs don't starve each other.
+- Idempotency + "already sent today" is PER CHANNEL (`has_sent_digest_for_date(..., slack_channel=...)`) — India shipping doesn't suppress US.
 - Validate every URL with HEAD request before it ships in the Slack post (skippable via `--skip-url-validation`).
 - Log every API call to `data/logs/` with timestamps and costs.
 - All state in SQLite at `data/db/agent.db` — no external DB.
