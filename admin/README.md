@@ -25,8 +25,15 @@ stay the single source of truth — the UI is only an editor over them.
 
 Each save is its own commit on the agent repo's `main` branch (`git log inputs/`
 and `git log prompts/` show the history; the shared-login name is recorded in the
-commit author name + message for audit). The agent reads the updated files on its
-next scheduled run.
+commit author name + message for audit).
+
+**Important — a commit does not automatically reach the running agent.** The
+production box does not read GitHub at runtime; it runs the `inputs/` + `prompts/`
+baked into the **last deployed S3 artifact** (push model — see the agent repo's
+`deploy/` + `Jenkinsfile`). So an admin save takes effect only after a new
+artifact is built and deployed to the box. Automating that (build on push →
+deploy) is the top open item in the repo-root **`FEEDBACK.md`**; until it lands,
+input/prompt edits reach the box only on the next deploy.
 
 ## Deployment
 

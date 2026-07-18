@@ -1,5 +1,37 @@
 # Signal Agent — Release Notes
 
+## v1.3.0 — "Everything in the Panel" (2026-07-18)
+
+The admin panel now edits **every** input to the agent, and we retired the
+suggestions experiment.
+
+### 1. All inputs are now editable from the admin UI
+Previously only Sources, Tuning, and Prompts were in the panel. Two big ones were
+missing — now they're in:
+- **Keywords** — the ~2,240 search terms (Bucket / Sub-bucket / Keyword / Geo) that
+  drive every day's research. A flat, filterable table; add, edit, or remove rows.
+- **Content corpus** — the firm's own published pieces that define "sounds like us"
+  for relevance scoring. Browse, edit, add, or delete them.
+
+So the full set — **Keywords, Sources, Tuning, Prompts, Content** — is now UI-driven.
+Every save still writes back to the same Excel / Markdown files in the repo; the UI
+is just a friendlier editor over them.
+
+### 2. The Suggestions feature was removed
+The Slack 👍/👎 → automatic tuning-suggestions loop has been retired end to end
+(the Suggestions page, the reaction pipeline, and its data). We'll revisit
+auto-improvement separately later.
+
+### 3. Fresh admin deployment
+The admin panel now lives on its own Vercel project (`signal-agent-admin`, 2070Health)
+and redeploys automatically when the repo changes.
+
+> **Heads-up on how edits go live:** an admin save commits to the repo immediately,
+> but the running digest picks up input/prompt changes only on the next **deploy**
+> to the agent box (it runs the inputs baked into the last deploy, not GitHub
+> directly). Automating that so edits go live on the next morning's digest is the
+> top item in `FEEDBACK.md`.
+
 ## v1.2.0 — "Sharper Signal" (2026-06-05)
 
 A batch of improvements to the digest itself, when it lands, the tuning page, and

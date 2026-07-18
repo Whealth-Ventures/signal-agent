@@ -1,5 +1,15 @@
 # Signal Agent — Project Brief
 
+## Working rule — always start with FEEDBACK.md
+Before starting new work, **read `FEEDBACK.md`** (repo root) and address its open
+items first. When you fix one:
+1. Remove it from `FEEDBACK.md`.
+2. Record what changed, in plain language, in `RELEASE_NOTES.md`.
+3. Push the fixes.
+
+`FEEDBACK.md` is the backlog (what's broken / recommended next); `RELEASE_NOTES.md`
+is the record of what's been shipped. Fixed things move from the first to the second.
+
 ## What this is
 A daily healthcare news digest agent for a VC firm (W Health Ventures / 2070 Health).
 Runs autonomously and posts **two geo-scoped digests from the same app**: an
