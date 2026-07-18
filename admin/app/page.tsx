@@ -75,16 +75,6 @@ export default async function Home() {
               counts as Tier S / A / B / C).
             </p>
           </Link>
-          <Link
-            href="/suggestions"
-            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
-          >
-            <h2 className="font-semibold mb-1">Suggestions</h2>
-            <p className="text-sm text-gray-600">
-              Review proposed tuning changes derived from Slack reactions on
-              recent digests. Accept to apply; reject to archive.
-            </p>
-          </Link>
         </div>
 
         <p className="mt-10 text-xs text-gray-500">

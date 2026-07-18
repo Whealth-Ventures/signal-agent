@@ -28,16 +28,9 @@ cd "$REPO"
 echo ">> running digest geo=$GEO (post-at ${DIGEST_POST_AT:-immediate})"
 .venv/bin/python src/main.py --geo "$GEO" --post-at "${DIGEST_POST_AT:-}"
 
-# Feedback + backup run ONCE per day, on the India (or legacy 'both') pass — not
-# again on the later US pass. Both are non-fatal.
+# Backup runs ONCE per day, on the India (or legacy 'both') pass — not again on
+# the later US pass. Non-fatal.
 if [ "$GEO" != "us" ]; then
-  # Feedback loop — only when the S3 events store is configured.
-  if [ -n "${FEEDBACK_S3_BUCKET:-}" ]; then
-    echo ">> feedback: pull + aggregate"
-    .venv/bin/python src/feedback_puller.py || echo "WARN: feedback_puller failed"
-    .venv/bin/python src/feedback_aggregator.py || echo "WARN: feedback_aggregator failed"
-  fi
-
   # Nightly DR backup of the SQLite + Chroma state to S3.
   if [ -n "${FEEDBACK_BUCKET:-}" ]; then
     ts="$(date -u +%F)"

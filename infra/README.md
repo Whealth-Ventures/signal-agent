@@ -12,7 +12,6 @@ Everything runs on **one EC2 box** in the existing `xponentiate-vpc`
 - **Secrets** — Secrets Manager, rendered to env files at deploy time.
 - **Deploys** — Jenkins → **SSM Run Command** → the box pulls the reviewed
   commit from the private GitHub repo, builds, and restarts the services.
-- **Feedback events** — S3 bucket (replaces Vercel Blob).
 
 ```
                          Route53 signal-admin.xponentiate.com
@@ -25,8 +24,7 @@ Everything runs on **one EC2 box** in the existing `xponentiate-vpc`
                          │              └─ signal-agent.timer → signal-agent.service
                          ▼                     │
                    src/main.py                 ├─ Secrets Manager (agent-env, admin-env)
-                   --post-at 08:00             ├─ S3 feedback bucket (events/, state/)
-                                               └─ GitHub (private, read PAT) for code+data
+                   --post-at 08:00             └─ GitHub (private, read PAT) for code+data
 ```
 
 ## Files
@@ -36,7 +34,7 @@ Everything runs on **one EC2 box** in the existing `xponentiate-vpc`
 | `infra/*.tf` | Terraform: SG, EC2+EIP, IAM, Secrets Manager, S3, ALB rule, Route53, SSM params |
 | `infra/user_data.sh.tftpl` | First-boot: toolchain, app user, git askpass, first clone+deploy |
 | `deploy/deploy.sh` | Run by SSM: checkout ref → env files → build venv+admin → restart services |
-| `deploy/run-digest.sh` | Run by the timer: refresh inputs/prompts → `main.py` → feedback → backup |
+| `deploy/run-digest.sh` | Run by the timer: refresh inputs/prompts → `main.py` → backup |
 | `deploy/signal-*.service`, `signal-agent.timer` | systemd units |
 | `Jenkinsfile` | test agent + admin, deploy on `main` via SSM |
 
@@ -82,8 +80,7 @@ aws secretsmanager put-secret-value --secret-id signal-agent/prod/admin-env \
     "GITHUB_OWNER":"Whealth-Ventures","GITHUB_REPO":"signal-agent","GITHUB_BRANCH":"main",
     "GIT_COMMIT_EMAIL":"signal-agent@whealthventures.com",
     "AUTH_SECRET":"'"$(openssl rand -hex 32)"'",
-    "ADMIN_USER":"admin","ADMIN_PWD":"a-strong-password",
-    "SLACK_SIGNING_SECRET":"..."
+    "ADMIN_USER":"admin","ADMIN_PWD":"a-strong-password"
   }'
 ```
 > Terraform ignores `secret_string` after creation, so these values survive
@@ -108,21 +105,6 @@ Watch it: `aws ssm get-command-invocation --command-id <id> --instance-id "$IID"
   AWS credentials pair with id `aws-whealth` and uncomment the `withCredentials`
   wrapper in the `Deploy` stage.
 - Node 20, python3.11, aws CLI, jq must be on the Jenkins agent.
-
-### 5. Point Slack at the new admin URL
-In api.slack.com → your app → **Event Subscriptions**, set the Request URL to:
-```
-https://signal-admin.xponentiate.com/api/slack/events
-```
-(`terraform output slack_events_url`). Keep bot events `reaction_added` /
-`reaction_removed`. The receiver now writes to S3, and the daily run's
-`feedback_puller` reads from S3 — no Vercel.
-
-### 6. Decommission Vercel
-Once the admin URL is green and Slack events are landing in S3
-(`aws s3 ls s3://$(terraform output -raw feedback_bucket)/events/`), delete the
-Vercel project and its Blob store. The `@vercel/blob` dependency and the
-`vercel.com/api/blob` reference are already removed from the codebase.
 
 ---
 

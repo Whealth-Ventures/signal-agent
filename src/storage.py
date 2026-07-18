@@ -87,28 +87,6 @@ _SCHEMA_SQL = [
         PRIMARY KEY (digest_id, story_id)
     )
     """,
-    # Phase 2 feedback loop: events pulled from Vercel Blob receiver.
-    """
-    CREATE TABLE IF NOT EXISTS feedback (
-        event_id TEXT PRIMARY KEY,
-        received_at TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        slack_user TEXT,
-        reaction TEXT,
-        slack_ts TEXT,
-        slack_channel TEXT,
-        digest_id TEXT REFERENCES digests(id),
-        raw_json TEXT NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_feedback_digest_id ON feedback(digest_id)",
-    "CREATE INDEX IF NOT EXISTS idx_feedback_slack_ts  ON feedback(slack_ts)",
-    """
-    CREATE TABLE IF NOT EXISTS feedback_cursor (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        last_received_at TEXT NOT NULL
-    )
-    """,
 ]
 
 

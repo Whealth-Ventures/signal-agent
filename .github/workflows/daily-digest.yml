@@ -34,8 +34,7 @@ on:
         default: false
 
 permissions:
-  # write so the feedback step can commit the regenerated proposals/pending.json
-  contents: write
+  contents: read
 
 # Prevent overlap between scheduled run, external dispatch, and manual trigger.
 concurrency:
@@ -46,15 +45,8 @@ jobs:
   run:
     runs-on: ubuntu-latest
     # Headroom for the build (~3-5 min) plus the in-job hold until 08:00 IST
-    # (up to ~10 min when fired at 07:50) plus the feedback steps.
+    # (up to ~10 min when fired at 07:50).
     timeout-minutes: 30
-
-    # The feedback loop (pull reactions → regenerate suggestions → commit) only
-    # runs when a Blob token is configured. Until then these steps are skipped
-    # and the digest behaves exactly as before. (secrets can't be read directly
-    # in `if:`, so we surface a boolean via env.)
-    env:
-      FEEDBACK_ENABLED: ${{ secrets.BLOB_READ_WRITE_TOKEN != '' }}
 
     steps:
       - name: Checkout
@@ -88,10 +80,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # Bot token + channel id make the digest post via chat.postMessage,
-          # which returns a message ts. Without the ts, Slack reactions can't be
-          # linked back to a digest and the feedback loop can't score anything.
-          # Both fall back to the webhook path when unset.
+          # Bot token + channel id make the digest post via chat.postMessage;
+          # both fall back to the webhook path when unset.
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_CHANNEL_LABEL: ${{ vars.SLACK_CHANNEL_LABEL }}
@@ -101,27 +91,6 @@ jobs:
           # Build now, then hold until exactly 08:00 IST to post.
           DIGEST_POST_AT: "08:00"
         run: python src/main.py ${{ (github.event_name == 'workflow_dispatch' && inputs.test) && '--test' || '' }} ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
-
-      # --- Feedback loop (only when BLOB_READ_WRITE_TOKEN is configured) -------
-
-      - name: Pull Slack reactions into SQLite
-        if: ${{ always() && env.FEEDBACK_ENABLED == 'true' }}
-        continue-on-error: true
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python src/feedback_puller.py
-
-      - name: Regenerate tuning suggestions
-        if: ${{ always() && env.FEEDBACK_ENABLED == 'true' }}
-        continue-on-error: true
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python src/feedback_aggregator.py
 
       # Save even on failure so a partially-indexed Chroma store or a
       # half-written SQLite row doesn't get thrown away.
@@ -133,24 +102,6 @@ jobs:
             data/db
             data/vector_store
           key: signal-agent-state-${{ github.run_id }}
-
-      # Commit the regenerated suggestions so the admin UI (which reads
-      # proposals/pending.json from GitHub) sees them. Authored as the Vercel
-      # project owner so the resulting admin redeploy isn't blocked on Hobby.
-      # Pushes made with GITHUB_TOKEN don't re-trigger workflows, so no loop.
-      - name: Commit regenerated suggestions
-        if: ${{ always() && env.FEEDBACK_ENABLED == 'true' }}
-        continue-on-error: true
-        run: |
-          git config user.name "Signal Agent Bot"
-          git config user.email "ashwinknan@gmail.com"
-          git add proposals/pending.json proposals/history || true
-          if git diff --cached --quiet; then
-            echo "No suggestion changes to commit."
-          else
-            git commit -m "feedback: regenerate suggestions [skip ci]"
-            git push
-          fi
 
       - name: Upload run logs
         if: always()

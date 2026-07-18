@@ -2,16 +2,22 @@
 
 Five files (well, three files and two folders) control everything about what the agent fetches, ranks, and posts. None of them require Python knowledge to edit. Pick the right one based on what you want to change.
 
-| Want to change… | Edit | How |
+**Easiest path: the admin UI.** Every input below is editable from the web admin
+panel (see `admin/README.md`) — no Excel, no git. Each save writes back to the
+same file listed here and commits it to this repo. The table shows the underlying
+file (the source of truth) plus the direct-edit fallback.
+
+| Want to change… | Edit | Admin UI page / direct edit |
 |---|---|---|
-| Numbers, thresholds, model names, timeouts, dedup window, priority bucket structure, source tier list | `inputs/tuning.xlsx` | Open in Excel, edit cell, save |
-| What keywords the agent searches for | `inputs/keywords.xlsx` | Open in Excel, edit/add rows, save |
-| Which named voices and newsletters the agent watches | `inputs/voices.xlsx` | Open in Excel, edit/add rows, save |
-| LLM tone & how strictly the ranker interprets the rubric | `prompts/ranker_system.md` | Open in any text editor, edit, save |
-| Which stories qualify as Tier S/A/B/C | `prompts/magnitude_rubric.md` | Open in any text editor, edit, save |
-| What "sounds like the firm" — the taste profile for relevance scoring | `inputs/content/*.md` | Add/remove/edit the firm's articles, blog posts, interviews, etc. |
+| Numbers, thresholds, model names, timeouts, dedup window, priority bucket structure, source tier list | `inputs/tuning.xlsx` | **Tuning** · or open in Excel, edit cell, save |
+| What keywords the agent searches for | `inputs/keywords.xlsx` | **Keywords** · or open in Excel, edit/add rows, save |
+| Which named voices and newsletters the agent watches | `inputs/voices.xlsx` | **Sources** · or open in Excel, edit/add rows, save |
+| LLM tone & how strictly the ranker interprets the rubric | `prompts/ranker_system.md` | **Prompts** · or open in any text editor, edit, save |
+| Which stories qualify as Tier S/A/B/C | `prompts/magnitude_rubric.md` | **Prompts** · or open in any text editor, edit, save |
+| What "sounds like the firm" — the taste profile for relevance scoring | `inputs/content/*.md` | **Content corpus** · or add/remove/edit the firm's articles, blog posts, interviews, etc. |
 
 After any edit:
+- If you edit via the admin UI, Save commits it for you — the next cron run picks it up.
 - If you edit via GitHub's web UI, commit on the same screen — the next 04:30 UTC cron run picks it up automatically.
 - If you edit on your laptop, save and commit/push.
 - A `--test` flag (`python src/main.py --test`) lets you run the full pipeline and see the Slack output with a `[TEST]` marker before the change goes live.

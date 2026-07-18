@@ -75,13 +75,13 @@ Running `python src/main.py` end-to-end:
 ## What to defer to v2
 - SharePoint sync for inputs (paused; needs Azure admin access)
 - n8n integration
-- Web dashboard
-- Multi-channel support
 
-Note: the feedback loop (thumbs up/down via Slack reactions → tuning suggestions)
-is now partially built — see `src/feedback_puller.py`, `src/feedback_aggregator.py`,
-and `docs/feedback.md`. It runs in the GitHub workflow only when `BLOB_READ_WRITE_TOKEN`
-is configured.
+## Admin UI
+All inputs are editable from a web admin panel (Next.js app in `admin/`, deployed
+on Vercel — see `admin/README.md`): Keywords, Sources, Tuning, Prompts, and the
+Content corpus. Each save serializes back to the same `inputs/*.xlsx` / `prompts/*.md`
+files and commits them to this repo via the GitHub API — the xlsx files remain the
+single source of truth; the UI is just an editor over them.
 
 ## Editing the agent's behavior
 For "I want to change X, where do I edit it?", see `docs/EDITING.md`.

@@ -1,132 +1,99 @@
 # Signal Agent — Admin UI
 
-A small Next.js app for tuning the [`signal-agent`](https://github.com/Whealth-Ventures/signal-agent) daily healthcare digest. Magic-link auth, no DB, auto-commits to the agent repo on save.
+A small Next.js app for editing every input to the [`signal-agent`](https://github.com/Whealth-Ventures/signal-agent)
+daily healthcare digest. Shared-login auth, no database. Each save serializes back
+to the same file the agent reads and commits it to the agent repo via the GitHub API.
+
+Lives in the `admin/` subdirectory of the agent repo (not a separate repo).
 
 ## What it edits
 
-- **Sources**: `inputs/voices.xlsx` in the agent repo — the publications, top voices, org pages, and PE/VC firms the agent watches. Add a publication (e.g. ET, VCCircle) with its URL and the fetcher auto-discovers its RSS feed. Five tabs matching the xlsx sheets; parse/serialize preserve the exact column layout the agent's positional loaders (`src/query_planner.py`) depend on, so edits are round-trip safe (`node lib/voices.check.mjs`).
-- **Tuning**: `inputs/tuning.xlsx` in the agent repo — every numeric knob, regex booster, priority bucket, and source tier. Edited as form fields (4 tabs matching the 4 xlsx sheets).
-- **Prompts**: `prompts/ranker_system.md` and `prompts/magnitude_rubric.md` — edited as plain textareas.
+| Page | File in the agent repo | Notes |
+|---|---|---|
+| **Keywords** | `inputs/keywords.xlsx` | The ~2,240 keywords (Bucket / Sub-bucket / Keyword / Geo) the query planner clusters into each day's Perplexity searches. Flat editable table with a filter. |
+| **Sources** | `inputs/voices.xlsx` | Publications, top voices, org pages, PE/VC firms. Add a publication with its URL and the fetcher auto-discovers its RSS feed. Five tabs matching the xlsx sheets. |
+| **Tuning** | `inputs/tuning.xlsx` | Every numeric knob, regex booster, priority bucket, and source tier. Four tabs matching the four xlsx sheets. |
+| **Prompts** | `prompts/ranker_system.md`, `prompts/magnitude_rubric.md` | The two LLM prompts, edited as plain textareas. |
+| **Content corpus** | `inputs/content/**/*.md` | The firm's own published pieces — the "taste profile" the agent scores relevance against. Browse / edit / add / delete. |
 
-Each save creates a commit on the agent's `main` branch. The next scheduled cron run (10:00 IST) picks up the change.
+Parse and serialize preserve the exact layout the agent's positional loaders
+(`src/query_planner.py`, `src/tunables.py`) depend on, so edits are round-trip safe
+(`node lib/keywords.check.mjs`, `node lib/voices.check.mjs`). The xlsx / md files
+stay the single source of truth — the UI is only an editor over them.
 
-## Deploy checklist
+## How a save reaches the agent
 
-### 1. Create a GitHub repo for this admin UI
+Each save is its own commit on the agent repo's `main` branch (`git log inputs/`
+and `git log prompts/` show the history; the shared-login name is recorded in the
+commit author name + message for audit). The agent reads the updated files on its
+next scheduled run.
 
-```bash
-cd signal-agent-admin
-git init
-git add .
-git commit -m "Initial admin UI"
-# Create empty repo at github.com/<you>/signal-agent-admin, then:
-git remote add origin git@github.com:<you>/signal-agent-admin.git
-git push -u origin main
-```
+## Deployment
 
-### 2. Create a fine-grained GitHub Personal Access Token
+Deployed as the Vercel project **`signal-agent-admin`** under the **2070Health** team:
 
-The admin UI needs to read and write files in the `signal-agent` repo.
+- **Root Directory** = `admin` (the app is a subdirectory of the agent repo).
+- **Git-connected** to `Whealth-Ventures/signal-agent` → every push to `main`
+  auto-redeploys. Since in-app saves commit to that repo, saves also redeploy the UI.
+- `vercel.json` pins `"framework": "nextjs"` — required because the project was
+  created via CLI (which skips framework auto-detection).
+- **Deployment Protection must be OFF** for this project. The 2070Health team
+  enables "Vercel Authentication" (SSO) on new projects by default, which walls off
+  the shared-login UI behind team login. Disable it under Settings → Deployment
+  Protection (or via the API: `PATCH /v9/projects/<id>` `{"ssoProtection":null}`).
 
-- Go to GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → "Generate new token"
-- **Repository access**: Only select repositories → pick `signal-agent`
-- **Permissions** → Repository permissions:
-  - **Contents**: Read and write
-  - **Metadata**: Read-only (auto-selected)
-- Generate, copy the `github_pat_...` token. You'll paste it into Vercel env vars in step 5.
+Manual deploy (if ever needed): from the repo root, `vercel deploy --prod --scope 2070health`.
 
-### 3. Choose the shared login
+### Environment variables
 
-There's a single shared username + password — anyone who knows it can sign in. You
-set both values in Vercel env vars (next steps); nothing is stored in the repo.
-Pick a username and a strong password now.
-
-### 4. Import to Vercel
-
-- Go to [vercel.com](https://vercel.com) → Add New → Project → Import the `signal-agent-admin` repo.
-- Framework preset: **Next.js** (auto-detected).
-- Don't deploy yet — set env vars first (next step).
-
-### 5. Set env vars in Vercel
-
-In the project settings → Environment Variables, add:
+Set these in the Vercel project (Settings → Environment Variables), all environments:
 
 | Name | Value |
 |---|---|
-| `GITHUB_TOKEN` | the `github_pat_...` from step 2 |
-| `GITHUB_OWNER` | `Whealth-Ventures` (or whoever owns the agent repo) |
+| `GITHUB_TOKEN` | Fine-grained PAT with **Contents: Read & Write** on `Whealth-Ventures/signal-agent` |
+| `GITHUB_OWNER` | `Whealth-Ventures` |
 | `GITHUB_REPO` | `signal-agent` |
 | `GITHUB_BRANCH` | `main` |
-| `AUTH_SECRET` | a random 32+ char string (e.g. `openssl rand -hex 32`) |
-| `ADMIN_USER` | the shared login username, e.g. `admin` |
-| `ADMIN_PWD` | a strong shared password |
+| `AUTH_SECRET` | Random 32+ char string (`openssl rand -hex 32`) — signs the session JWT |
+| `ADMIN_USER` | Shared login username |
+| `ADMIN_PWD` | Shared login password (strong) |
+| `GIT_COMMIT_EMAIL` | Author email recorded on commits (audit) |
 
-Set them for all environments (Production / Preview / Development). `ADMIN_USER`
-and `ADMIN_PWD` are the only credentials — keep them out of the repo and share
-them only with people who should have access.
+To rotate access, change `ADMIN_PWD` and redeploy — everyone signs in again with the
+new password. No per-person allowlist to maintain.
 
-### 6. Deploy
+## How it works
 
-- Trigger a deploy in Vercel (will happen automatically after env vars are set on next push, or click "Redeploy").
-- Once green, visit the deployment URL → enter the shared username + password → you're in.
-
-To rotate access (e.g. someone leaves), change `ADMIN_PWD` in Vercel and redeploy —
-everyone signs in again with the new password. No per-person allowlist to maintain.
+- **Auth**: single shared login. `app/api/auth/login` checks the submitted username +
+  password against `ADMIN_USER` / `ADMIN_PWD` (constant-time compare) and, on success,
+  `lib/auth.ts` sets a 24-hour signed JWT session cookie. `middleware.ts` gates every
+  route except `/login` and `/api/auth/login`.
+- **GitHub I/O**: `lib/github.ts` reads/writes/deletes files via Octokit. The SHA
+  round-trip prevents concurrent-edit overwrites — if a file changed since you loaded
+  it, the write fails.
+- **XLSX**: `lib/xlsx.ts` / `lib/voices.ts` / `lib/keywords.ts` parse each workbook to
+  JSON on read and serialize JSON back on save, preserving the sheets/columns the
+  agent loads positionally.
+- **Validation**: server-side. Invalid regex, invalid geo, empty prompts, and paths
+  outside `inputs/content/` are rejected before the commit.
 
 ## Local development
 
 ```bash
-cp .env.example .env.local
-# Fill in real values (same GITHUB_TOKEN; set ADMIN_USER / ADMIN_PWD to anything for local use)
+cp .env.example .env.local   # fill in a real GITHUB_TOKEN; set ADMIN_USER/ADMIN_PWD to anything
 npm install
 npm run dev
 ```
 
 Visit `http://localhost:3000` and sign in with the `ADMIN_USER` / `ADMIN_PWD` from `.env.local`.
 
-## How it works
-
-- **Auth**: a single shared login. `app/api/auth/login` checks the submitted username + password against the `ADMIN_USER` / `ADMIN_PWD` env vars (constant-time compare) and, on success, `lib/auth.ts` sets a 24-hour signed JWT session cookie. No DB, no email, no per-person allowlist.
-- **GitHub I/O**: `lib/github.ts` reads/writes files via Octokit. SHA round-trip prevents concurrent-edit overwrites — if the file changed since you loaded it, the write fails.
-- **XLSX**: `lib/xlsx.ts` parses 4 sheets into JSON on read, serializes JSON back to xlsx on save. Schema mirrors `src/tunables.py` in the agent — keep them in sync.
-- **Validation**: server-side. Invalid regex / invalid geo / empty sub-buckets / empty prompts are rejected before the commit.
-- **Audit**: each save is its own commit; the shared login name is recorded in the commit author name and message. `git log inputs/tuning.xlsx` and `git log prompts/` show the history. (The committer email is always the Vercel project owner so Hobby-plan deploys aren't blocked.)
-
-## Auto-deploy on save
-
-The box runs the inputs/prompts from the **last deploy** and never pulls from
-GitHub (push model). So a commit alone doesn't go live. When these env vars are
-set (in the admin secret → materialized into `.env.production` by `deploy.sh`),
-every successful save also pings Jenkins to run the deploy pipeline, so the
-change is live in a few minutes:
-
-| Name | Value |
-|---|---|
-| `DEPLOY_TRIGGER_URL` | Jenkins build URL, e.g. `https://<jenkins>/job/signal-agent/job/main/build` (multibranch) or a `buildByToken` URL. **Unset ⇒ auto-deploy off** — saves still commit; you deploy manually. |
-| `DEPLOY_TRIGGER_TOKEN` | optional — appended as `?token=…` (Jenkins "Trigger builds remotely" token, or buildByToken). |
-| `DEPLOY_TRIGGER_AUTH` | optional — `user:apiToken` for Basic auth (Jenkins API-token auth is CSRF-crumb exempt). |
-
-Jenkins side: either enable **Trigger builds remotely** on the job (set the same
-token in `DEPLOY_TRIGGER_TOKEN`), or create a Jenkins **API token** for a user
-with Build permission and put `user:token` in `DEPLOY_TRIGGER_AUTH`. The trigger
-is fire-and-forget: if it fails, the save still succeeds (the commit is durable)
-and the UI says so — you can deploy manually.
-
-`node lib/deploy.check.mjs` checks the URL/token/auth assembly.
-
 ## Adding new tunables
 
-When you add a new knob to `inputs/tuning.xlsx` (Settings sheet) in the agent repo:
-
-1. Add a row to the xlsx with name/value/description.
-2. Wire it up in `src/tunables.py` and `src/config.py` in the agent.
-3. The admin UI picks it up automatically — no changes needed here.
-
-When you add a new **sheet** or **column**, update `lib/xlsx.ts` and the matching UI table in `app/tuning/page.tsx`.
+When you add a knob to `inputs/tuning.xlsx` (Settings sheet) in the agent repo: add
+the row, wire it up in `src/tunables.py` + `src/config.py`, and the UI picks it up
+automatically. When you add a new **sheet** or **column**, update `lib/xlsx.ts` and the
+matching table in `app/tuning/page.tsx`.
 
 ## Costs
 
-- Vercel: free tier covers this easily (single-digit requests/day from a few users).
-- GitHub: free.
-
-Total: $0.
+Vercel free/team tier covers this easily (single-digit requests/day). GitHub: free.

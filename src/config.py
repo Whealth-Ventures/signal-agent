@@ -62,9 +62,8 @@ ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
 
 SLACK_WEBHOOK_URL = _env("SLACK_WEBHOOK_URL")
 # Bot token + channel ID power the chat.postMessage path. When SLACK_BOT_TOKEN
-# is set we post via Web API (returns a message ts that lets us join Slack
-# reactions to the digest in the feedback loop). When unset we fall back to
-# SLACK_WEBHOOK_URL — same message body, but no ts capture.
+# is set we post via the Web API; when unset we fall back to SLACK_WEBHOOK_URL
+# (same message body).
 SLACK_BOT_TOKEN = _env("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = _env("SLACK_CHANNEL_ID")
 SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
@@ -77,14 +76,6 @@ SLACK_CHANNEL_ID_INDIA = _env("SLACK_CHANNEL_ID_INDIA") or SLACK_CHANNEL_ID
 SLACK_CHANNEL_ID_US = _env("SLACK_CHANNEL_ID_US") or SLACK_CHANNEL_ID
 SLACK_CHANNEL_LABEL_INDIA = _env("SLACK_CHANNEL_LABEL_INDIA") or "Signal Agent India"
 SLACK_CHANNEL_LABEL_US = _env("SLACK_CHANNEL_LABEL_US") or "Signal Agent US"
-
-# S3 store for Slack-reaction feedback events (written by the admin app's
-# /api/slack/events receiver, read by feedback_puller). Replaces Vercel Blob.
-FEEDBACK_S3_BUCKET = _env("FEEDBACK_S3_BUCKET")
-AWS_REGION = _env("AWS_REGION") or _env("AWS_DEFAULT_REGION")
-
-# Deprecated (Vercel Blob) — retained only so old configs don't KeyError.
-BLOB_READ_WRITE_TOKEN = _env("BLOB_READ_WRITE_TOKEN")
 
 
 # --- Tunables (loaded from inputs/tuning.xlsx) --------------------------
