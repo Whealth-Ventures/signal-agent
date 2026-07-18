@@ -30,6 +30,35 @@ export async function readFile(path: string): Promise<FileRead> {
   return { content, sha: data.sha };
 }
 
+export type DirEntry = { name: string; path: string; type: "file" | "dir" };
+
+export async function listDir(path: string): Promise<DirEntry[]> {
+  const gh = client();
+  const { owner, repo: name, branch } = repo();
+  const { data } = await gh.repos.getContent({ owner, repo: name, path, ref: branch });
+  if (!Array.isArray(data)) throw new Error(`Expected directory at ${path}`);
+  return data.map((d) => ({ name: d.name, path: d.path, type: d.type as "file" | "dir" }));
+}
+
+export async function deleteFile(
+  path: string,
+  message: string,
+  authorEmail: string,
+): Promise<void> {
+  const gh = client();
+  const { owner, repo: name, branch } = repo();
+  const existing = await gh.repos.getContent({ owner, repo: name, path, ref: branch });
+  if (Array.isArray(existing.data) || existing.data.type !== "file") {
+    throw new Error(`Expected file at ${path}`);
+  }
+  const ownerEmail = process.env.GIT_COMMIT_EMAIL || "signal-agent@whealthventures.com";
+  await gh.repos.deleteFile({
+    owner, repo: name, path, message, branch, sha: existing.data.sha,
+    committer: { name: "Signal Agent Admin", email: ownerEmail },
+    author: { name: authorEmail.split("@")[0], email: ownerEmail },
+  });
+}
+
 export async function writeFile(
   path: string,
   content: Buffer | string,

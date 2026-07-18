@@ -26,6 +26,16 @@ export default async function Home() {
       <main className="max-w-5xl mx-auto px-6 py-10">
         <div className="grid md:grid-cols-3 gap-4">
           <Link
+            href="/keywords"
+            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
+          >
+            <h2 className="font-semibold mb-1">Keywords</h2>
+            <p className="text-sm text-gray-600">
+              Edit the ~2,240 keywords (bucket, sub-bucket, geo) the agent
+              clusters into each day’s Perplexity searches — its core input.
+            </p>
+          </Link>
+          <Link
             href="/sources"
             className="block p-6 bg-white border rounded-lg hover:border-gray-400"
           >
@@ -33,6 +43,16 @@ export default async function Home() {
             <p className="text-sm text-gray-600">
               Add or remove the publications, voices, and firms the agent
               watches (e.g. ET, VCCircle). RSS feeds are auto-discovered.
+            </p>
+          </Link>
+          <Link
+            href="/content"
+            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
+          >
+            <h2 className="font-semibold mb-1">Content corpus</h2>
+            <p className="text-sm text-gray-600">
+              Add, edit, or remove the firm’s own published pieces — the taste
+              profile the agent scores story relevance against.
             </p>
           </Link>
           <Link
