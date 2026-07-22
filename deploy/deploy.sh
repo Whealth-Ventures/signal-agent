@@ -76,8 +76,9 @@ chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 systemctl daemon-reload
 systemctl enable --now signal-agent.timer
 systemctl enable --now signal-agent-us.timer
+systemctl enable --now signal-agent-sector.timer
 systemctl restart signal-admin.service
 
 echo ">> deploy OK"
 systemctl --no-pager status signal-admin.service | head -5 || true
-systemctl --no-pager list-timers signal-agent.timer signal-agent-us.timer || true
+systemctl --no-pager list-timers signal-agent.timer signal-agent-us.timer signal-agent-sector.timer || true
