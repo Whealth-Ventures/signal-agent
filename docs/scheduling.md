@@ -17,6 +17,22 @@ RSS items go to **both** channels; India-only and US-only stories go to their ow
 channel. Each channel gets its own deep sweep (see `docs/EDITING.md` → geo depth),
 so each is a full digest — not the old single digest split in half.
 
+There is also a **third, weekly channel** — the Sector Agent (portfolio-impact
+digest), a separate entrypoint with its own timer and its own SQLite db:
+
+| Run | Content | Channel | Timer | Fires (UTC) | Posts at |
+|-----|---------|---------|-------|-------------|----------|
+| sector | Sector/regulatory/macro/competitor news materially affecting the ~16 portfolio companies | Signal Agent Sector | `signal-agent-sector.timer` | `Mon 02:20` | 08:00 Asia/Kolkata (Mon) |
+
+The Sector Agent runs `deploy/run-sector.sh` → `python src/sector_main.py
+--post-at "$DIGEST_POST_AT"`, grouped by portfolio company, and holds until 08:00
+IST exactly like the daily runs. It reuses the daily pipeline's fetch/dedup/slack
+transport but writes to `data/db/sector.db` (never the daily `agent.db`), so its
+stories can't leak into the daily digest. Requires `SLACK_CHANNEL_ID_SECTOR` in
+`agent.env` and the bot invited to that channel; portfolio companies come from
+`inputs/portfolio.xlsx` (editable via the admin **Portfolio** page). Change its
+fire time in `deploy/signal-agent-sector.timer`.
+
 Getting a sharp 08:00 delivery has two parts: a punctual trigger, and an in-app
 hold so delivery time doesn't depend on how long the build takes.
 

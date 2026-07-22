@@ -1,5 +1,33 @@
 # Signal Agent — Release Notes
 
+## v1.4.0 — "Sector Agent" (2026-07-22)
+
+A **third agent** joins the two daily geo digests: a **weekly, portfolio-focused
+Sector Agent** that posts to a third Slack channel ("Signal Agent Sector").
+
+### 1. What it does
+Every Monday at 08:00 IST it sweeps the news for each of the ~16 W Health /
+2070 Health portfolio companies and surfaces only developments with a **material
+business impact** — positive or negative — on that company: sector/industry
+shifts, regulation & reimbursement, macro moves, and **direct-competitor** actions
+(funding, launches, M&A, pricing, exits), in the company's geography or globally.
+It deliberately **ignores each company's own PR** — this is the world *around* the
+portfolio, not the portfolio's own announcements. The digest is grouped by company,
+with a ↑ / ↓ / ↔ marker showing the direction of impact on each one.
+
+### 2. New editable input — Portfolio
+The company list lives in `inputs/portfolio.xlsx` (Company, Sector, What they do,
+Geo, Website) and is editable from a new admin **Portfolio** page, just like
+Keywords/Sources/Tuning. Edit a company's description or add/remove companies there;
+the next weekly run uses it.
+
+### 3. Built to not disturb the daily digests
+The Sector Agent is its own entrypoint (`python src/sector_main.py`) with its own
+timer and its **own database** (`data/db/sector.db`), so its stories can never
+appear in the daily India/US digests and vice versa. It reuses the daily
+pipeline's fetch, dedup, and Slack machinery under the hood. Requires
+`SLACK_CHANNEL_ID_SECTOR` and the bot invited to the new channel.
+
 ## v1.3.0 — "Everything in the Panel" (2026-07-18)
 
 The admin panel now edits **every** input to the agent, and we retired the

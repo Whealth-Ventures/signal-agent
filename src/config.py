@@ -29,6 +29,11 @@ INPUTS_DIR = ROOT / "inputs"
 KEYWORDS_XLSX = INPUTS_DIR / "keywords.xlsx"
 VOICES_XLSX = INPUTS_DIR / "voices.xlsx"
 TUNING_XLSX = INPUTS_DIR / "tuning.xlsx"
+# Sector Agent (third, weekly channel): portfolio company profiles.
+PORTFOLIO_XLSX = INPUTS_DIR / "portfolio.xlsx"
+# Optional deeper knowledge base (competitors + what materially moves each
+# company). Appended to the impact-ranking prompt when present. See sector.py.
+PORTFOLIO_CONTEXT_MD = INPUTS_DIR / "portfolio_context.md"
 
 CONTENT_DIR = INPUTS_DIR / "content"
 PROMPTS_DIR = ROOT / "prompts"
@@ -36,6 +41,9 @@ PROMPTS_DIR = ROOT / "prompts"
 DATA_DIR = ROOT / "data"
 DB_DIR = DATA_DIR / "db"
 DB_PATH = DB_DIR / "agent.db"
+# Sector Agent runs against its OWN SQLite db so its stories never enter the
+# daily digest's candidate pool (and vice versa).
+SECTOR_DB_PATH = DB_DIR / "sector.db"
 VECTOR_STORE_DIR = DATA_DIR / "vector_store"
 LOGS_DIR = DATA_DIR / "logs"
 
@@ -76,6 +84,12 @@ SLACK_CHANNEL_ID_INDIA = _env("SLACK_CHANNEL_ID_INDIA") or SLACK_CHANNEL_ID
 SLACK_CHANNEL_ID_US = _env("SLACK_CHANNEL_ID_US") or SLACK_CHANNEL_ID
 SLACK_CHANNEL_LABEL_INDIA = _env("SLACK_CHANNEL_LABEL_INDIA") or "Signal Agent India"
 SLACK_CHANNEL_LABEL_US = _env("SLACK_CHANNEL_LABEL_US") or "Signal Agent US"
+
+# Third channel: the weekly Sector Agent (portfolio-impact digest). Same bot/app;
+# falls back to the single SLACK_CHANNEL_ID so a deploy without it still posts
+# somewhere. The bot must be invited to this channel.
+SLACK_CHANNEL_ID_SECTOR = _env("SLACK_CHANNEL_ID_SECTOR") or SLACK_CHANNEL_ID
+SLACK_CHANNEL_LABEL_SECTOR = _env("SLACK_CHANNEL_LABEL_SECTOR") or "Signal Agent Sector"
 
 
 # --- Tunables (loaded from inputs/tuning.xlsx) --------------------------
@@ -155,6 +169,13 @@ DIGEST_TZ_US = _env("DIGEST_TZ_US") or "America/New_York"
 TRACK_B_PLANS_PER_DAY = _t.get_int("track_b_plans_per_day")
 TRACK_B_ROTATION_DAYS = _t.get_int("track_b_rotation_days")
 
+# Sector Agent (weekly). Simple constants for now — a "Sector" sheet in
+# tuning.xlsx is a later nicety, not needed for v1. SECTOR_RECENCY is the
+# Perplexity search window (weekly digest → 'week'); the dedup window is the
+# sector db's own no-repeat horizon.
+SECTOR_RECENCY = "week"
+SECTOR_DEDUP_WINDOW_DAYS = 30
+
 # Priority buckets — re-exported so callers can still write `config.PriorityBucket`
 # and `config.PRIORITY_BUCKETS`.
 PRIORITY_BUCKETS: tuple[PriorityBucket, ...] = _t.priority_buckets
@@ -184,6 +205,12 @@ RANKER_SYSTEM_PROMPT = _load_prompt("ranker_system")
 # user prompt. Variable digest length: all Tier S, Tier A if room, Tier B
 # only when a category would otherwise be empty, Tier C dropped.
 MAGNITUDE_RUBRIC = _load_prompt("magnitude_rubric")
+
+# Sector Agent's single impact-ranking call (see src/sector.py). System prompt
+# sets the "portfolio sector analyst" tone; the rubric defines materiality +
+# impact direction and what's in/out of scope.
+SECTOR_SYSTEM_PROMPT = _load_prompt("sector_system")
+SECTOR_IMPACT_RUBRIC = _load_prompt("sector_impact_rubric")
 
 
 # --- Validation ---------------------------------------------------------

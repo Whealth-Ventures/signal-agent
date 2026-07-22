@@ -379,19 +379,25 @@ class PerplexityClient:
             model=model, query_id=query_id,
         )
 
-    def search_recent(self, plan: QueryPlan) -> ChatResponse:
+    def search_recent(
+        self, plan: QueryPlan, *, recency: str | None = None,
+    ) -> ChatResponse:
+        # recency defaults to the daily window (config.PERPLEXITY_RECENCY, 'day');
+        # the weekly Sector Agent passes recency='week'.
         return self.complete(
             plan.prompt_text,
             model=config.PERPLEXITY_MODEL_FETCH,
-            recency=config.PERPLEXITY_RECENCY,
+            recency=recency or config.PERPLEXITY_RECENCY,
             query_id=plan.id,
         )
 
-    async def search_recent_async(self, plan: QueryPlan) -> ChatResponse:
+    async def search_recent_async(
+        self, plan: QueryPlan, *, recency: str | None = None,
+    ) -> ChatResponse:
         return await self.complete_async(
             plan.prompt_text,
             model=config.PERPLEXITY_MODEL_FETCH,
-            recency=config.PERPLEXITY_RECENCY,
+            recency=recency or config.PERPLEXITY_RECENCY,
             query_id=plan.id,
         )
 

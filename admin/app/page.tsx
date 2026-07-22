@@ -46,6 +46,16 @@ export default async function Home() {
             </p>
           </Link>
           <Link
+            href="/portfolio"
+            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
+          >
+            <h2 className="font-semibold mb-1">Portfolio</h2>
+            <p className="text-sm text-gray-600">
+              The portfolio companies the weekly Sector Agent watches — name,
+              sector, what they do, and geography. Drives the third channel.
+            </p>
+          </Link>
+          <Link
             href="/content"
             className="block p-6 bg-white border rounded-lg hover:border-gray-400"
           >

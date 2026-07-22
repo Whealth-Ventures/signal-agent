@@ -155,11 +155,15 @@ def fetch_perplexity(
     plans: list[QueryPlan],
     *,
     headroom: int = PERPLEXITY_HEADROOM,
+    recency: str | None = None,
 ) -> list[Signal]:
     """Iterate plans; collect Signals. Per-plan failures are logged + skipped.
 
     Stops early when remaining_today drops to `headroom` so the ranker call
     later in the pipeline still has budget.
+
+    `recency` overrides the Perplexity search window (default 'day'); the weekly
+    Sector Agent passes 'week'.
     """
     out: list[Signal] = []
     n = len(plans)
@@ -178,7 +182,10 @@ def fetch_perplexity(
             break
         try:
             t0 = time.monotonic()
-            resp = client.search_recent(plan)
+            # Pass recency only when overridden, so test doubles with the legacy
+            # search_recent(plan) signature keep working (daily path is None).
+            resp = (client.search_recent(plan, recency=recency)
+                    if recency is not None else client.search_recent(plan))
             signals = parse_perplexity_response(plan, resp)
             out.extend(signals)
             _progress(
@@ -206,10 +213,14 @@ async def fetch_perplexity_async(
     *,
     headroom: int = PERPLEXITY_HEADROOM,
     concurrency: int = PERPLEXITY_FETCH_CONCURRENCY,
+    recency: str | None = None,
 ) -> list[Signal]:
     """Concurrent variant of fetch_perplexity. Preserves the headroom early-stop
     and per-plan failure isolation. Cap accounting is checked atomically inside
-    each task via client._check_cap()."""
+    each task via client._check_cap().
+
+    `recency` overrides the Perplexity search window (default 'day'); the weekly
+    Sector Agent passes 'week'."""
     out: list[Signal] = []
     n = len(plans)
     width = len(str(n))
@@ -237,7 +248,10 @@ async def fetch_perplexity_async(
                 return
             try:
                 t0 = time.monotonic()
-                resp = await client.search_recent_async(plan)
+                resp = await (
+                    client.search_recent_async(plan, recency=recency)
+                    if recency is not None else client.search_recent_async(plan)
+                )
                 signals = parse_perplexity_response(plan, resp)
                 out.extend(signals)
                 _progress(

@@ -15,6 +15,8 @@ file (the source of truth) plus the direct-edit fallback.
 | LLM tone & how strictly the ranker interprets the rubric | `prompts/ranker_system.md` | **Prompts** · or open in any text editor, edit, save |
 | Which stories qualify as Tier S/A/B/C | `prompts/magnitude_rubric.md` | **Prompts** · or open in any text editor, edit, save |
 | What "sounds like the firm" — the taste profile for relevance scoring | `inputs/content/*.md` | **Content corpus** · or add/remove/edit the firm's articles, blog posts, interviews, etc. |
+| Which portfolio companies the **weekly Sector Agent** watches (name, sector, what they do, geo) | `inputs/portfolio.xlsx` | **Portfolio** · or open in Excel, edit/add rows, save |
+| Sector Agent tone / what counts as "material impact" (Tier + direction) | `prompts/sector_system.md`, `prompts/sector_impact_rubric.md` | **Prompts** · or open in any text editor, edit, save |
 
 After any edit:
 - If you edit via the admin UI, Save commits it for you — the next cron run picks it up.

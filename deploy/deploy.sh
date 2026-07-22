@@ -63,6 +63,8 @@ install -m 644 "$REPO/deploy/signal-agent.service"    /etc/systemd/system/signal
 install -m 644 "$REPO/deploy/signal-agent.timer"      /etc/systemd/system/signal-agent.timer
 install -m 644 "$REPO/deploy/signal-agent-us.service" /etc/systemd/system/signal-agent-us.service
 install -m 644 "$REPO/deploy/signal-agent-us.timer"   /etc/systemd/system/signal-agent-us.timer
+install -m 644 "$REPO/deploy/signal-agent-sector.service" /etc/systemd/system/signal-agent-sector.service
+install -m 644 "$REPO/deploy/signal-agent-sector.timer"   /etc/systemd/system/signal-agent-sector.timer
 # Keep the schedules in sync with the Terraform-provided config. The US calendar
 # defaults to 11:50 UTC (see signal-agent-us.timer) when the env var is unset on
 # boxes provisioned before the two-channel split.

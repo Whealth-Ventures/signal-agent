@@ -125,7 +125,7 @@ class QueryPlan:
     keyword_sample: tuple[str, ...]
     keyword_count_total: int
     prompt_text: str
-    track: Literal["A", "B", "voice", "firm"]
+    track: Literal["A", "B", "voice", "firm", "sector"]
     priority_bucket: str | None = None     # PriorityBucket.key, or None for B/voice/firm
     voice_names: tuple[str, ...] = ()      # non-empty only for voice plans
     firm_names: tuple[str, ...] = ()       # non-empty only for firm plans

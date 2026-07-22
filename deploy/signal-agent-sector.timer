@@ -1,0 +1,13 @@
+[Unit]
+Description=Run signal-agent Sector digest weekly (Mon 02:20 UTC; app holds until 08:00 Asia/Kolkata)
+
+[Timer]
+# Box is pinned to UTC. 08:00 IST is a fixed 02:30 UTC (Asia/Kolkata has no DST),
+# so we fire ~10 min early on Monday and sector_main.py holds until the 08:00 IST
+# instant (compute_post_at + --post-at 08:00; POST_AT_MAX_WAIT_S = 90 min covers it).
+OnCalendar=Mon *-*-* 02:20:00
+Persistent=true
+Unit=signal-agent-sector.service
+
+[Install]
+WantedBy=timers.target

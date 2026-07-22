@@ -1,0 +1,15 @@
+[Unit]
+Description=signal-agent weekly Sector digest (portfolio-impact → Signal Agent Sector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=signal
+Group=signal
+WorkingDirectory=/opt/signal-agent/repo
+EnvironmentFile=/opt/signal-agent/shared/agent.env
+ExecStart=/opt/signal-agent/repo/deploy/run-sector.sh
+# Build (~2-3 min) + hold until 08:00 Asia/Kolkata (up to ~10 min after the timer).
+TimeoutStartSec=3600
+Nice=5

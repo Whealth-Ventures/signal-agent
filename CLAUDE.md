@@ -24,6 +24,16 @@ Run selection is by `--geo {india,us,both}` (default `both` = legacy single
 channel). Each geo run does its own deep sweep and posts to its own channel; the
 two runs fire from separate systemd timers (see `docs/scheduling.md`).
 
+There is also a **third agent**: a **weekly Sector Agent** (`src/sector_main.py`,
+`src/sector.py`) that posts a portfolio-impact digest to a third channel (**Signal
+Agent Sector**) at 08:00 IST on Mondays. It watches the ~16 W Health portfolio
+companies (from `inputs/portfolio.xlsx`) and surfaces sector/regulatory/macro and
+direct-competitor news with a **material impact** (positive/negative) on each
+company — grouped by company, NOT by the 8 priority buckets, and ranked by impact
+rather than healthcare magnitude. It reuses the daily pipeline's fetch/dedup/slack
+transport but runs against its **own SQLite db** (`data/db/sector.db`) so its
+stories never touch the daily candidate pool.
+
 ## Inputs
 - `inputs/keywords.xlsx` — single `Master Keywords` tab with columns Bucket / Sub-bucket / Keyword / Geo; ~2,240 keywords.
 - `inputs/voices.xlsx` — 5 tabs (India Top Voices, US Top Voices, Newsletters & Publications, Firms & Org Pages, New Additions); ~225+ rows across them.
