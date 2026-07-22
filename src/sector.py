@@ -118,6 +118,12 @@ _SECTOR_PROMPT_TEMPLATE = (
     "  (d) moves by DIRECT COMPETITORS — funding, launches, M&A, pricing, exits.\n"
     "Do NOT return {company}'s OWN funding, product, hiring, or PR news — only the "
     "world around it. Skip listicles, opinion pieces, and thought-leadership.\n"
+    "SOURCES: cite the ORIGINAL, reputable primary source — the outlet that broke it "
+    "(e.g. Reuters, Bloomberg, the Economic Times / Mint / national dailies, "
+    "established trade press like Endpoints/STAT/MedCity, or the company's or "
+    "regulator's own site). Do NOT cite machine-translated reposts, content-farm "
+    "or SEO-mirror copies, or aggregator rewrites; give the URL of the source that "
+    "originally reported the news.\n"
     "Return ONLY a JSON object (no markdown fences, no preamble):\n"
     "{{\n"
     '  "stories": [\n'
