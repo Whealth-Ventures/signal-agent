@@ -155,9 +155,21 @@ pipeline {
               git config user.name  "Jenkins CI"
               git add VERSION
               git commit -m "chore: bump version to ${NEW_VERSION} [skip ci]"
+              # WH-313: tag the release so the version is a real git ref, not just a
+              # value in a file. The multibranch checkout fetches without tags, so
+              # existing tags are not local — fetch them before testing for one.
+              git fetch --tags --force origin
+              if git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; then
+                echo "tag v${NEW_VERSION} already exists — refusing to move it." >&2
+                echo "A tag pointing somewhere new breaks every rollback aimed at it." >&2
+                exit 1
+              fi
+              git tag -a "v${NEW_VERSION}" -m "Release ${NEW_VERSION}"
               # HEAD:<branch> — multibranch checks out a detached HEAD, so a bare
               # `git push origin main` would push nothing.
-              git push origin "HEAD:main"
+              # Commit and tag land together or not at all: a bump commit with no tag
+              # leaves a version git cannot name; a tag with no commit is orphaned.
+              git push --atomic origin "HEAD:main" "refs/tags/v${NEW_VERSION}"
             '''
           }
         }
