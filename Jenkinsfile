@@ -19,13 +19,64 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '30'))
   }
 
+  // WH-313. Semantic version bump, decided HERE rather than by hand-editing the
+  // version in a PR. 'none' rebuilds the current version (the old behaviour, and
+  // the right choice for a re-deploy or a rollback).
+  //
+  // Deliberately a choice, not derived from commit messages: whether a change is
+  // breaking is a judgement call someone should make explicitly, and a `feat!:`
+  // prefix is easy to forget and impossible to correct after the fact.
+  parameters {
+    choice(
+      name: 'BUMP',
+      choices: ['none', 'patch', 'minor', 'major'],
+      description: 'Version bump for this release. none = rebuild the current version (use for re-deploys/rollbacks). patch = fixes. minor = new features. major = breaking changes. On a bump, Jenkins rewrites VERSION, commits "chore: bump version to X.Y.Z [skip ci]" and pushes to main BEFORE building.'
+    )
+  }
+
   environment {
     AWS_REGION = 'ap-south-1'
     PROJECT    = 'signal-agent'
     APP_ENV    = 'prod'
+    // Resolved HERE, not read as $BUMP inside a shell: Jenkins registers
+    // `parameters {}` only at the END of a run, so on the FIRST build after this
+    // parameter is added the variable does not exist in the environment and a
+    // `set -u` shell aborts on the expansion (exactly how everhope_nextjs main #5
+    // died on ALLOW_RETAG). ?: gives the safe default on that first run.
+    BUMP        = "${params.BUMP ?: 'none'}"
+    GIT_CRED_ID = 'github-signal-agent'
+
   }
 
   stages {
+
+    // WH-313. Breaks the bump recursion: 'Bump version' pushes a commit, GitHub
+    // fires the webhook, and this job builds again. Without this gate that second
+    // run would bump again and loop forever.
+    //
+    // A webhook rebuild of a bump commit is a no-op — the artifact for that version
+    // was already built by the run that made the commit. Abort NOT_BUILT instead of
+    // rebuilding identical bytes. Only the AUTOMATIC path is blocked: a human
+    // pressing Build is a deliberate re-deploy, and getBuildCauses() lets it through.
+    stage('Skip CI for bump commits') {
+      steps {
+        script {
+          def msg = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+          def manual = currentBuild.getBuildCauses().any {
+            it._class?.contains('UserIdCause') || it._class?.contains('ReplayCause')
+          }
+          if (msg.contains('[skip ci]') && !manual) {
+            currentBuild.result = 'NOT_BUILT'
+            error("Skipping: HEAD is a CI bump commit ([skip ci]) and this build was triggered automatically. The release it names was already built.")
+          }
+          if (msg.contains('[skip ci]')) {
+            echo "HEAD is a bump commit, but this build was started manually — continuing as an explicit re-deploy."
+          }
+        }
+      }
+    }
+
+
     stage('Agent — tests') {
       environment {
         // tests/test_config.py preflights that a configured env exists (on a
@@ -61,6 +112,69 @@ pipeline {
         }
       }
     }
+    // WH-313. Runs BEFORE the artifact is named so the version reaches it. Skipped
+    // when BUMP=none, so a re-deploy or rollback rebuilds the current version and
+    // pushes nothing.
+    stage('Bump version') {
+      when { expression { env.BUMP != 'none' } }
+      steps {
+        script {
+          def cur = readFile('VERSION').trim()
+          def m = cur =~ /^([0-9]+)\.([0-9]+)\.([0-9]+)$/
+          if (!m.matches()) {
+            error("version must be MAJOR.MINOR.PATCH before bumping, got '${cur}'")
+          }
+          def (maj, min, pat) = [m[0][1] as int, m[0][2] as int, m[0][3] as int]
+          def next
+          switch (env.BUMP) {
+            case 'major': next = "${maj + 1}.0.0"           ; break
+            case 'minor': next = "${maj}.${min + 1}.0"      ; break
+            case 'patch': next = "${maj}.${min}.${pat + 1}" ; break
+            default: error("unknown BUMP '${env.BUMP}'")
+          }
+          echo "Bumping ${cur} -> ${next} (${env.BUMP})"
+          env.NEW_VERSION = next
+
+          writeFile file: 'VERSION', text: "${next}\n"
+
+          // Push over SSH with the repo's deploy key (read_only=false, verified).
+          // "[skip ci]" is what stops the recursion: this push fires the webhook,
+          // which would build and bump again — forever. The guard stage below
+          // aborts that rebuild.
+          sshagent([env.GIT_CRED_ID]) {
+            sh '''
+              set -eu
+              mkdir -p ~/.ssh && ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+              git config user.email "jenkins@xponentiate.com"
+              git config user.name  "Jenkins CI"
+              git add VERSION
+              git commit -m "chore: bump version to ${NEW_VERSION} [skip ci]"
+              # HEAD:<branch> — multibranch checks out a detached HEAD, so a bare
+              # `git push origin main` would push nothing.
+              git push origin "HEAD:main"
+            '''
+          }
+        }
+      }
+    }
+
+
+    // WH-313. Names the release. Runs after 'Bump version' so it sees the new
+    // value, and before 'Deploy' which uses it as the S3 artifact key.
+    stage('Resolve release tag') {
+      steps {
+        script {
+          env.VERSION = readFile('VERSION').trim()
+          if (!(env.VERSION ==~ /^[0-9]+\.[0-9]+\.[0-9]+$/)) {
+            error("version must be MAJOR.MINOR.PATCH, got '${env.VERSION}'")
+          }
+          env.GIT_SHA     = sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
+          env.RELEASE_TAG = "${env.VERSION}-${env.GIT_SHA}"
+          currentBuild.displayName = "#${env.BUILD_NUMBER}  ${env.VERSION} (${env.GIT_SHA})"
+          echo "Release ${env.VERSION} -> artifact ${env.RELEASE_TAG}.tgz"
+        }
+      }
+    }
 
     stage('Deploy (main)') {
       when { branch 'main' }
@@ -72,7 +186,10 @@ pipeline {
                     --name "/$PROJECT/$APP_ENV/feedback-bucket" --query Parameter.Value --output text)"
           IID="$(aws ssm get-parameter --region "$AWS_REGION" \
                   --name "/$PROJECT/$APP_ENV/instance-id" --query Parameter.Value --output text)"
-          KEY="artifacts/signal-agent/${GIT_COMMIT}.tgz"
+          # WH-313: artifact key is <version>-<sha>, not a bare 40-char sha, so the S3
+          # object names the release. GIT_COMMIT stays in it: the version alone is
+          # re-pointable (a rebuild of the same version would overwrite the object).
+          KEY="artifacts/signal-agent/${RELEASE_TAG}.tgz"
 
           # PUSH model: package the reviewed workspace and upload to S3. Build
           # artifacts (.venv/.next/node_modules) and data/ are excluded — the box
@@ -89,7 +206,7 @@ pipeline {
           echo "Deploying $KEY to $IID"
           CMD_ID="$(aws ssm send-command \
             --region "$AWS_REGION" --instance-ids "$IID" \
-            --document-name AWS-RunShellScript --comment "signal-agent deploy ${GIT_COMMIT}" \
+            --document-name AWS-RunShellScript --comment "signal-agent deploy ${RELEASE_TAG}" \
             --timeout-seconds 900 \
             --parameters '{"commands":["/usr/local/bin/sa-fetch.sh '"$KEY"'","bash /opt/signal-agent/repo/deploy/deploy.sh"]}' \
             --query Command.CommandId --output text)"
