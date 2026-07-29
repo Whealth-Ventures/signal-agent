@@ -126,11 +126,23 @@ pipeline {
       steps {
         script {
           def cur = readFile('VERSION').trim()
-          def m = cur =~ /^([0-9]+)\.([0-9]+)\.([0-9]+)$/
-          if (!m.matches()) {
-            error("version must be MAJOR.MINOR.PATCH before bumping, got '${cur}'")
+          // NO regex Matcher here. Jenkins CPS serializes every local variable at each
+          // step boundary, and java.util.regex.Matcher is not serializable — holding one
+          // across the `sh` steps below dies with
+          //   java.io.NotSerializableException: java.util.regex.Matcher
+          // which is exactly how xponentiate-nextjs main #3 failed, AFTER correctly
+          // computing 0.1.0 -> 0.2.0. A standalone Groovy test does not catch this
+          // because it never runs under CPS.
+          //
+          // `==~` elsewhere in this file is safe: it returns a boolean. It is `=~`
+          // (the find operator, which returns a Matcher) that must be avoided.
+          def parts = cur.tokenize('.')
+          if (parts.size() != 3 || !parts.every { it ==~ /^[0-9]+$/ }) {
+            error("package.json version must be MAJOR.MINOR.PATCH before bumping, got '${cur}'")
           }
-          def (maj, min, pat) = [m[0][1] as int, m[0][2] as int, m[0][3] as int]
+          int maj = parts[0].toInteger()
+          int min = parts[1].toInteger()
+          int pat = parts[2].toInteger()
           def next
           switch (env.BUMP) {
             case 'major': next = "${maj + 1}.0.0"           ; break
