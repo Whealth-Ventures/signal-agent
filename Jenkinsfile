@@ -61,15 +61,21 @@ pipeline {
     stage('Skip CI for bump commits') {
       steps {
         script {
-          def msg = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+          // SUBJECT line only (%s), and an anchored match on the exact shape this
+          // pipeline writes. A `contains('[skip ci]')` over the full message (%B) is
+          // wrong: a squash merge folds the PR body into the commit, so any commit whose
+          // description merely MENTIONS [skip ci] — including the PR that introduced this
+          // very stage — gets blocked. That misfired on ai-interviewer build #13.
+          def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+          def isBumpCommit = subject ==~ /^chore: bump version to [0-9]+\.[0-9]+\.[0-9]+ \[skip ci\]$/
           def manual = currentBuild.getBuildCauses().any {
             it._class?.contains('UserIdCause') || it._class?.contains('ReplayCause')
           }
-          if (msg.contains('[skip ci]') && !manual) {
+          if (isBumpCommit && !manual) {
             currentBuild.result = 'NOT_BUILT'
             error("Skipping: HEAD is a CI bump commit ([skip ci]) and this build was triggered automatically. The release it names was already built.")
           }
-          if (msg.contains('[skip ci]')) {
+          if (isBumpCommit) {
             echo "HEAD is a bump commit, but this build was started manually — continuing as an explicit re-deploy."
           }
         }
