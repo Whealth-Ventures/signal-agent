@@ -383,7 +383,9 @@ class PerplexityClient:
         return self.complete(
             plan.prompt_text,
             model=config.PERPLEXITY_MODEL_FETCH,
-            recency=config.PERPLEXITY_RECENCY,
+            # Sector plans carry their own recency (a 14-day window → "month");
+            # daily plans leave it None and fall back to the configured default.
+            recency=plan.recency or config.PERPLEXITY_RECENCY,
             query_id=plan.id,
         )
 
@@ -391,7 +393,7 @@ class PerplexityClient:
         return await self.complete_async(
             plan.prompt_text,
             model=config.PERPLEXITY_MODEL_FETCH,
-            recency=config.PERPLEXITY_RECENCY,
+            recency=plan.recency or config.PERPLEXITY_RECENCY,
             query_id=plan.id,
         )
 

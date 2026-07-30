@@ -124,6 +124,7 @@ def parse_perplexity_response(plan: QueryPlan, response: ChatResponse) -> list[S
                     "priority_bucket": plan.priority_bucket,
                     "geo": plan.geography,
                     "track": plan.track,
+                    "sector": getattr(plan, "sector", None),
                 },
             ))
         return out
@@ -769,9 +770,52 @@ def main(argv: list[str] | None = None) -> int:
                         "'us' → US+Global → Signal Agent US; "
                         "'both' (default) → everything → single channel. "
                         "Defaults to $DIGEST_GEO.")
+    p.add_argument("--mode", default="daily", choices=["daily", "sector"],
+                   help="'daily' (default) → the geo digest pipeline. "
+                        "'sector' → the bi-weekly per-sector roundups "
+                        "(see docs/SECTOR_DIGEST_PLAN.md).")
+    p.add_argument("--sector", default=None,
+                   help="With --mode sector: run only this sector key "
+                        "(e.g. 'everbright'). Omit to run all sectors.")
+    p.add_argument("--pdf", action="store_true",
+                   help="With --mode sector: render ONE combined PDF instead of "
+                        "posting to Slack (written to data/exports/, or --pdf-out).")
+    p.add_argument("--pdf-out", default=None,
+                   help="Path for the --pdf output (default "
+                        "data/exports/sector_signal_<date>.pdf).")
+    p.add_argument("--min-days-between", type=int, default=0,
+                   help="With --mode sector: skip the run if a sector digest was "
+                        "sent within this many days. The bi-weekly guard — the "
+                        "systemd timer fires weekly, this makes it fortnightly. "
+                        "0 disables (manual runs). --force overrides.")
     args = p.parse_args(argv)
 
-    config.check_env()
+    # PDF delivery writes a file and never posts, so it needs no Slack transport.
+    config.check_env(
+        mode=args.mode,
+        require_slack=not (args.mode == "sector" and args.pdf),
+    )
+
+    # Sector mode is a separate pipeline (own taxonomy, cadence, dedup stream).
+    # Lazy import so main.py has no import cycle with sector_pipeline.
+    if args.mode == "sector":
+        import sector_pipeline
+        results = sector_pipeline.run_sector_pipeline(
+            sector_key=args.sector,
+            deliver="pdf" if args.pdf else "slack",
+            pdf_out=args.pdf_out,
+            min_days_between=args.min_days_between,
+            skip_url_validation=args.skip_url_validation,
+            skip_content_indexing=args.skip_content_index,
+            dry_run=args.dry_run,
+            test_mode=args.test,
+            force=args.force,
+            max_plans=args.max_plans,
+        )
+        ok = all(r.posted or r.skipped_already_sent for r in results)
+        if args.dry_run:
+            return 0
+        return 0 if ok and results else 1
     # US posts 08:00 in America/New_York; India + legacy 'both' in DIGEST_TZ.
     post_tz = config.DIGEST_TZ_US if args.geo == "us" else config.DIGEST_TZ_INDIA
     post_at = compute_post_at(args.post_at, tz=post_tz)

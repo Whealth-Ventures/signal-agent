@@ -1,0 +1,15 @@
+[Unit]
+Description=signal-agent bi-weekly sector digest (7 sectors -> #sector-agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=signal
+Group=signal
+WorkingDirectory=/opt/signal-agent/repo
+EnvironmentFile=/opt/signal-agent/shared/agent.env
+ExecStart=/opt/signal-agent/repo/deploy/run-sector.sh
+# ~37 Perplexity fetches + 7 Claude ranking calls + URL validation + Slack posts.
+TimeoutStartSec=3600
+Nice=5

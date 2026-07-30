@@ -125,10 +125,17 @@ class QueryPlan:
     keyword_sample: tuple[str, ...]
     keyword_count_total: int
     prompt_text: str
-    track: Literal["A", "B", "voice", "firm"]
+    track: Literal["A", "B", "voice", "firm", "sector"]
     priority_bucket: str | None = None     # PriorityBucket.key, or None for B/voice/firm
     voice_names: tuple[str, ...] = ()      # non-empty only for voice plans
     firm_names: tuple[str, ...] = ()       # non-empty only for firm plans
+    # Sector-digest fields (track == "sector"): which sector this plan serves,
+    # a per-plan Perplexity recency override (sector sweeps a 14-day window, not
+    # 24h), and whether the plan targets the sector's secondary geo (the "few
+    # biggest US stories" sweeps) so the selector can cap them.
+    sector: str | None = None
+    recency: str | None = None
+    is_secondary_geo: bool = False
 
 
 # --- Helpers ------------------------------------------------------------
@@ -670,6 +677,302 @@ def _build_firm_plans() -> list[QueryPlan]:
         priority_bucket=None,
         firm_names=firm_names,
     )]
+
+
+# --- Sector digest (bi-weekly, per-portco market roundups) -------------
+
+SECTOR_KEYWORDS_PER_PLAN = 12
+SECTOR_RECENCY = "month"   # Perplexity has no "2 weeks"; month + 14-day cutoff.
+
+
+@dataclass(frozen=True)
+class Sector:
+    """A bi-weekly sector roundup, tied to a portfolio company. Loaded from the
+    `Sectors` tab of inputs/sectors.xlsx."""
+    key: str
+    display: str
+    portco: str
+    primary_geo: PlanGeo
+    secondary_geo: PlanGeo | None
+    secondary_max_stories: int
+    target_story_count: int
+    notes: str
+
+
+# Facet sweeps run per sector so a 14-day window is covered by event type rather
+# than one giant prompt. (key, human focus clause for the prompt).
+_SECTOR_FACETS: tuple[tuple[str, str], ...] = (
+    ("raises",
+     "fundraising rounds (pre-seed through growth — ANY size), venture/PE "
+     "investments, M&A, acquisitions, and IPO filings"),
+    ("clinical",
+     "clinical trial readouts and results, FDA/CDSCO/EMA regulatory actions, "
+     "approvals, clearances, and device authorizations"),
+    ("policy",
+     "policy, legislation, government-program changes, legal actions, "
+     "enforcement/fraud cases, and reimbursement or insurance changes"),
+    ("product",
+     "product launches, new services, strategic partnerships and "
+     "collaborations, market expansions, and notable leadership moves"),
+)
+
+_SECTOR_PROMPT_TEMPLATE = (
+    "{sector} news from {geo_label}, published in the LAST 14 DAYS.\n"
+    "Focus on: {focus}.\n"
+    "{watchlist_line}"
+    "Representative keywords: {keywords}.\n"
+    "Include even small or early-stage developments — in a focused sector a "
+    "$1-2M raise or a single-company milestone IS the news. Skip listicles, "
+    "opinion columns, sponsored posts, and generic market-size reports.\n"
+    "Return ONLY a JSON object (no markdown fences, no preamble):\n"
+    "{{\n"
+    '  "stories": [\n'
+    '    {{"title": "headline", "url": "source URL", '
+    '"published": "ISO 8601 datetime or null", "summary": "2-sentence summary"}}\n'
+    "  ]\n"
+    "}}"
+)
+
+_SECTOR_SECONDARY_FOCUS = (
+    "ONLY the biggest, most significant stories of the last 14 days across "
+    "funding, M&A, clinical/regulatory milestones, and major launches — the "
+    "handful a well-informed investor would consider must-know"
+)
+
+_SECTOR_SOURCES_PROMPT = (
+    "{sector} coverage from {geo_label}, published in the LAST 14 DAYS by these "
+    "specialist sources: {sources}.\n"
+    "Surface the substantive items they reported — funding, M&A, clinical or "
+    "regulatory news, policy actions, launches, partnerships, or notable "
+    "analysis that cites concrete facts. Prefer the underlying news event over "
+    "pure opinion, and skip generic market-size reports.\n"
+    "Return ONLY a JSON object (no markdown fences, no preamble):\n"
+    "{{\n"
+    '  "stories": [\n'
+    '    {{"title": "headline", "url": "source URL", '
+    '"published": "ISO 8601 datetime or null", "summary": "2-sentence summary"}}\n'
+    "  ]\n"
+    "}}"
+)
+
+
+@lru_cache(maxsize=1)
+def load_sectors() -> list[Sector]:
+    """Read the `Sectors` tab of inputs/sectors.xlsx. Header row 1, data row 2+.
+    Columns: key, display, portco, primary_geo, secondary_geo,
+    secondary_max_stories, target_story_count, notes."""
+    if not config.SECTORS_XLSX.exists():
+        return []
+    wb = load_workbook(config.SECTORS_XLSX, read_only=True, data_only=True)
+    if "Sectors" not in wb.sheetnames:
+        return []
+    ws = wb["Sectors"]
+    out: list[Sector] = []
+    for r in ws.iter_rows(values_only=True, min_row=2):
+        if _is_blank(r):
+            continue
+        cells = list(r) + [None] * max(0, 8 - len(r))
+        key = _slug(_s(cells[0]))
+        if not key:
+            continue
+        sec_geo_raw = _s(cells[4])
+        out.append(Sector(
+            key=key,
+            display=_s(cells[1]) or key,
+            portco=_s(cells[2]),
+            primary_geo=_norm_plan_geo(cells[3]),
+            secondary_geo=_norm_plan_geo(sec_geo_raw) if sec_geo_raw else None,
+            secondary_max_stories=_to_int_or_none(cells[5]) or 0,
+            target_story_count=_to_int_or_none(cells[6]) or 15,
+            notes=_s(cells[7]),
+        ))
+    return out
+
+
+@lru_cache(maxsize=1)
+def load_sector_keywords() -> dict[str, list[tuple[str, PlanGeo]]]:
+    """Read the `Sector Keywords` tab → {sector_key: [(keyword, geo), ...]}.
+    Header row 1, data row 2+. Columns: sector, keyword, geo."""
+    out: dict[str, list[tuple[str, PlanGeo]]] = {}
+    if not config.SECTORS_XLSX.exists():
+        return out
+    wb = load_workbook(config.SECTORS_XLSX, read_only=True, data_only=True)
+    if "Sector Keywords" not in wb.sheetnames:
+        return out
+    ws = wb["Sector Keywords"]
+    for r in ws.iter_rows(values_only=True, min_row=2):
+        if _is_blank(r):
+            continue
+        cells = list(r) + [None] * max(0, 3 - len(r))
+        sector = _slug(_s(cells[0]))
+        kw = _s(cells[1])
+        if not sector or not kw:
+            continue
+        geo = _norm_plan_geo(cells[2]) if _s(cells[2]) else "Global"
+        out.setdefault(sector, []).append((kw, geo))
+    return out
+
+
+@dataclass(frozen=True)
+class SectorSource:
+    """A named author / newsletter / report followed for a sector. Named in the
+    sources sweep so Perplexity surfaces their recent coverage; `rss_url` (when
+    present) is reserved for a future direct feed pull."""
+    type: str            # "author" | "newsletter" | "report"
+    name: str
+    url: str
+    rss_url: str = ""
+
+
+@lru_cache(maxsize=1)
+def load_sector_sources() -> dict[str, list[SectorSource]]:
+    """Read the `Sector Sources` tab → {sector_key: [SectorSource, ...]}.
+    Columns: sector, type, name, url, rss_url."""
+    out: dict[str, list[SectorSource]] = {}
+    if not config.SECTORS_XLSX.exists():
+        return out
+    wb = load_workbook(config.SECTORS_XLSX, read_only=True, data_only=True)
+    if "Sector Sources" not in wb.sheetnames:
+        return out
+    ws = wb["Sector Sources"]
+    for r in ws.iter_rows(values_only=True, min_row=2):
+        if _is_blank(r):
+            continue
+        cells = list(r) + [None] * max(0, 5 - len(r))
+        sector = _slug(_s(cells[0]))
+        name = _s(cells[2])
+        if not sector or not name:
+            continue
+        out.setdefault(sector, []).append(SectorSource(
+            type=_s(cells[1]) or "newsletter",
+            name=name,
+            url=_s(cells[3]),
+            rss_url=_s(cells[4]),
+        ))
+    return out
+
+
+@lru_cache(maxsize=1)
+def load_sector_watchlist() -> dict[str, list[str]]:
+    """Read the `Sector Watchlist` tab → {sector_key: [company, ...]}. These are
+    named directly in the prompt to sharpen recall. Columns: sector, company."""
+    out: dict[str, list[str]] = {}
+    if not config.SECTORS_XLSX.exists():
+        return out
+    wb = load_workbook(config.SECTORS_XLSX, read_only=True, data_only=True)
+    if "Sector Watchlist" not in wb.sheetnames:
+        return out
+    ws = wb["Sector Watchlist"]
+    for r in ws.iter_rows(values_only=True, min_row=2):
+        if _is_blank(r):
+            continue
+        cells = list(r) + [None] * max(0, 2 - len(r))
+        sector = _slug(_s(cells[0]))
+        company = _s(cells[1])
+        if not sector or not company:
+            continue
+        out.setdefault(sector, []).append(company)
+    return out
+
+
+def _norm_plan_geo(v: object) -> PlanGeo:
+    g = _s(v).lower()
+    if g == "india":
+        return "India"
+    if g in ("us", "usa", "united states"):
+        return "US"
+    return "Global"
+
+
+def get_sector(key: str) -> Sector | None:
+    key = _slug(key)
+    for s in load_sectors():
+        if s.key == key:
+            return s
+    return None
+
+
+def _sector_keywords_for(sector_key: str, geo: PlanGeo) -> list[str]:
+    rows = load_sector_keywords().get(sector_key, [])
+    out: list[str] = []
+    for kw, kw_geo in rows:
+        # A sector keyword with geo 'Global' applies to any plan; otherwise it
+        # must match the plan geo (India keyword → India plan, etc.).
+        if kw_geo == "Global" or kw_geo == geo:
+            out.append(kw)
+    return out
+
+
+def build_sector_plans(sector: Sector) -> list[QueryPlan]:
+    """Facet sweeps for one sector: 4 primary-geo plans (raises / clinical /
+    policy / product) plus, when a secondary geo is configured, one 'biggest
+    stories only' sweep of that geo. All use a 14-day lookback."""
+    watchlist = load_sector_watchlist().get(sector.key, [])
+    watchlist_line = (
+        f"Companies and organizations to watch (surface any relevant news about "
+        f"them): {', '.join(watchlist)}.\n" if watchlist else ""
+    )
+    plans: list[QueryPlan] = []
+
+    def _plan(facet_key: str, focus: str, geo: PlanGeo, *, secondary: bool) -> QueryPlan:
+        kws = _sector_keywords_for(sector.key, geo)
+        sample = kws[:SECTOR_KEYWORDS_PER_PLAN]
+        prompt = _SECTOR_PROMPT_TEMPLATE.format(
+            sector=sector.display,
+            geo_label=_GEO_LABEL[geo],
+            focus=focus,
+            watchlist_line=watchlist_line,
+            keywords=", ".join(sample) if sample else sector.display,
+        )
+        suffix = "us_top" if secondary else facet_key
+        return QueryPlan(
+            id=f"sector__{sector.key}__{suffix}",
+            geography=geo,
+            bucket=sector.display,
+            sub_buckets=(),
+            keyword_sample=tuple(sample),
+            keyword_count_total=len(kws),
+            prompt_text=prompt,
+            track="sector",
+            priority_bucket=None,
+            sector=sector.key,
+            recency=SECTOR_RECENCY,
+            is_secondary_geo=secondary,
+        )
+
+    for facet_key, focus in _SECTOR_FACETS:
+        plans.append(_plan(facet_key, focus, sector.primary_geo, secondary=False))
+
+    # Sources sweep: one plan naming the sector's authors / newsletters / reports
+    # so Perplexity pulls their recent coverage (mirrors the daily 'voice' plan).
+    sources = load_sector_sources().get(sector.key, [])
+    if sources:
+        prompt = _SECTOR_SOURCES_PROMPT.format(
+            sector=sector.display,
+            geo_label=_GEO_LABEL[sector.primary_geo],
+            sources=", ".join(s.name for s in sources),
+        )
+        plans.append(QueryPlan(
+            id=f"sector__{sector.key}__sources",
+            geography=sector.primary_geo,
+            bucket=sector.display,
+            sub_buckets=(),
+            keyword_sample=(),
+            keyword_count_total=0,
+            prompt_text=prompt,
+            track="sector",
+            priority_bucket=None,
+            sector=sector.key,
+            recency=SECTOR_RECENCY,
+            is_secondary_geo=False,
+        ))
+
+    if sector.secondary_geo and sector.secondary_max_stories > 0:
+        plans.append(_plan(
+            "secondary", _SECTOR_SECONDARY_FOCUS, sector.secondary_geo,
+            secondary=True,
+        ))
+    return plans
 
 
 # --- Orchestrator ------------------------------------------------------

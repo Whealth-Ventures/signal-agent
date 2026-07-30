@@ -85,3 +85,23 @@ def is_healthcare(text: str | None) -> bool:
     if not text:
         return False
     return _PATTERN.search(text) is not None
+
+
+def make_term_gate(terms: "list[str] | tuple[str, ...]"):
+    """Build a case-insensitive matcher over `terms` for a per-sector topicality
+    gate. Each term is matched as a left-word-boundary prefix (so "diabet"
+    catches diabetes/diabetic, "oncolog" catches oncology/oncologist), which
+    keeps the sector gate generous — it only needs to reject stories that are
+    clearly off-sector, not perfectly classify. Returns a `matches(text)->bool`.
+    Empty term list → a gate that admits everything (no gating)."""
+    cleaned = [t.strip() for t in terms if t and t.strip()]
+    if not cleaned:
+        return lambda _text: True
+    pattern = re.compile(
+        "|".join(rf"\b{re.escape(t)}" for t in cleaned), re.IGNORECASE,
+    )
+
+    def matches(text: str | None) -> bool:
+        return bool(text) and pattern.search(text) is not None
+
+    return matches

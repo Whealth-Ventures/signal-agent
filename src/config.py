@@ -29,6 +29,8 @@ INPUTS_DIR = ROOT / "inputs"
 KEYWORDS_XLSX = INPUTS_DIR / "keywords.xlsx"
 VOICES_XLSX = INPUTS_DIR / "voices.xlsx"
 TUNING_XLSX = INPUTS_DIR / "tuning.xlsx"
+# Sector digest inputs (bi-weekly sector roundups — see docs/SECTOR_DIGEST_PLAN.md).
+SECTORS_XLSX = INPUTS_DIR / "sectors.xlsx"
 
 CONTENT_DIR = INPUTS_DIR / "content"
 PROMPTS_DIR = ROOT / "prompts"
@@ -76,6 +78,14 @@ SLACK_CHANNEL_ID_INDIA = _env("SLACK_CHANNEL_ID_INDIA") or SLACK_CHANNEL_ID
 SLACK_CHANNEL_ID_US = _env("SLACK_CHANNEL_ID_US") or SLACK_CHANNEL_ID
 SLACK_CHANNEL_LABEL_INDIA = _env("SLACK_CHANNEL_LABEL_INDIA") or "Signal Agent India"
 SLACK_CHANNEL_LABEL_US = _env("SLACK_CHANNEL_LABEL_US") or "Signal Agent US"
+
+# Sector digests: all 7 sector messages post to ONE channel (see plan). Falls
+# back to the single SLACK_CHANNEL_ID so a webhook-only setup still works.
+SLACK_CHANNEL_ID_SECTOR = _env("SLACK_CHANNEL_ID_SECTOR") or SLACK_CHANNEL_ID
+SLACK_CHANNEL_LABEL_SECTOR = _env("SLACK_CHANNEL_LABEL_SECTOR") or "sector-agent"
+# Sector webhook: optional dedicated Incoming Webhook for the sector channel.
+# Falls back to the shared SLACK_WEBHOOK_URL when unset.
+SLACK_WEBHOOK_URL_SECTOR = _env("SLACK_WEBHOOK_URL_SECTOR") or SLACK_WEBHOOK_URL
 
 
 # --- Tunables (loaded from inputs/tuning.xlsx) --------------------------
@@ -185,6 +195,11 @@ RANKER_SYSTEM_PROMPT = _load_prompt("ranker_system")
 # only when a category would otherwise be empty, Tier C dropped.
 MAGNITUDE_RUBRIC = _load_prompt("magnitude_rubric")
 
+# System prompt for the sector-digest ranker — sets the fortnightly roundup
+# "voice" (factual newswire, British spelling, roll-ups). Distinct from the
+# daily RANKER_SYSTEM_PROMPT. See docs/SECTOR_DIGEST_PLAN.md.
+SECTOR_RANKER_SYSTEM_PROMPT = _load_prompt("sector_ranker_system")
+
 
 # --- Validation ---------------------------------------------------------
 
@@ -195,18 +210,48 @@ REQUIRED_ENV = (
 )
 
 
-def check_env() -> None:
-    """Raise RuntimeError listing every missing required env var. Call at startup."""
-    missing = [k for k in REQUIRED_ENV if not _env(k)]
-    if missing:
+def _has_sector_transport() -> bool:
+    """Sector mode can post via a dedicated sector webhook, the shared webhook,
+    or bot token + a channel id — any one is enough."""
+    if SLACK_BOT_TOKEN and (SLACK_CHANNEL_ID_SECTOR or SLACK_CHANNEL_ID):
+        return True
+    return bool(SLACK_WEBHOOK_URL_SECTOR or SLACK_WEBHOOK_URL)
+
+
+def check_env(mode: str = "daily", *, require_slack: bool = True) -> None:
+    """Raise RuntimeError listing every missing required env var. Call at startup.
+
+    `mode="sector"` swaps the Slack requirement for the sector transport check
+    (dedicated webhook / shared webhook / bot token+channel) and requires
+    sectors.xlsx instead of the daily keyword/voices files. `require_slack=False`
+    skips the transport check entirely — used by sector PDF delivery, which
+    writes a file and never touches Slack."""
+    llm_missing = [k for k in ("OPENAI_API_KEY", "PERPLEXITY_API_KEY") if not _env(k)]
+    if llm_missing:
         raise RuntimeError(
-            "Missing required env vars in .env: " + ", ".join(missing)
+            "Missing required env vars in .env: " + ", ".join(llm_missing)
         )
 
-    if not KEYWORDS_XLSX.exists():
-        raise RuntimeError(f"Keywords file not found: {KEYWORDS_XLSX}")
-    if not VOICES_XLSX.exists():
-        raise RuntimeError(f"Voices file not found: {VOICES_XLSX}")
+    if mode == "sector":
+        if require_slack and not _has_sector_transport():
+            raise RuntimeError(
+                "No Slack transport for sector mode: set SLACK_BOT_TOKEN + "
+                "SLACK_CHANNEL_ID_SECTOR, or SLACK_WEBHOOK_URL_SECTOR, or "
+                "SLACK_WEBHOOK_URL in .env."
+            )
+        if not SECTORS_XLSX.exists():
+            raise RuntimeError(
+                f"Sectors file not found: {SECTORS_XLSX}. Run "
+                f"`python scripts/build_sectors_xlsx.py` to bootstrap it."
+            )
+    else:
+        if not _env("SLACK_WEBHOOK_URL"):
+            raise RuntimeError("Missing required env vars in .env: SLACK_WEBHOOK_URL")
+        if not KEYWORDS_XLSX.exists():
+            raise RuntimeError(f"Keywords file not found: {KEYWORDS_XLSX}")
+        if not VOICES_XLSX.exists():
+            raise RuntimeError(f"Voices file not found: {VOICES_XLSX}")
+
     if not TUNING_XLSX.exists():
         raise RuntimeError(
             f"Tuning file not found: {TUNING_XLSX}. Run "

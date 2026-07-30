@@ -1,0 +1,15 @@
+[Unit]
+Description=Run signal-agent sector digest on Tuesdays (05:30 UTC = 11:00 IST); the app's bi-weekly guard makes it fortnightly
+
+[Timer]
+# Box is pinned to UTC. 05:30 UTC = 11:00 Asia/Kolkata. The timer fires EVERY
+# Tuesday; run-sector.sh passes --min-days-between 13 so the digest actually
+# posts only every ~2 weeks (and self-heals a missed cycle). deploy.sh stamps
+# this line from the Terraform config ($SECTOR_ONCALENDAR), defaulting to the
+# value below when the var is unset.
+OnCalendar=Tue *-*-* 05:30:00
+Persistent=true
+Unit=signal-agent-sector.service
+
+[Install]
+WantedBy=timers.target

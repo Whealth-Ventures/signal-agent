@@ -344,7 +344,12 @@ def run_scoring(
     voice_names: set[str] | None = None,
     trusted_hosts: set[str] | None = None,
     firm_names: set[str] | None = None,
+    stream: str | None = None,
 ) -> ScoringStats:
+    # `stream` scopes dedup (URL + historical embedding) to one lineage and
+    # stamps created stories with it, so a sector run only dedupes against that
+    # sector's own history and its stories can be selected in isolation later.
+    # None = legacy daily behaviour (global dedup, NULL stream).
     start = time.monotonic()
     own_conn = conn is None
     if own_conn:
@@ -353,7 +358,7 @@ def run_scoring(
     try:
         signals_all = storage.list_unscored_signals(conn=conn)
         sent_urls = storage.recently_sent_urls(
-            within_days=url_dedup_window_days, conn=conn,
+            within_days=url_dedup_window_days, stream=stream, conn=conn,
         )
         signals = [s for s in signals_all if s.url not in sent_urls]
         filtered = len(signals_all) - len(signals)
@@ -396,7 +401,7 @@ def run_scoring(
 
         # Load historical embeddings once. Empty list on first ever run.
         historical = storage.recent_story_embeddings(
-            within_days=historical_dedup_window_days, conn=conn,
+            within_days=historical_dedup_window_days, stream=stream, conn=conn,
         )
 
         # Pre-normalize once: cosine becomes a single dot product.
@@ -498,7 +503,9 @@ def run_scoring(
                 geo=geo,
                 bucket=bucket,
             )
-            storage.upsert_story(story, embedding=surv.canonical_emb, conn=conn)
+            storage.upsert_story(
+                story, embedding=surv.canonical_emb, stream=stream, conn=conn,
+            )
             for s in cs:
                 assign_rows.append((signal_id(s.source, s.url), sid))
 

@@ -37,7 +37,8 @@ _SCHEMA_SQL = [
         priority_bucket TEXT,
         geo TEXT,
         bucket TEXT,
-        embedding BLOB
+        embedding BLOB,
+        stream TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_stories_score ON stories(relevance_score DESC)",
@@ -71,7 +72,8 @@ _SCHEMA_SQL = [
         recipients TEXT NOT NULL,
         error TEXT,
         slack_ts TEXT,
-        slack_channel TEXT
+        slack_channel TEXT,
+        stream TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_digests_sent_at ON digests(sent_at)",
@@ -107,6 +109,11 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE stories ADD COLUMN bucket TEXT")
     if "embedding" not in cols:
         c.execute("ALTER TABLE stories ADD COLUMN embedding BLOB")
+    # `stream` isolates a digest lineage (e.g. 'geo:india', 'sector:everbright')
+    # so dedup + candidate selection can be scoped per stream. NULL = legacy
+    # (the daily geo pipeline never sets it, so its behaviour is unchanged).
+    if "stream" not in cols:
+        c.execute("ALTER TABLE stories ADD COLUMN stream TEXT")
 
     cur = c.execute("PRAGMA table_info(digests)")
     cols = {row["name"] for row in cur.fetchall()}
@@ -114,6 +121,8 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE digests ADD COLUMN slack_ts TEXT")
     if "slack_channel" not in cols:
         c.execute("ALTER TABLE digests ADD COLUMN slack_channel TEXT")
+    if "stream" not in cols:
+        c.execute("ALTER TABLE digests ADD COLUMN stream TEXT")
 
     # Create indexes for migration-added columns AFTER the columns exist.
     # Idempotent so it's fine to also run on fresh DBs where CREATE TABLE
@@ -125,6 +134,8 @@ def _migrate(c: sqlite3.Connection) -> None:
     c.execute(
         "CREATE INDEX IF NOT EXISTS idx_digests_slack_ts ON digests(slack_ts)"
     )
+    c.execute("CREATE INDEX IF NOT EXISTS idx_stories_stream ON stories(stream)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_digests_stream ON digests(stream)")
 
 
 # --- Connection management ---------------------------------------------
@@ -284,16 +295,22 @@ def upsert_story(
     story: Story,
     *,
     embedding: list[float] | None = None,
+    stream: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> None:
+    # `stream` tags the story with the lineage that produced it (e.g.
+    # 'sector:everbright'). Sector runs are processed sequentially and each
+    # sector ranks immediately after its own scoring pass, so a shared-URL row
+    # carries the correct stream at the moment it is ranked. Left NULL by the
+    # daily pipeline (unchanged behaviour).
     emb_blob = _embedding_to_blob(embedding) if embedding else None
     with _maybe_own(conn) as c:
         c.execute(
             """INSERT INTO stories
                (id, canonical_url, canonical_title, canonical_summary,
                 published_at, relevance_score, created_at, priority_bucket,
-                geo, bucket, embedding)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                geo, bucket, embedding, stream)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  canonical_url     = excluded.canonical_url,
                  canonical_title   = excluded.canonical_title,
@@ -303,12 +320,13 @@ def upsert_story(
                  priority_bucket   = excluded.priority_bucket,
                  geo               = excluded.geo,
                  bucket            = excluded.bucket,
-                 embedding         = COALESCE(excluded.embedding, stories.embedding)""",
+                 embedding         = COALESCE(excluded.embedding, stories.embedding),
+                 stream            = COALESCE(excluded.stream, stories.stream)""",
             (
                 story.id, story.canonical_url, story.canonical_title,
                 story.canonical_summary, _iso(story.published_at),
                 story.relevance_score, _iso(_utcnow()),
-                story.priority_bucket, story.geo, story.bucket, emb_blob,
+                story.priority_bucket, story.geo, story.bucket, emb_blob, stream,
             ),
         )
 
@@ -354,6 +372,7 @@ def list_stories(
     limit: int = 100,
     exclude_urls: Iterable[str] | None = None,
     order_by_recency: bool = False,
+    stream: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> list[Story]:
     """Top stories, by relevance_score (default) or by recency.
@@ -365,10 +384,16 @@ def list_stories(
     `exclude_urls` is the dedup escape hatch the ranker uses to keep already-
     sent stories out of its candidate pool — without it, high-scoring
     evergreens from previous digests outcompete today's fresh stories.
+
+    `stream` scopes the pool to one lineage (e.g. 'sector:everbright'). When
+    None the pool is unfiltered — the daily pipeline's legacy behaviour.
     """
     excluded = tuple(exclude_urls) if exclude_urls else ()
     params: list = [min_score]
     sql = "SELECT * FROM stories WHERE relevance_score >= ?"
+    if stream is not None:
+        sql += " AND stream = ?"
+        params.append(stream)
     if excluded:
         placeholders = ",".join("?" * len(excluded))
         sql += f" AND canonical_url NOT IN ({placeholders})"
@@ -388,19 +413,22 @@ def create_digest(
     recipients: Iterable[str],
     *,
     slack_channel: str | None = None,
+    stream: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> str:
     # slack_channel is stamped at creation (not just on send) so the per-channel
     # idempotency guard can tell India's digest apart from US's on the same date.
+    # `stream` does the same when multiple digests share ONE channel (e.g. the 7
+    # sector messages all post to the same channel — the stream tells them apart).
     digest_id = str(uuid.uuid4())
     with _maybe_own(conn) as c:
         c.execute(
             """INSERT INTO digests
                (id, digest_date, created_at, sent_at, status, recipients, error,
-                slack_channel)
-               VALUES (?, ?, ?, NULL, 'pending', ?, NULL, ?)""",
+                slack_channel, stream)
+               VALUES (?, ?, ?, NULL, 'pending', ?, NULL, ?, ?)""",
             (digest_id, digest_date, _iso(_utcnow()),
-             json.dumps(list(recipients)), slack_channel),
+             json.dumps(list(recipients)), slack_channel, stream),
         )
     return digest_id
 
@@ -426,6 +454,7 @@ def has_sent_digest_for_date(
     digest_date: str,
     *,
     slack_channel: str | None = None,
+    stream: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
     """True if a digest for `digest_date` has already been posted (status='sent').
@@ -436,19 +465,21 @@ def has_sent_digest_for_date(
 
     When `slack_channel` is given the guard is per-channel, so the India and US
     channels are tracked independently on the same date (a sent India digest
-    doesn't suppress the US one). When omitted it's date-only (legacy)."""
+    doesn't suppress the US one). When `stream` is given the guard is per-stream
+    — needed when several digests share one channel (the 7 sector messages), so
+    each sector is tracked independently. Both may be combined; omitting both is
+    date-only (legacy)."""
+    sql = "SELECT 1 FROM digests WHERE digest_date=? AND status='sent'"
+    params: list = [digest_date]
+    if slack_channel:
+        sql += " AND slack_channel=?"
+        params.append(slack_channel)
+    if stream is not None:
+        sql += " AND stream=?"
+        params.append(stream)
+    sql += " LIMIT 1"
     with _maybe_own(conn) as c:
-        if slack_channel:
-            row = c.execute(
-                "SELECT 1 FROM digests WHERE digest_date=? AND status='sent' "
-                "AND slack_channel=? LIMIT 1",
-                (digest_date, slack_channel),
-            ).fetchone()
-        else:
-            row = c.execute(
-                "SELECT 1 FROM digests WHERE digest_date=? AND status='sent' LIMIT 1",
-                (digest_date,),
-            ).fetchone()
+        row = c.execute(sql, params).fetchone()
     return row is not None
 
 
@@ -489,25 +520,55 @@ def mark_digest_failed(
 def recently_sent_urls(
     within_days: int = 30,
     *,
+    stream: str | None = None,
     conn: sqlite3.Connection | None = None,
     now: datetime | None = None,
 ) -> set[str]:
+    """URLs shipped in a sent digest within the window. `stream` scopes to one
+    lineage (e.g. 'sector:everbright'), so a sector roundup only dedupes against
+    its own past sends — a story can appear in both a daily digest and a sector
+    roundup. None = all streams (legacy daily behaviour)."""
     cutoff = (now or _utcnow()) - timedelta(days=within_days)
+    sql = (
+        "SELECT DISTINCT s.canonical_url "
+        "FROM digest_stories ds "
+        "JOIN digests d ON d.id = ds.digest_id "
+        "JOIN stories s ON s.id = ds.story_id "
+        "WHERE d.status = 'sent' AND d.sent_at >= ?"
+    )
+    params: list = [_iso(cutoff)]
+    if stream is not None:
+        sql += " AND d.stream = ?"
+        params.append(stream)
     with _maybe_own(conn) as c:
-        rows = c.execute(
-            """SELECT DISTINCT s.canonical_url
-               FROM digest_stories ds
-               JOIN digests d ON d.id = ds.digest_id
-               JOIN stories s ON s.id = ds.story_id
-               WHERE d.status = 'sent' AND d.sent_at >= ?""",
-            (_iso(cutoff),),
-        ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     return {r["canonical_url"] for r in rows}
+
+
+def most_recent_sent_at(
+    *,
+    stream_like: str = "sector:%",
+    conn: sqlite3.Connection | None = None,
+) -> datetime | None:
+    """Timestamp of the most recent SENT digest whose stream matches `stream_like`
+    (SQL LIKE). Used by the bi-weekly guard: a fortnightly job can fire every
+    Tuesday and no-op unless enough days have passed since the last send. Returns
+    None if nothing matching has ever been sent."""
+    with _maybe_own(conn) as c:
+        row = c.execute(
+            "SELECT MAX(sent_at) AS last FROM digests "
+            "WHERE status='sent' AND stream LIKE ?",
+            (stream_like,),
+        ).fetchone()
+    if not row or not row["last"]:
+        return None
+    return _parse_iso(row["last"])
 
 
 def recent_story_embeddings(
     within_days: int = 30,
     *,
+    stream: str | None = None,
     conn: sqlite3.Connection | None = None,
     now: datetime | None = None,
 ) -> list[tuple[str, list[float]]]:
@@ -516,17 +577,21 @@ def recent_story_embeddings(
     Returns (story_id, embedding) pairs. Stories with NULL embeddings (rows
     written before the embedding column existed, or written without one) are
     excluded — they simply can't participate in similarity checks.
+
+    `stream` scopes to one lineage (see recently_sent_urls); None = all (legacy).
     """
     cutoff = (now or _utcnow()) - timedelta(days=within_days)
+    sql = (
+        "SELECT DISTINCT s.id, s.embedding "
+        "FROM digest_stories ds "
+        "JOIN digests d ON d.id = ds.digest_id "
+        "JOIN stories s ON s.id = ds.story_id "
+        "WHERE d.status = 'sent' AND d.sent_at >= ? AND s.embedding IS NOT NULL"
+    )
+    params: list = [_iso(cutoff)]
+    if stream is not None:
+        sql += " AND d.stream = ?"
+        params.append(stream)
     with _maybe_own(conn) as c:
-        rows = c.execute(
-            """SELECT DISTINCT s.id, s.embedding
-               FROM digest_stories ds
-               JOIN digests d ON d.id = ds.digest_id
-               JOIN stories s ON s.id = ds.story_id
-               WHERE d.status = 'sent'
-                 AND d.sent_at >= ?
-                 AND s.embedding IS NOT NULL""",
-            (_iso(cutoff),),
-        ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     return [(r["id"], _blob_to_embedding(r["embedding"])) for r in rows]

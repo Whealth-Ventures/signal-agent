@@ -63,19 +63,25 @@ install -m 644 "$REPO/deploy/signal-agent.service"    /etc/systemd/system/signal
 install -m 644 "$REPO/deploy/signal-agent.timer"      /etc/systemd/system/signal-agent.timer
 install -m 644 "$REPO/deploy/signal-agent-us.service" /etc/systemd/system/signal-agent-us.service
 install -m 644 "$REPO/deploy/signal-agent-us.timer"   /etc/systemd/system/signal-agent-us.timer
+install -m 644 "$REPO/deploy/signal-agent-sector.service" /etc/systemd/system/signal-agent-sector.service
+install -m 644 "$REPO/deploy/signal-agent-sector.timer"   /etc/systemd/system/signal-agent-sector.timer
 # Keep the schedules in sync with the Terraform-provided config. The US calendar
 # defaults to 11:50 UTC (see signal-agent-us.timer) when the env var is unset on
-# boxes provisioned before the two-channel split.
+# boxes provisioned before the two-channel split. The sector calendar defaults
+# to Tuesday 05:30 UTC (= 11:00 IST); the app's --min-days-between guard makes
+# the fortnightly cadence, so the timer itself only needs to fire weekly.
 sed -i "s#^OnCalendar=.*#OnCalendar=$DIGEST_ONCALENDAR#" /etc/systemd/system/signal-agent.timer
 sed -i "s#^OnCalendar=.*#OnCalendar=${DIGEST_ONCALENDAR_US:-*-*-* 11:50:00}#" /etc/systemd/system/signal-agent-us.timer
+sed -i "s#^OnCalendar=.*#OnCalendar=${SECTOR_ONCALENDAR:-Tue *-*-* 05:30:00}#" /etc/systemd/system/signal-agent-sector.timer
 
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 systemctl daemon-reload
 systemctl enable --now signal-agent.timer
 systemctl enable --now signal-agent-us.timer
+systemctl enable --now signal-agent-sector.timer
 systemctl restart signal-admin.service
 
 echo ">> deploy OK"
 systemctl --no-pager status signal-admin.service | head -5 || true
-systemctl --no-pager list-timers signal-agent.timer signal-agent-us.timer || true
+systemctl --no-pager list-timers signal-agent.timer signal-agent-us.timer signal-agent-sector.timer || true

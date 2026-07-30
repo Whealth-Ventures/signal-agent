@@ -12,6 +12,32 @@ The agent posts **two geo-scoped digests to two channels** from the same app:
 | `india` | India + Global | Signal Agent India | `signal-agent.timer` | `02:20` | 08:00 Asia/Kolkata |
 | `us`    | US + Global    | Signal Agent US    | `signal-agent-us.timer` | `11:50` | 08:00 America/New_York |
 
+There is also a **bi-weekly sector digest** (7 per-portco roundups) — a separate
+pipeline on its own timer:
+
+| Run | Content | Channel | Timer | Fires (UTC) | Cadence |
+|-----|---------|---------|-------|-------------|---------|
+| `--mode sector` | 7 sector roundups (Block Kit messages) | `#sector-agent` | `signal-agent-sector.timer` | `Tue 05:30` (= 11:00 IST) | **fortnightly** via the app guard |
+
+**Fortnightly on a weekday, robustly.** systemd/cron can't express "every *other*
+Tuesday," so the timer fires **every** Tuesday and `run-sector.sh` passes
+`--min-days-between 13`: the pipeline no-ops unless ≥13 days have passed since the
+last sector send (`storage.most_recent_sent_at("sector:%")`). This yields a true
+fortnightly cadence and self-heals a missed cycle (the following Tuesday the gap
+has grown past 13 days, so it runs). `--force` overrides the guard; `--test` /
+`--dry-run` bypass it.
+
+**Required secret.** The sector run posts to `#sector-agent`, so the AGENT
+secret (Secrets Manager → `agent.env`) must include `SLACK_CHANNEL_ID_SECTOR`
+(the channel's ID) and the bot must be invited to that channel. It falls back to
+`SLACK_CHANNEL_ID` if unset. Change the fire time via `SECTOR_ONCALENDAR`
+(Terraform → stamped by `deploy.sh`), default `Tue *-*-* 05:30:00`.
+
+Run it off-schedule on the box: `sudo systemctl start signal-agent-sector.service`
+(respects the 13-day guard; add `--force` by editing the unit or run
+`.venv/bin/python src/main.py --mode sector --force` as the `signal` user). Logs:
+`journalctl -u signal-agent-sector.service` and `data/logs/sector_*`.
+
 `Global` stories (all AI-in-Healthcare, Hot-TAs, cross-cutting) and unclassified
 RSS items go to **both** channels; India-only and US-only stories go to their own
 channel. Each channel gets its own deep sweep (see `docs/EDITING.md` → geo depth),
