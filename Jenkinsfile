@@ -1,3 +1,97 @@
+// =============================================================================
+// WH-313 — version bump resolution helpers.
+//
+// NO `=~` anywhere in this file, and therefore no @NonCPS needed. The find
+// operator returns a java.util.regex.Matcher, which is NOT serializable; Jenkins
+// CPS serializes every local at each step boundary, so a Matcher alive across an
+// `sh` call kills the build (xponentiate-nextjs main #3 died exactly that way).
+// @NonCPS would also work, but it cannot be compile-checked outside Jenkins —
+// plain string operations can, so they are used instead.
+//
+// `==~` (the match operator) IS safe: it returns a boolean, not a Matcher.
+// =============================================================================
+
+// Pull the PR number out of a merge commit subject. Both shapes are in use here:
+//   merge commit : "Merge pull request #1688 from Whealth-Ventures/chore/..."
+//   squash merge : "fix(reports): reportlab missing from the image (#78)"
+String prNumberFrom(String subject) {
+  if (!subject) return null
+  def s = subject.trim()
+
+  final String MERGE_PREFIX = 'Merge pull request #'
+  if (s.startsWith(MERGE_PREFIX)) {
+    def rest = s.substring(MERGE_PREFIX.length())
+    def end = rest.indexOf(' ')
+    def num = (end < 0) ? rest : rest.substring(0, end)
+    return (num ==~ /^[0-9]+$/) ? num : null
+  }
+
+  // squash: the trailing "(#N)" GitHub appends to the PR title
+  if (s.endsWith(')')) {
+    def open = s.lastIndexOf('(#')
+    if (open >= 0) {
+      def num = s.substring(open + 2, s.length() - 1)
+      return (num ==~ /^[0-9]+$/) ? num : null
+    }
+  }
+  return null
+}
+
+// Map a PR title to a semver bump. Explicit MAJOR:/MINOR:/PATCH: wins; otherwise
+// fall back to the conventional-commit prefix the team already writes
+// (feat(WH-318): -> minor, fix(WH-318): -> patch). Returns null when the title
+// carries no signal — the caller decides the default, this does not guess.
+String bumpFromTitle(String title) {
+  if (!title) return null
+  def t = title.trim()
+
+  if (t.contains('BREAKING CHANGE')) return 'major'
+
+  // Everything before the first ':' is the type; nothing after it matters here.
+  def colon = t.indexOf(':')
+  if (colon < 0) return null
+  def type = t.substring(0, colon).trim().toLowerCase()
+
+  // Explicit intent, exactly as proposed: "MAJOR: ...", "minor : ...".
+  if (type == 'major') return 'major'
+  if (type == 'minor') return 'minor'
+  if (type == 'patch') return 'patch'
+
+  // Conventional commits: a trailing '!' marks a breaking change (feat!:, feat(api)!:).
+  boolean breaking = type.endsWith('!')
+  if (breaking) type = type.substring(0, type.length() - 1).trim()
+
+  // Strip an optional (scope).
+  def paren = type.indexOf('(')
+  if (paren >= 0) {
+    if (!type.endsWith(')')) return null
+    type = type.substring(0, paren).trim()
+  }
+  if (!(type ==~ /^[a-z]+$/)) return null
+
+  if (breaking) return 'major'
+  if (type == 'feat') return 'minor'
+  if (type in ['fix', 'chore', 'docs', 'refactor', 'perf', 'test', 'style', 'build', 'ci', 'revert']) {
+    return 'patch'
+  }
+  return null
+}
+
+// owner/repo from the git remote, so the API call needs no hardcoded slug.
+// Handles git@github.com:owner/repo.git and https://github.com/owner/repo(.git).
+String slugFrom(String remoteUrl) {
+  if (!remoteUrl) return null
+  def u = remoteUrl.trim()
+  def i = u.indexOf('github.com')
+  if (i < 0) return null
+  def rest = u.substring(i + 'github.com'.length())
+  if (rest.startsWith(':') || rest.startsWith('/')) rest = rest.substring(1)
+  if (rest.endsWith('.git')) rest = rest.substring(0, rest.length() - 4)
+  rest = rest.trim()
+  def parts = rest.tokenize('/')
+  return (parts.size() == 2 && parts.every { it }) ? "${parts[0]}/${parts[1]}".toString() : null
+}
+
 // signal-agent CI/CD — validate on every branch/PR, deploy on main via SSM.
 //
 // Requirements on the Jenkins node:
@@ -29,8 +123,18 @@ pipeline {
   parameters {
     choice(
       name: 'BUMP',
-      choices: ['none', 'patch', 'minor', 'major'],
-      description: 'Version bump for this release. none = rebuild the current version (use for re-deploys/rollbacks). patch = fixes. minor = new features. major = breaking changes. On a bump, Jenkins rewrites VERSION, commits "chore: bump version to X.Y.Z [skip ci]" and pushes to main BEFORE building.'
+      choices: ['auto', 'none', 'patch', 'minor', 'major'],
+      description: '''How to version this release.
+
+auto  (default) — derive from the merged PR's title. MAJOR:/MINOR:/PATCH: prefix wins;
+                  otherwise the conventional-commit prefix is used (feat: -> minor,
+                  fix:/chore:/docs: -> patch, feat!: -> major). No signal -> patch.
+                  This is what every webhook-triggered deploy uses, so releases merged
+                  through a PR are versioned with nobody selecting anything.
+none            — rebuild the CURRENT version; no bump, no commit, no tag. Use for a
+                  re-deploy or a rollback.
+patch/minor/major — explicit override, wins over the PR title. Use for a direct push
+                  that never went through a PR.'''
     )
   }
 
@@ -118,11 +222,79 @@ pipeline {
         }
       }
     }
+    // WH-313. Resolves the bump ONCE here so 'Bump version' below is pure arithmetic.
+    //
+    // Two ways in, deliberately:
+    //   - BUMP=auto (the default, and what every webhook build gets) reads the merged
+    //     PR title, so a PR-driven deploy versions itself with no human involved.
+    //   - An explicit patch/minor/major from the Jenkins dropdown always wins — the
+    //     manual path for a direct push that never went through a PR.
+    //
+    // A title lookup NEVER fails the build: the deploy is downstream and this only
+    // decides a name. On any failure it warns and falls back to patch.
+    stage('Resolve version bump') {
+      steps {
+        script {
+          if (env.BUMP == 'none') {
+            echo "BUMP=none — rebuilding the current version. No bump, no commit, no tag."
+            env.RESOLVED_BUMP = 'none'
+          } else if (env.BUMP != 'auto') {
+            echo "BUMP=${env.BUMP} — selected explicitly in Jenkins, so the PR title is not consulted."
+            env.RESOLVED_BUMP = env.BUMP
+          } else {
+            def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+            def remote  = sh(returnStdout: true, script: 'git config --get remote.origin.url').trim()
+            def pr      = prNumberFrom(subject)
+            def slug    = slugFrom(remote)
+            String title = null
+
+            if (pr && slug) {
+              withCredentials([string(credentialsId: 'github-api-token', variable: 'GH_TOKEN')]) {
+                // set +x so the token is never echoed. `|| true` + `// empty` so a failed
+                // lookup yields "" rather than aborting the shell under set -e.
+                title = sh(returnStdout: true, script: '''#!/usr/bin/env bash
+                  set -eu
+                  set +x
+                  curl -sS --max-time 20 \
+                       -H "Authorization: Bearer $GH_TOKEN" \
+                       -H "Accept: application/vnd.github+json" \
+                       "https://api.github.com/repos/''' + slug + '''/pulls/''' + pr + '''" \
+                    2>/dev/null | jq -r '.title // empty' || true
+                ''').trim()
+              }
+              if (title) {
+                echo "PR #${pr} title: ${title}"
+              } else {
+                echo "WARNING: could not read the title of PR #${pr} (token scope, or the API is down)."
+              }
+            } else {
+              echo "HEAD is not a PR merge (subject: ${subject}) — no PR title to read."
+            }
+
+            def derived = bumpFromTitle(title)
+            if (derived) {
+              echo "Bump resolved from the PR title: ${derived}"
+              env.RESOLVED_BUMP = derived
+            } else {
+              // Defaulting to patch, not minor: of the last 30 everhope_nextjs PROD
+              // releases the ticket graded 21 patch / 8 minor / 1 major, and a
+              // default of minor is what produced the manual "correct this bump to
+              // 1.3.1 — the release is a fix, not a feature" commit on 2026-07-30.
+              echo "WARNING: no bump signal in the PR title — defaulting to patch."
+              echo "         Prefix the PR title with MAJOR:/MINOR:/PATCH:, or use a"
+              echo "         conventional-commit prefix (feat: / fix:), to be explicit."
+              env.RESOLVED_BUMP = 'patch'
+            }
+          }
+        }
+      }
+    }
+
     // WH-313. Runs BEFORE the artifact is named so the version reaches it. Skipped
     // when BUMP=none, so a re-deploy or rollback rebuilds the current version and
     // pushes nothing.
     stage('Bump version') {
-      when { expression { env.BUMP != 'none' } }
+      when { expression { env.RESOLVED_BUMP != 'none' } }
       steps {
         script {
           def cur = readFile('VERSION').trim()
@@ -144,13 +316,13 @@ pipeline {
           int min = parts[1].toInteger()
           int pat = parts[2].toInteger()
           def next
-          switch (env.BUMP) {
+          switch (env.RESOLVED_BUMP) {
             case 'major': next = "${maj + 1}.0.0"           ; break
             case 'minor': next = "${maj}.${min + 1}.0"      ; break
             case 'patch': next = "${maj}.${min}.${pat + 1}" ; break
-            default: error("unknown BUMP '${env.BUMP}'")
+            default: error("unknown bump '${env.RESOLVED_BUMP}'")
           }
-          echo "Bumping ${cur} -> ${next} (${env.BUMP})"
+          echo "Bumping ${cur} -> ${next} (${env.RESOLVED_BUMP})"
           env.NEW_VERSION = next
 
           writeFile file: 'VERSION', text: "${next}\n"
