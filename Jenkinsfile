@@ -1,17 +1,17 @@
 // =============================================================================
-// WH-313 — version bump resolution helpers.
+// WH-313 — release naming helpers: bump resolution + Jira key extraction.
 //
-// NO `=~` anywhere in this file, and therefore no @NonCPS needed. The find
-// operator returns a java.util.regex.Matcher, which is NOT serializable; Jenkins
-// CPS serializes every local at each step boundary, so a Matcher alive across an
-// `sh` call kills the build (xponentiate-nextjs main #3 died exactly that way).
-// @NonCPS would also work, but it cannot be compile-checked outside Jenkins —
-// plain string operations can, so they are used instead.
+// NO `=~` (find operator) anywhere: it returns a java.util.regex.Matcher, which is
+// NOT serializable, and Jenkins CPS serializes every local at each step boundary —
+// a Matcher alive across an `sh` call killed xponentiate-nextjs main #3. `==~`
+// (match operator) is fine: it returns a boolean. `replaceAll`/`split` are fine
+// too: they return String/String[] and retain no Matcher.
 //
-// `==~` (the match operator) IS safe: it returns a boolean, not a Matcher.
+// @NonCPS would also solve it, but it cannot be compile-checked outside Jenkins
+// ("unable to resolve class NonCPS"), so plain string operations are used instead.
 // =============================================================================
 
-// Pull the PR number out of a merge commit subject. Both shapes are in use here:
+// Pull the PR number out of a merge commit subject. Both shapes are in use:
 //   merge commit : "Merge pull request #1688 from Whealth-Ventures/chore/..."
 //   squash merge : "fix(reports): reportlab missing from the image (#78)"
 String prNumberFrom(String subject) {
@@ -26,7 +26,6 @@ String prNumberFrom(String subject) {
     return (num ==~ /^[0-9]+$/) ? num : null
   }
 
-  // squash: the trailing "(#N)" GitHub appends to the PR title
   if (s.endsWith(')')) {
     def open = s.lastIndexOf('(#')
     if (open >= 0) {
@@ -37,31 +36,47 @@ String prNumberFrom(String subject) {
   return null
 }
 
-// Map a PR title to a semver bump. Explicit MAJOR:/MINOR:/PATCH: wins; otherwise
-// fall back to the conventional-commit prefix the team already writes
-// (feat(WH-318): -> minor, fix(WH-318): -> patch). Returns null when the title
-// carries no signal — the caller decides the default, this does not guess.
+// Map a PR title to a semver bump.
+//
+// Priority:
+//   1. [major] / [minor] / [patch]   <- THE convention (WH-313). Mandatory on PRs
+//      to main, enforced by .github/workflows/pr-title-bump.yml. This form is used
+//      because the release PRs that actually merge to main are
+//      "PROD Release (WH-XXX): ..." — which carries the Jira key but no bump — and
+//      the team had already started writing "[Minor] PROD Release ..." by hand.
+//   2. MAJOR: / MINOR: / PATCH:      <- equivalent colon form
+//   3. conventional commits          <- feat: -> minor, fix:/chore: -> patch,
+//                                       feat!: / feat(api)!: -> major. Kept for
+//                                       repos that use it (ai-interviewer: 21/30).
+// Returns null when the title carries no signal. The caller decides what that
+// means; this never guesses.
 String bumpFromTitle(String title) {
   if (!title) return null
   def t = title.trim()
 
+  // 1. leading [bump] marker
+  if (t.startsWith('[')) {
+    def close = t.indexOf(']')
+    if (close > 1) {
+      def tag = t.substring(1, close).trim().toLowerCase()
+      if (tag == 'major' || tag == 'minor' || tag == 'patch') return tag
+    }
+  }
+
   if (t.contains('BREAKING CHANGE')) return 'major'
 
-  // Everything before the first ':' is the type; nothing after it matters here.
+  // Everything before the first ':' is the type.
   def colon = t.indexOf(':')
   if (colon < 0) return null
   def type = t.substring(0, colon).trim().toLowerCase()
 
-  // Explicit intent, exactly as proposed: "MAJOR: ...", "minor : ...".
-  if (type == 'major') return 'major'
-  if (type == 'minor') return 'minor'
-  if (type == 'patch') return 'patch'
+  // 2. explicit colon form
+  if (type == 'major' || type == 'minor' || type == 'patch') return type
 
-  // Conventional commits: a trailing '!' marks a breaking change (feat!:, feat(api)!:).
+  // 3. conventional commits; a trailing '!' marks a breaking change
   boolean breaking = type.endsWith('!')
   if (breaking) type = type.substring(0, type.length() - 1).trim()
 
-  // Strip an optional (scope).
   def paren = type.indexOf('(')
   if (paren >= 0) {
     if (!type.endsWith(')')) return null
@@ -77,8 +92,27 @@ String bumpFromTitle(String title) {
   return null
 }
 
-// owner/repo from the git remote, so the API call needs no hardcoded slug.
-// Handles git@github.com:owner/repo.git and https://github.com/owner/repo(.git).
+// Every Jira key in a piece of text, deduped, first-seen order preserved.
+//
+// A release routinely names several tickets — nutrition's real titles include
+// "(also WH-310, WH-297, WH-295)" — and each of them needs the Fix Version, so
+// this collects all of them rather than just the first.
+//
+// replaceAll returns a String (no Matcher escapes), so this stays CPS-safe.
+List<String> jiraKeysFrom(String text) {
+  if (!text) return []
+  def seen = new LinkedHashSet<String>()
+  text.replaceAll('[^A-Za-z0-9-]', ' ').tokenize(' ').each { tok ->
+    // strip trailing/leading dashes a split can leave behind
+    def k = tok.toUpperCase()
+    while (k.startsWith('-')) { k = k.substring(1) }
+    while (k.endsWith('-')) { k = k.substring(0, k.length() - 1) }
+    if (k ==~ /^[A-Z][A-Z0-9]*-[0-9]+$/) seen.add(k)
+  }
+  return new ArrayList<String>(seen)
+}
+
+// owner/repo from the git remote, so nothing is hardcoded per repo.
 String slugFrom(String remoteUrl) {
   if (!remoteUrl) return null
   def u = remoteUrl.trim()
