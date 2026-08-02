@@ -388,12 +388,22 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
               # value in a file. The multibranch checkout fetches without tags, so
               # existing tags are not local — fetch them before testing for one.
               git fetch --tags --force origin
-              if git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; then
-                echo "tag v${NEW_VERSION} already exists — refusing to move it." >&2
+              # Ask the REMOTE, not the local ref store. A tag left in this workspace by
+              # an earlier run that died between `git tag` and the push is
+              # indistinguishable from a published one via rev-parse — which is exactly
+              # what blocked `Everhope Data` #15 and `sso data`: both had an UNPUBLISHED
+              # v1.1.0 sitting in the workspace from their previous GH013 push failure,
+              # so the guard refused a release that had never actually happened.
+              # ls-remote is authoritative; the workspace is not.
+              if [ -n "$(git ls-remote --tags origin "refs/tags/v${NEW_VERSION}")" ]; then
+                echo "tag v${NEW_VERSION} already exists on origin — refusing to move it." >&2
                 echo "A tag pointing somewhere new breaks every rollback aimed at it." >&2
                 exit 1
               fi
-              git tag -a "v${NEW_VERSION}" -m "Release ${NEW_VERSION}"
+              # -f overwrites a stale LOCAL tag only. The push below is deliberately not
+              # --force, so a tag that really is published still cannot be moved: that
+              # remains the actual safety net, this check just fails clearly instead.
+              git tag -f -a "v${NEW_VERSION}" -m "Release ${NEW_VERSION}"
               # HEAD:<branch> — multibranch checks out a detached HEAD, so a bare
               # `git push origin main` would push nothing.
               # Commit and tag land together or not at all: a bump commit with no tag
