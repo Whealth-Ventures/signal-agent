@@ -181,7 +181,14 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     // parameter is added the variable does not exist in the environment and a
     // `set -u` shell aborts on the expansion (exactly how everhope_nextjs main #5
     // died on ALLOW_RETAG). ?: gives the safe default on that first run.
-    BUMP        = "${params.BUMP ?: 'none'}"
+    //
+    // That default MUST be 'auto', not 'none'. A build triggered by branch
+    // indexing carries no ParametersAction at all — not even the declared
+    // defaults — so params.BUMP is null on every automatic deploy even though
+    // the parameter is registered on the job. Defaulting to 'none' there meant
+    // Xponentiate-strapi main #4 rebuilt 0.1.0 and never bumped: it silently
+    // disabled versioning for exactly the webhook-driven releases this versions.
+    BUMP        = "${params.BUMP ?: 'auto'}"
     GIT_CRED_ID = 'github-signal-agent'
 
   }
@@ -305,6 +312,10 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
               echo "HEAD is not a PR merge (subject: ${subject}) — no PR title to read."
             }
 
+            // Kept for the Jira stage: the ticket keys live in the PR title, and by
+            // the time that stage runs the merge subject alone may not carry them.
+            env.PR_TITLE = title ?: ''
+
             def derived = bumpFromTitle(title)
             if (derived) {
               echo "Bump resolved from the PR title: ${derived}"
@@ -328,7 +339,7 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     // when BUMP=none, so a re-deploy or rollback rebuilds the current version and
     // pushes nothing.
     stage('Bump version') {
-      when { expression { env.RESOLVED_BUMP != 'none' } }
+      when { allOf { branch 'main'; expression { env.RESOLVED_BUMP != 'none' } } }
       steps {
         script {
           def cur = readFile('VERSION').trim()
@@ -473,6 +484,86 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
           [ "${BAD:-0}" = "1" ] && { echo "DEPLOY FAILED"; exit 1; } || echo "DEPLOY OK"
         '''
         // }
+      }
+    }
+
+    // WH-313. Last stage: Jira is a bookkeeping side effect, so it must never be
+    // able to fail a deploy that already succeeded — hence catchError(SUCCESS).
+    stage('Jira Fix Version') {
+      when { allOf { branch 'main'; expression { env.RESOLVED_BUMP != 'none' && env.VERSION } } }
+      steps {
+        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+          script {
+            def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+            def keys    = jiraKeysFrom("${env.PR_TITLE ?: ''} ${subject}")
+            if (!keys) {
+              echo 'Jira: no ticket key in the PR title or commit subject — nothing to tag.'
+              return
+            }
+
+            def slug = slugFrom(sh(returnStdout: true, script: 'git config --get remote.origin.url').trim())
+            def repo = slug ? slug.tokenize('/')[1] : env.JOB_NAME.tokenize('/')[0]
+            echo "Jira: ${repo}-${env.VERSION} -> ${keys.join(', ')}"
+
+            withCredentials([usernamePassword(credentialsId: 'jira-api',
+                                              usernameVariable: 'JIRA_EMAIL',
+                                              passwordVariable: 'JIRA_API_TOKEN')]) {
+              withEnv(["JIRA_BASE_URL=https://2070health.atlassian.net",
+                       "FIX_VERSION=${repo}-${env.VERSION}",
+                       "JIRA_PROJECT=${keys[0].tokenize('-')[0]}",
+                       "JIRA_KEYS=${keys.join(' ')}"]) {
+                // set +x so the token never lands in the build log. jq builds every
+                // payload, so nothing has to be hand-escaped into JSON.
+                sh '''#!/usr/bin/env bash
+                  set -eu
+                  set +x
+                  API="$JIRA_BASE_URL/rest/api/3"
+
+                  vid=$(curl -sS --max-time 30 -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+                          "$API/project/$JIRA_PROJECT/versions" \
+                        | jq -r --arg n "$FIX_VERSION" 'map(select(.name==$n))[0].id // empty')
+
+                  if [ -n "$vid" ]; then
+                    echo "  version exists (id=$vid)"
+                  else
+                    # Created UNRELEASED, with today as the planned release date.
+                    #
+                    # CI knows the code deployed; it does not know the release was
+                    # accepted, so marking it released is a human decision. The date
+                    # is set because `released:true` with an empty releaseDate is
+                    # exactly what the jira-alerts rule flags, and it also makes the
+                    # version show as overdue until someone signs it off — which is
+                    # the nudge that makes "a human marks it released" actually happen.
+                    REL_DATE=$(date -u +%Y-%m-%d)
+                    vid=$(curl -sS --max-time 30 -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X POST \
+                            -H 'Content-Type: application/json' \
+                            -d "$(jq -nc --arg n "$FIX_VERSION" --arg p "$JIRA_PROJECT" \
+                                  --arg d "$REL_DATE" \
+                                  '{name:$n,project:$p,released:false,releaseDate:$d}')" \
+                            "$API/version" | jq -r '.id // empty')
+                    [ -n "$vid" ] && echo "  version created unreleased, dated $REL_DATE (id=$vid) — mark it released in Jira once the release is signed off"
+                  fi
+
+                  if [ -z "$vid" ]; then
+                    echo "WARN: Jira version '$FIX_VERSION' is missing and could not be created." >&2
+                    echo "      The account needs Administer Projects on $JIRA_PROJECT. Skipping." >&2
+                    exit 0
+                  fi
+
+                  for k in $JIRA_KEYS; do
+                    code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+                             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X PUT \
+                             -H 'Content-Type: application/json' \
+                             -d "$(jq -nc --arg id "$vid" \
+                                   '{update:{fixVersions:[{add:{id:$id}}]}}')" \
+                             "$API/issue/$k")
+                    echo "  $k -> $FIX_VERSION (HTTP $code)"
+                  done
+                '''
+              }
+            }
+          }
+        }
       }
     }
   }
