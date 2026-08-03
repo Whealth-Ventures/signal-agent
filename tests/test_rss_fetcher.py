@@ -142,6 +142,21 @@ class DiscoverFeedTest(unittest.TestCase):
         self.assertEqual(url, "https://example.com/custom-rss")
         self.assertEqual(method, "html_link")
 
+    def test_url_that_is_already_a_feed(self) -> None:
+        # A configured URL that IS a direct feed (e.g. a .rss/.xml link) must be
+        # used as-is when the heuristic paths don't land on it, instead of being
+        # dropped. Only the exact URL returns the feed; all heuristics 404.
+        body = _rss_body([{"title": "a", "link": "https://x.com/a",
+                           "pubDate": _rss_pubdate(datetime.now(timezone.utc))}])
+        http = _client_with_routes({
+            "https://example.com/rss/health-185.rss": httpx.Response(200, text=body),
+        })
+        url, method = rf.discover_feed_url(
+            "https://example.com/rss/health-185.rss", http=http,
+        )
+        self.assertEqual(url, "https://example.com/rss/health-185.rss")
+        self.assertEqual(method, "direct")
+
     def test_all_paths_fail(self) -> None:
         http = _client_with_routes({})  # all 404
         url, method = rf.discover_feed_url("https://example.com", http=http)
@@ -265,6 +280,27 @@ class FetchAllNewslettersTest(unittest.TestCase):
         self.assertEqual(by_source["Good"]["items_within_window"], 1)
         self.assertEqual(by_source["Bad"]["discovery"], "failed")
         self.assertEqual(by_source["Bad"]["items_within_window"], 0)
+
+    def test_direct_feed_url_fetches_end_to_end(self) -> None:
+        # A newsletter whose url is itself a feed (heuristics all 404) should
+        # still yield signals and be logged with discovery="direct".
+        now = datetime.now(timezone.utc)
+        body = _rss_body([
+            {"title": "Direct One", "link": "https://direct.example/post1",
+             "pubDate": _rss_pubdate(now - timedelta(hours=2))},
+        ])
+        feed_url = "https://direct.example/rss/health.rss"
+        http = _client_with_routes({feed_url: httpx.Response(200, text=body)})
+        nls = [Newsletter(name="Direct", geography="India", type_="Trade",
+                          author="x", description="y", reach="z", url=feed_url)]
+        signals = rf.fetch_all_newsletters(http=http, newsletters=nls)
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].source, "Direct")
+
+        log_files = list(Path(self.tmp.name).glob("rss_*.jsonl"))
+        lines = [json.loads(l) for l in log_files[0].read_text().strip().split("\n")]
+        self.assertEqual(lines[0]["discovery"], "direct")
+        self.assertEqual(lines[0]["items_within_window"], 1)
 
     def test_signals_sorted_descending_by_published_at(self) -> None:
         now = datetime.now(timezone.utc)
