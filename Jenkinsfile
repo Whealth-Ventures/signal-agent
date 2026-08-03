@@ -276,7 +276,20 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     stage('Resolve version bump') {
       steps {
         script {
-          if (env.BUMP == 'none') {
+          // A re-run of a FAILED release lands here with HEAD at the pipeline's own
+          // bump commit. That commit means the version it names is already assigned
+          // to this exact tree — so on 'auto' this build REDEPLOYS that version
+          // instead of burning a new number. Before this guard, the resolver found
+          // no PR in the bump-commit subject and silently defaulted to patch, so
+          // retrying a failed deploy cost a version every time (ai-interviewer went
+          // 1.0.5 -> 1.0.7 across one failure). An explicit patch/minor/major from
+          // the dropdown still forces a bump.
+          def headSubject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+          def headIsBump  = headSubject ==~ /^chore: bump version to [0-9]+\.[0-9]+\.[0-9]+ \[skip ci\]$/
+          if (env.BUMP == 'auto' && headIsBump) {
+            echo "HEAD is this pipeline's own bump commit — redeploying the version it names. Pick patch/minor/major explicitly to force a bump."
+            env.RESOLVED_BUMP = 'none'
+          } else if (env.BUMP == 'none') {
             echo "BUMP=none — rebuilding the current version. No bump, no commit, no tag."
             env.RESOLVED_BUMP = 'none'
           } else if (env.BUMP != 'auto') {
