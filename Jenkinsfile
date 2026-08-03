@@ -166,9 +166,28 @@ auto  (default) — derive from the merged PR's title. MAJOR:/MINOR:/PATCH: pref
                   This is what every webhook-triggered deploy uses, so releases merged
                   through a PR are versioned with nobody selecting anything.
 none            — rebuild the CURRENT version; no bump, no commit, no tag. Use for a
-                  re-deploy or a rollback.
+                  re-deploy of what HEAD names — NOT a rollback. Use ROLLBACK_TO.
 patch/minor/major — explicit override, wins over the PR title. Use for a direct push
                   that never went through a PR.'''
+    )
+    string(
+      name: 'ROLLBACK_TO',
+      defaultValue: '',
+      description: '''ROLLBACK. Leave BLANK for a normal release.
+
+Put a released VERSION here — 0.1.4, or v0.1.4 — and this build redeploys that
+version's existing artifact from S3. Nothing is packaged, bumped, tagged or
+written to Jira. You name a version, never an S3 key or a sha.
+
+BUMP is ignored when this is set. The build asks for confirmation first, and
+refuses if no artifact carries that version (it lists the ones that do).
+
+latest.tgz is re-pointed at the rolled-back artifact, because a replacement
+instance boots from it — otherwise the rollback would be undone the next time the
+box is rebuilt.
+
+NOTE it does not rewind package.json on main — the next release bumps on from
+there rather than re-cutting a version that already shipped.'''
     )
   }
 
@@ -189,6 +208,9 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     // Xponentiate-strapi main #4 rebuilt 0.1.0 and never bumped: it silently
     // disabled versioning for exactly the webhook-driven releases this versions.
     BUMP        = "${params.BUMP ?: 'auto'}"
+    // Same reasoning as BUMP's default: automatic builds carry no parameter values,
+    // and a rollback must never be what an automatic build does.
+    ROLLBACK_TO = "${params.ROLLBACK_TO ?: ''}"
     GIT_CRED_ID = 'github-signal-agent'
 
   }
@@ -229,6 +251,9 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
 
 
     stage('Agent — tests') {
+      // The stored artifact passed these tests when it was cut; re-running them
+      // against main's CURRENT source proves nothing about it.
+      when { expression { env.ROLLBACK != 'true' } }
       environment {
         // tests/test_config.py preflights that a configured env exists (on a
         // dev machine that's the real .env). CI has no secrets by design —
@@ -252,6 +277,7 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     }
 
     stage('Admin — typecheck + build') {
+      when { expression { env.ROLLBACK != 'true' } }
       steps {
         dir('admin') {
           sh '''
@@ -273,7 +299,60 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     //
     // A title lookup NEVER fails the build: the deploy is downstream and this only
     // decides a name. On any failure it warns and falls back to patch.
+    // ---- WH-313 rollback --------------------------------------------------
+    // Rollback by VERSION, reusing 'Deploy (main)' below rather than a separate
+    // pipeline. Every release already leaves a versioned tarball in S3, so there is
+    // nothing to rebuild: resolve the version to its key and let the same deploy
+    // stage ship it, re-point latest.tgz and run the same health check.
+    stage('Resolve rollback target') {
+      when { expression { (env.ROLLBACK_TO ?: '').trim() != '' } }
+      steps {
+        script {
+          if (env.BRANCH_NAME != 'main') {
+            error("ROLLBACK_TO is only valid on main (this is ${env.BRANCH_NAME}).")
+          }
+          def want = env.ROLLBACK_TO.trim().replaceFirst(/^v/, '')
+          // feedback-bucket, NOT artifact-bucket: this repo's own deploy stage reads
+          // that name, and the two services share one bucket (orglife-bot publishes
+          // to signal-agent-prod-feedback-*). Reading a different parameter here
+          // would resolve a version against a bucket nothing deploys from.
+          def bucket = sh(returnStdout: true, script: """
+            aws ssm get-parameter --region "${env.AWS_REGION}" \
+              --name "/${env.PROJECT}/${env.APP_ENV}/feedback-bucket" \
+              --query Parameter.Value --output text
+          """).trim()
+          def key = sh(returnStdout: true,
+                       script: "./scripts/resolve-release-artifact.sh '${bucket}' '${env.PROJECT}' '${want}'").trim()
+
+          env.ROLLBACK       = 'true'
+          env.VERSION        = want
+          env.ROLLBACK_KEY   = key
+          // <version>-<sha> read back off the key, so the build name and the deploy
+          // comment describe the artifact actually being shipped.
+          env.RELEASE_TAG    = key.tokenize('/').last().replaceFirst(/\.tgz$/, '')
+          env.GIT_SHA        = env.RELEASE_TAG.substring(want.length() + 1)
+          // Load-bearing: 'Bump version' gates only on RESOLVED_BUMP != 'none' and
+          // 'Resolve version bump' is skipped below, so a null here would let a
+          // rollback bump and commit. Also switches off the Jira stage.
+          env.RESOLVED_BUMP  = 'none'
+
+          currentBuild.displayName = "#${env.BUILD_NUMBER}  ROLLBACK \u2192 ${env.RELEASE_TAG}"
+          echo "Rolling back to s3://${bucket}/${key}"
+        }
+      }
+    }
+
+    stage('Approve rollback') {
+      when { expression { env.ROLLBACK == 'true' } }
+      steps {
+        timeout(time: 30, unit: 'MINUTES') {
+          input message: "Roll ${env.PROJECT} back to ${env.RELEASE_TAG}?", ok: 'Roll back'
+        }
+      }
+    }
+
     stage('Resolve version bump') {
+      when { expression { env.ROLLBACK != 'true' } }
       steps {
         script {
           // A re-run of a FAILED release lands here with HEAD at the pipeline's own
@@ -432,6 +511,9 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
     // WH-313. Names the release. Runs after 'Bump version' so it sees the new
     // value, and before 'Deploy' which uses it as the S3 artifact key.
     stage('Resolve release tag') {
+      // Skipped on a rollback: it reads package.json at main's HEAD and would
+      // overwrite the resolved artifact with the version being rolled AWAY from.
+      when { expression { env.ROLLBACK != 'true' } }
       steps {
         script {
           env.VERSION = readFile('VERSION').trim()
@@ -464,14 +546,25 @@ patch/minor/major — explicit override, wins over the PR title. Use for a direc
           # PUSH model: package the reviewed workspace and upload to S3. Build
           # artifacts (.venv/.next/node_modules) and data/ are excluded — the box
           # rebuilds and keeps its own state. The box never talks to GitHub.
+          if [ "${ROLLBACK:-}" = "true" ]; then
+            # The artifact already exists in S3 and ROLLBACK_KEY names it. There is
+            # nothing to package: re-packaging the workspace would ship main's
+            # CURRENT source under an old version's name.
+            KEY="$ROLLBACK_KEY"
+            echo "Rollback: deploying existing s3://$BUCKET/$KEY"
+          else
           echo "Packaging workspace -> s3://$BUCKET/$KEY"
           tar czf /tmp/sa-app.tgz \
             --exclude=./.git --exclude=./.venv --exclude=./admin/node_modules \
             --exclude=./admin/.next --exclude=./data --exclude=./__pycache__ \
             --exclude='*.pyc' .
           aws s3 cp /tmp/sa-app.tgz "s3://$BUCKET/$KEY" --region "$AWS_REGION"
-          aws s3 cp "s3://$BUCKET/$KEY" "s3://$BUCKET/artifacts/signal-agent/latest.tgz" --region "$AWS_REGION"
           rm -f /tmp/sa-app.tgz
+          fi
+
+          # BOTH paths: a replacement instance boots from latest.tgz, so it has to
+          # name what we just deployed or the next rebuild undoes this deploy.
+          aws s3 cp "s3://$BUCKET/$KEY" "s3://$BUCKET/artifacts/signal-agent/latest.tgz" --region "$AWS_REGION"
 
           echo "Deploying $KEY to $IID"
           CMD_ID="$(aws ssm send-command \
