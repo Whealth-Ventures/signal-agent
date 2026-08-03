@@ -27,19 +27,12 @@ jobs:
           echo "Title: $TITLE"
 
           BUMP=""
-          # 1. the convention: a leading [major] / [minor] / [patch]
+          # THE convention, and the only accepted form: a leading [major]/[minor]/[patch].
+          # The colon form and conventional-commit fallbacks were removed 2026-08-03 —
+          # one convention, no dialects. Note this means Dependabot titles fail until
+          # a human prefixes them.
           if [[ "$TITLE" =~ ^\[[[:space:]]*([Mm][Aa][Jj][Oo][Rr]|[Mm][Ii][Nn][Oo][Rr]|[Pp][Aa][Tt][Cc][Hh])[[:space:]]*\] ]]; then
             BUMP="$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
-          # 2. equivalent colon form
-          elif [[ "$TITLE" =~ ^(MAJOR|MINOR|PATCH|major|minor|patch)[[:space:]]*: ]]; then
-            BUMP="$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
-          # 3. conventional commits, for the repos that already use them
-          elif [[ "$TITLE" =~ ^[a-z]+(\([^\)]*\))?![[:space:]]*: ]]; then
-            BUMP="major"
-          elif [[ "$TITLE" =~ ^feat(\([^\)]*\))?[[:space:]]*: ]]; then
-            BUMP="minor"
-          elif [[ "$TITLE" =~ ^(fix|chore|docs|refactor|perf|test|style|build|ci|revert)(\([^\)]*\))?[[:space:]]*: ]]; then
-            BUMP="patch"
           fi
 
           if [ -z "$BUMP" ]; then
@@ -56,7 +49,8 @@ jobs:
               echo "[major] PROD Release (WH-123): a surface is cut over, removed or replaced"
               echo '```'
               echo
-              echo "\`feat:\` / \`fix:\` conventional prefixes are also accepted."
+              echo "Only the \[bump\] form counts — conventional prefixes (feat:/fix:) are NOT accepted."
+              echo "Dependabot PRs: edit the title to put \[patch\] in front, then the check re-runs."
               echo
               echo "Current title:"
               echo '```'
