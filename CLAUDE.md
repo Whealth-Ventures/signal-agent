@@ -27,7 +27,8 @@ two runs fire from separate systemd timers (see `docs/scheduling.md`).
 There is also a **third agent**: a **weekly Sector Agent** (`src/sector_main.py`,
 `src/sector.py`) that posts a portfolio-impact digest to a third channel (**Signal
 Agent Sector**) at 08:00 IST on Mondays. It watches the ~16 W Health portfolio
-companies (from `inputs/portfolio.xlsx`) and surfaces sector/regulatory/macro and
+companies (from `inputs/portfolio.xlsx` — one row per company, including its key
+competitors and what materially moves it) and surfaces sector/regulatory/macro and
 direct-competitor news with a **material impact** (positive/negative) on each
 company — grouped by company, NOT by the 8 priority buckets, and ranked by impact
 rather than healthcare magnitude. It reuses the daily pipeline's fetch/dedup/slack
@@ -39,6 +40,7 @@ stories never touch the daily candidate pool.
 - `inputs/voices.xlsx` — 5 tabs (India Top Voices, US Top Voices, Newsletters & Publications, Firms & Org Pages, New Additions); ~225+ rows across them.
 - `inputs/tuning.xlsx` — 4 sheets (Settings, Boosters, Priority Buckets, Source Tiers). Every numeric knob, every regex booster pattern, the priority-bucket structure, and the source tier list. The single editable surface for tuning. See `docs/EDITING.md`.
 - `inputs/content/` — firm's own published content, used as the "taste profile" for relevance scoring. Subfolders: `2070_health/`, `articles_blog/`, `interviews_podcasts/`, `linkedin/`, `news_press/`.
+- `inputs/portfolio.xlsx` — Sector Agent input: single `Portfolio` tab, columns A–G = Company / Sector / What they do / Geo / Website / Key competitors / What moves them. The last two feed both the weekly search prompt and the impact ranker; fully editable from the admin **Portfolio** page.
 
 ## Architecture (4 layers — DO NOT collapse into one big LLM call)
 1. **Query planner** — clusters keywords into ~51 thematic Perplexity queries/day across 4 tracks: Track A (13 priority plans), Track B (rotating sub-bucket plans — count derived from `track_b_rotation_days`, default 7 → ~35/day, capped by `track_b_plans_per_day`), voice (2 plans), firm (1 plan).

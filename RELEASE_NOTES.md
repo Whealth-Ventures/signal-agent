@@ -1,5 +1,31 @@
 # Signal Agent — Release Notes
 
+## v1.4.1 — Portfolio companies fully editable from the admin (2026-08-04)
+
+**What changed in plain language.** The admin **Portfolio** page is now the single
+place to manage the weekly Sector Agent's companies — add one, remove one, and
+edit *all* of its detail, including the two things that actually drive the digest's
+quality:
+
+- **Key competitors** — the named rivals to watch. These are now written into the
+  company's weekly search prompt, so competitor funding/launch/M&A/pricing news
+  gets surfaced by name instead of being left to the model's guesswork.
+- **What moves them** — the regulatory, sector, and macro forces that help or hurt
+  the business. The impact ranker uses this to decide whether a story is material
+  and whether the impact is positive or negative.
+
+Previously those two lived in a separate hand-edited file (`inputs/portfolio_context.md`)
+that the admin UI couldn't touch, so a company added through the UI reached the
+ranker with only a one-line description. That file is **gone**: its content moved
+into `inputs/portfolio.xlsx` as columns **F (Key competitors)** and **G (What moves
+them)** — all 16 companies migrated, nothing lost — and the xlsx is once again the
+one source of truth. Both new fields are optional: leave them blank and the agent
+still runs, the digest is just blunter for that company.
+
+Also removed `scripts/build_portfolio_xlsx.py` — the one-off seeder that built the
+original spreadsheet. It duplicated the company data and would have regenerated a
+file missing the two new columns.
+
 ## v1.4.0 — "Sector Agent" (2026-07-22)
 
 A **third agent** joins the two daily geo digests: a **weekly, portfolio-focused
@@ -17,7 +43,8 @@ with a ↑ / ↓ / ↔ marker showing the direction of impact on each one.
 
 ### 2. New editable input — Portfolio
 The company list lives in `inputs/portfolio.xlsx` (Company, Sector, What they do,
-Geo, Website) and is editable from a new admin **Portfolio** page, just like
+Geo, Website — plus Key competitors / What moves them as of v1.4.1) and is
+editable from a new admin **Portfolio** page, just like
 Keywords/Sources/Tuning. Edit a company's description or add/remove companies there;
 the next weekly run uses it.
 

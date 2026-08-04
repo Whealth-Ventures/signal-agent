@@ -29,11 +29,9 @@ INPUTS_DIR = ROOT / "inputs"
 KEYWORDS_XLSX = INPUTS_DIR / "keywords.xlsx"
 VOICES_XLSX = INPUTS_DIR / "voices.xlsx"
 TUNING_XLSX = INPUTS_DIR / "tuning.xlsx"
-# Sector Agent (third, weekly channel): portfolio company profiles.
+# Sector Agent (third, weekly channel): portfolio company profiles — one row per
+# company, including its competitors and what materially moves it (cols F/G).
 PORTFOLIO_XLSX = INPUTS_DIR / "portfolio.xlsx"
-# Optional deeper knowledge base (competitors + what materially moves each
-# company). Appended to the impact-ranking prompt when present. See sector.py.
-PORTFOLIO_CONTEXT_MD = INPUTS_DIR / "portfolio_context.md"
 
 CONTENT_DIR = INPUTS_DIR / "content"
 PROMPTS_DIR = ROOT / "prompts"
