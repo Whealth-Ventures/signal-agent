@@ -4,7 +4,8 @@ import ExcelJS from "exceljs";
 //
 // The agent's loader (src/sector.py `load_portfolio`) reads the `Portfolio`
 // sheet BY COLUMN POSITION: row 1 is the header, data starts at row 2, columns
-// A-E are Company, Sector, What they do, Geo, Website. So parse/serialize must
+// A-G are Company, Sector, What they do, Geo, Website, Key competitors, What
+// moves them (the last two feed the fetch + impact prompts). So parse/serialize must
 // agree on that layout, and serialize rewrites only the data region (row 2+),
 // leaving the header row and styling untouched — same in-place approach as
 // lib/voices.ts.
@@ -15,13 +16,17 @@ export type Company = {
   business: string;
   geo: string;
   website: string;
+  competitors: string;
+  moves: string;
 };
 
 export type PortfolioData = { companies: Company[] };
 
 const SHEET = "Portfolio";
 const DATA_START_ROW = 2; // row 1 = header
-const FIELDS: (keyof Company)[] = ["company", "sector", "business", "geo", "website"];
+const FIELDS: (keyof Company)[] = [
+  "company", "sector", "business", "geo", "website", "competitors", "moves",
+];
 const PRIMARY: keyof Company = "company";
 const CLEAR_WIDTH = 8;
 

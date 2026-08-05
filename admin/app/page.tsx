@@ -51,8 +51,9 @@ export default async function Home() {
           >
             <h2 className="font-semibold mb-1">Portfolio</h2>
             <p className="text-sm text-gray-600">
-              The portfolio companies the weekly Sector Agent watches — name,
-              sector, what they do, and geography. Drives the third channel.
+              Add or remove the portfolio companies the weekly Sector Agent
+              watches, and edit each one’s detail — sector, what they do, geo,
+              key competitors, and what materially moves it.
             </p>
           </Link>
           <Link

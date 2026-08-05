@@ -64,20 +64,23 @@ class Company:
     business: str
     geo: str        # "India" | "US" | "Global" (free text; coerced for plans)
     website: str = ""
+    competitors: str = ""   # named direct competitors — fed to fetch + ranker
+    moves: str = ""         # what materially moves the business — fed to ranker
 
 
 @lru_cache(maxsize=1)
 def load_portfolio() -> list[Company]:
     """Read inputs/portfolio.xlsx (`Portfolio` tab). Flat layout: row 1 header,
-    data from row 2. Columns A-E: Company, Sector, What they do, Geo, Website.
-    A row counts only if it has a company name."""
+    data from row 2. Columns A-G: Company, Sector, What they do, Geo, Website,
+    Key competitors, What moves them. A row counts only if it has a company
+    name; the last two are optional (they sharpen the prompts, nothing more)."""
     wb = load_workbook(config.PORTFOLIO_XLSX, read_only=True, data_only=True)
     ws = wb["Portfolio"]
     out: list[Company] = []
     for r in ws.iter_rows(values_only=True, min_row=2):
         if not r:
             continue
-        cells = list(r) + [None] * max(0, 5 - len(r))
+        cells = list(r) + [None] * max(0, 7 - len(r))
         name = _s(cells[0])
         if not name:
             continue
@@ -87,6 +90,8 @@ def load_portfolio() -> list[Company]:
             business=_s(cells[2]),
             geo=_s(cells[3]) or "Global",
             website=_s(cells[4]),
+            competitors=_s(cells[5]),
+            moves=_s(cells[6]),
         ))
     return out
 
@@ -116,6 +121,7 @@ _SECTOR_PROMPT_TEMPLATE = (
     "  (b) regulatory, reimbursement, or policy changes affecting it;\n"
     "  (c) macro shifts changing its market size, costs, or capital access;\n"
     "  (d) moves by DIRECT COMPETITORS — funding, launches, M&A, pricing, exits.\n"
+    "{competitors_line}"
     "Do NOT return {company}'s OWN funding, product, hiring, or PR news — only the "
     "world around it. Skip listicles, opinion pieces, and thought-leadership.\n"
     "SOURCES: cite the ORIGINAL, reputable primary source — the outlet that broke it "
@@ -148,6 +154,10 @@ def build_sector_plans(companies: list[Company] | None = None) -> list[QueryPlan
             sector=c.sector or "healthcare",
             business=c.business or "(no description)",
             geo_phrase=_geo_phrase(geo),
+            competitors_line=(
+                f"Its named direct competitors: {c.competitors}.\n"
+                if c.competitors else ""
+            ),
         )
         plans.append(QueryPlan(
             id=f"sector__{_slug(c.name)}",
@@ -192,36 +202,23 @@ def _trim(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
-@lru_cache(maxsize=1)
-def load_portfolio_context() -> str:
-    """The optional deeper knowledge base (competitors + what moves each company),
-    appended to the impact prompt. Empty string when the file is absent."""
-    try:
-        return config.PORTFOLIO_CONTEXT_MD.read_text(encoding="utf-8").strip()
-    except (FileNotFoundError, OSError):
-        return ""
-
-
-def build_impact_prompt(
-    stories: list[Story], companies: list[Company], *, context: str = "",
-) -> str:
+def build_impact_prompt(stories: list[Story], companies: list[Company]) -> str:
     lines: list[str] = [
         "You are triaging external news for its material impact on a healthcare "
         "VC's portfolio companies.",
         "",
         config.SECTOR_IMPACT_RUBRIC,
         "",
-        "Portfolio companies:",
+        "Portfolio companies — with the direct competitors to watch and what "
+        "materially moves each one (use these to judge relevance, competitor "
+        "moves, and impact direction):",
     ]
     for c in companies:
         lines.append(f"  - {c.name} ({c.geo}) — {c.sector}: {c.business}")
-    if context:
-        lines += [
-            "",
-            "Reference — each company's competitors and what materially moves it "
-            "(use this to judge relevance, competitor moves, and impact direction):",
-            context,
-        ]
+        if c.competitors:
+            lines.append(f"      competitors: {c.competitors}")
+        if c.moves:
+            lines.append(f"      what moves them: {c.moves}")
     lines += [
         "",
         "For EACH story that is MATERIAL (high or medium) to exactly one company, "
@@ -332,7 +329,7 @@ def rank_impact(
     call_error: str | None = None
     try:
         resp = client.complete(
-            build_impact_prompt(stories, companies, context=load_portfolio_context()),
+            build_impact_prompt(stories, companies),
             model=rank_model,
             query_id="sector-rank",
             system=config.SECTOR_SYSTEM_PROMPT,

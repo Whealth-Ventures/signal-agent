@@ -19,6 +19,7 @@ const firstName = data.companies[0].company;
 data.companies.push({
   company: "__RT_CO__", sector: "Test sector", business: "does testing",
   geo: "Global", website: "https://example.com",
+  competitors: "Rival A, Rival B", moves: "Reimbursement policy; funding climate",
 });
 
 const rt = await parsePortfolio(await serializePortfolio(buf, data));
@@ -27,6 +28,9 @@ const A = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1); } };
 A(rt.companies.length === before + 1, "company count");
 const c = rt.companies.at(-1);
 A(c.company === "__RT_CO__" && c.geo === "Global" && c.website === "https://example.com", "new row round-trip");
+A(c.competitors === "Rival A, Rival B", "competitors land in column F");
+A(c.moves === "Reimbursement policy; funding climate", "moves lands in column G");
 A(rt.companies[0].company === firstName, "existing row preserved");
+A(!!rt.companies[0].competitors && !!rt.companies[0].moves, "existing details preserved");
 
 console.log("portfolio.xlsx round-trip OK", { before });
