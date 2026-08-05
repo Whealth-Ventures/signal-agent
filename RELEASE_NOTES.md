@@ -1,6 +1,6 @@
 # Signal Agent — Release Notes
 
-## v1.4.1 — Portfolio companies fully editable from the admin (2026-08-04)
+## v1.5.0 — Portfolio companies fully editable from the admin (2026-08-04)
 
 **What changed in plain language.** The admin **Portfolio** page is now the single
 place to manage the weekly Sector Agent's companies — add one, remove one, and
@@ -43,7 +43,7 @@ with a ↑ / ↓ / ↔ marker showing the direction of impact on each one.
 
 ### 2. New editable input — Portfolio
 The company list lives in `inputs/portfolio.xlsx` (Company, Sector, What they do,
-Geo, Website — plus Key competitors / What moves them as of v1.4.1) and is
+Geo, Website — plus Key competitors / What moves them as of v1.5.0) and is
 editable from a new admin **Portfolio** page, just like
 Keywords/Sources/Tuning. Edit a company's description or add/remove companies there;
 the next weekly run uses it.
