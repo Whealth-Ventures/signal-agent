@@ -92,26 +92,8 @@ String bumpFromTitle(String title) {
   return null
 }
 
-// Every Jira key in a piece of text, deduped, first-seen order preserved.
-//
-// A release routinely names several tickets — nutrition's real titles include
-// "(also WH-310, WH-297, WH-295)" — and each of them needs the Fix Version, so
-// this collects all of them rather than just the first.
-//
-// replaceAll returns a String (no Matcher escapes), so this stays CPS-safe.
-List<String> jiraKeysFrom(String text) {
-  if (!text) return []
-  def seen = new LinkedHashSet<String>()
-  text.replaceAll('[^A-Za-z0-9-]', ' ').tokenize(' ').each { tok ->
-    // strip trailing/leading dashes a split can leave behind
-    def k = tok.toUpperCase()
-    while (k.startsWith('-')) { k = k.substring(1) }
-    while (k.endsWith('-')) { k = k.substring(0, k.length() - 1) }
-    if (k ==~ /^[A-Z][A-Z0-9]*-[0-9]+$/) seen.add(k)
-  }
-  return new ArrayList<String>(seen)
-}
-
+// Key extraction moved to scripts/jira_release_metadata.sh in WH-355 — it now has
+// to read the PR body too, and that belongs next to the code that fetches it.
 // owner/repo from the git remote, so nothing is hardcoded per repo.
 String slugFrom(String remoteUrl) {
   if (!remoteUrl) return null
@@ -371,56 +353,69 @@ there rather than re-cutting a version that already shipped.'''
           } else if (env.BUMP == 'none') {
             echo "BUMP=none — rebuilding the current version. No bump, no commit, no tag."
             env.RESOLVED_BUMP = 'none'
-          } else if (env.BUMP != 'auto') {
-            echo "BUMP=${env.BUMP} — selected explicitly in Jenkins, so the PR title is not consulted."
-            env.RESOLVED_BUMP = env.BUMP
           } else {
-            def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+            // WH-355: the PR is fetched for EVERY build that will bump, not only on
+            // BUMP=auto. The whole response is kept, because the Jira stage reads
+            // .body from it for the ticket keys the title does not carry. Before
+            // this, an explicitly-chosen patch/minor/major skipped the fetch
+            // entirely, so PR_TITLE was empty and NOTHING got a Fix Version on
+            // exactly the releases a human had steered by hand.
+            //
+            // The workspace is persisted, so a stale file from an earlier release
+            // would attribute this version to the WRONG tickets. Removed first,
+            // unconditionally — a missing file is the Jira stage's "no keys" signal.
             def remote  = sh(returnStdout: true, script: 'git config --get remote.origin.url').trim()
-            def pr      = prNumberFrom(subject)
+            def pr      = prNumberFrom(headSubject)
             def slug    = slugFrom(remote)
+            sh 'rm -f .jira-pr.json'
             String title = null
 
             if (pr && slug) {
               withCredentials([string(credentialsId: 'github-api-token', variable: 'GH_TOKEN')]) {
-                // set +x so the token is never echoed. `|| true` + `// empty` so a failed
-                // lookup yields "" rather than aborting the shell under set -e.
+                // set +x so the token is never echoed. curl writes the body to the
+                // file, so stdout carries only the title. `|| true` + `// empty` so a
+                // failed lookup yields "" rather than aborting the shell under set -e.
                 title = sh(returnStdout: true, script: '''#!/usr/bin/env bash
                   set -eu
                   set +x
-                  curl -sS --max-time 20 \
+                  curl -sS --max-time 20 -o .jira-pr.json \
                        -H "Authorization: Bearer $GH_TOKEN" \
                        -H "Accept: application/vnd.github+json" \
                        "https://api.github.com/repos/''' + slug + '''/pulls/''' + pr + '''" \
-                    2>/dev/null | jq -r '.title // empty' || true
+                    2>/dev/null || true
+                  jq -r '.title // empty' .jira-pr.json 2>/dev/null || true
                 ''').trim()
               }
               if (title) {
                 echo "PR #${pr} title: ${title}"
               } else {
-                echo "WARNING: could not read the title of PR #${pr} (token scope, or the API is down)."
+                echo "WARNING: could not read PR #${pr} (token scope, or the API is down)."
               }
             } else {
-              echo "HEAD is not a PR merge (subject: ${subject}) — no PR title to read."
+              echo "HEAD is not a PR merge (subject: ${headSubject}) — no PR to read."
             }
 
-            // Kept for the Jira stage: the ticket keys live in the PR title, and by
-            // the time that stage runs the merge subject alone may not carry them.
+            // The Jira stage reads .jira-pr.json directly; this is its fallback for
+            // when the fetch failed, since the bump commit subject carries no key.
             env.PR_TITLE = title ?: ''
 
-            def derived = bumpFromTitle(title)
-            if (derived) {
-              echo "Bump resolved from the PR title: ${derived}"
-              env.RESOLVED_BUMP = derived
+            if (env.BUMP != 'auto') {
+              echo "BUMP=${env.BUMP} — selected explicitly in Jenkins, so the PR title is not consulted for the bump."
+              env.RESOLVED_BUMP = env.BUMP
             } else {
-              // Defaulting to patch, not minor: of the last 30 everhope_nextjs PROD
-              // releases the ticket graded 21 patch / 8 minor / 1 major, and a
-              // default of minor is what produced the manual "correct this bump to
-              // 1.3.1 — the release is a fix, not a feature" commit on 2026-07-30.
-              echo "WARNING: no bump signal in the PR title — defaulting to patch."
-              echo "         Prefix the PR title with MAJOR:/MINOR:/PATCH:, or use a"
-              echo "         conventional-commit prefix (feat: / fix:), to be explicit."
-              env.RESOLVED_BUMP = 'patch'
+              def derived = bumpFromTitle(title)
+              if (derived) {
+                echo "Bump resolved from the PR title: ${derived}"
+                env.RESOLVED_BUMP = derived
+              } else {
+                // Defaulting to patch, not minor: of the last 30 everhope_nextjs PROD
+                // releases the ticket graded 21 patch / 8 minor / 1 major, and a
+                // default of minor is what produced the manual "correct this bump to
+                // 1.3.1 — the release is a fix, not a feature" commit on 2026-07-30.
+                echo "WARNING: no bump signal in the PR title — defaulting to patch."
+                echo "         Prefix the PR title with [major]/[minor]/[patch] to be explicit."
+                env.RESOLVED_BUMP = 'patch'
+              }
             }
           }
         }
@@ -605,77 +600,32 @@ there rather than re-cutting a version that already shipped.'''
 
     // WH-313. Last stage: Jira is a bookkeeping side effect, so it must never be
     // able to fail a deploy that already succeeded — hence catchError(SUCCESS).
-    stage('Jira Fix Version') {
+    // ---- WH-313 / WH-355: Jira release metadata --------------------------
+    // Creates the version, fills the three writable fields on it, and puts the Fix
+    // Version on EVERY ticket in the release — not only the one the PR title
+    // happens to name. The logic lives in scripts/jira_release_metadata.sh so it
+    // can be run and tested outside Jenkins; scripts/test_jira_release_metadata.sh
+    // exercises it against a stubbed Jira.
+    //
+    // Bookkeeping, so it must never fail a deploy that already succeeded: the
+    // script only ever reports HTTP codes, and catchError keeps the build green.
+    stage('Jira release metadata') {
       when { allOf { branch 'main'; expression { env.RESOLVED_BUMP != 'none' && env.VERSION } } }
       steps {
         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
           script {
             def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
-            def keys    = jiraKeysFrom("${env.PR_TITLE ?: ''} ${subject}")
-            if (!keys) {
-              echo 'Jira: no ticket key in the PR title or commit subject — nothing to tag.'
-              return
-            }
-
             def slug = slugFrom(sh(returnStdout: true, script: 'git config --get remote.origin.url').trim())
             def repo = slug ? slug.tokenize('/')[1] : env.JOB_NAME.tokenize('/')[0]
-            echo "Jira: ${repo}-${env.VERSION} -> ${keys.join(', ')}"
 
             withCredentials([usernamePassword(credentialsId: 'jira-api',
                                               usernameVariable: 'JIRA_EMAIL',
                                               passwordVariable: 'JIRA_API_TOKEN')]) {
               withEnv(["JIRA_BASE_URL=https://2070health.atlassian.net",
                        "FIX_VERSION=${repo}-${env.VERSION}",
-                       "JIRA_PROJECT=${keys[0].tokenize('-')[0]}",
-                       "JIRA_KEYS=${keys.join(' ')}"]) {
-                // set +x so the token never lands in the build log. jq builds every
-                // payload, so nothing has to be hand-escaped into JSON.
-                sh '''#!/usr/bin/env bash
-                  set -eu
-                  set +x
-                  API="$JIRA_BASE_URL/rest/api/3"
-
-                  vid=$(curl -sS --max-time 30 -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-                          "$API/project/$JIRA_PROJECT/versions" \
-                        | jq -r --arg n "$FIX_VERSION" 'map(select(.name==$n))[0].id // empty')
-
-                  if [ -n "$vid" ]; then
-                    echo "  version exists (id=$vid)"
-                  else
-                    # Created UNRELEASED, with today as the planned release date.
-                    #
-                    # CI knows the code deployed; it does not know the release was
-                    # accepted, so marking it released is a human decision. The date
-                    # is set because `released:true` with an empty releaseDate is
-                    # exactly what the jira-alerts rule flags, and it also makes the
-                    # version show as overdue until someone signs it off — which is
-                    # the nudge that makes "a human marks it released" actually happen.
-                    REL_DATE=$(date -u +%Y-%m-%d)
-                    vid=$(curl -sS --max-time 30 -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X POST \
-                            -H 'Content-Type: application/json' \
-                            -d "$(jq -nc --arg n "$FIX_VERSION" --arg p "$JIRA_PROJECT" \
-                                  --arg d "$REL_DATE" \
-                                  '{name:$n,project:$p,released:false,releaseDate:$d}')" \
-                            "$API/version" | jq -r '.id // empty')
-                    [ -n "$vid" ] && echo "  version created unreleased, dated $REL_DATE (id=$vid) — mark it released in Jira once the release is signed off"
-                  fi
-
-                  if [ -z "$vid" ]; then
-                    echo "WARN: Jira version '$FIX_VERSION' is missing and could not be created." >&2
-                    echo "      The account needs Administer Projects on $JIRA_PROJECT. Skipping." >&2
-                    exit 0
-                  fi
-
-                  for k in $JIRA_KEYS; do
-                    code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-                             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X PUT \
-                             -H 'Content-Type: application/json' \
-                             -d "$(jq -nc --arg id "$vid" \
-                                   '{update:{fixVersions:[{add:{id:$id}}]}}')" \
-                             "$API/issue/$k")
-                    echo "  $k -> $FIX_VERSION (HTTP $code)"
-                  done
-                '''
+                       "GIT_SUBJECT=${subject}",
+                       "PR_TITLE=${env.PR_TITLE ?: ''}"]) {
+                sh 'bash scripts/jira_release_metadata.sh'
               }
             }
           }
