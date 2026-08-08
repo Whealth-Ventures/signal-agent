@@ -1,3 +1,113 @@
+// =============================================================================
+// WH-313 — release naming helpers: bump resolution + Jira key extraction.
+//
+// NO `=~` (find operator) anywhere: it returns a java.util.regex.Matcher, which is
+// NOT serializable, and Jenkins CPS serializes every local at each step boundary —
+// a Matcher alive across an `sh` call killed xponentiate-nextjs main #3. `==~`
+// (match operator) is fine: it returns a boolean. `replaceAll`/`split` are fine
+// too: they return String/String[] and retain no Matcher.
+//
+// @NonCPS would also solve it, but it cannot be compile-checked outside Jenkins
+// ("unable to resolve class NonCPS"), so plain string operations are used instead.
+// =============================================================================
+
+// Pull the PR number out of a merge commit subject. Both shapes are in use:
+//   merge commit : "Merge pull request #1688 from Whealth-Ventures/chore/..."
+//   squash merge : "fix(reports): reportlab missing from the image (#78)"
+String prNumberFrom(String subject) {
+  if (!subject) return null
+  def s = subject.trim()
+
+  final String MERGE_PREFIX = 'Merge pull request #'
+  if (s.startsWith(MERGE_PREFIX)) {
+    def rest = s.substring(MERGE_PREFIX.length())
+    def end = rest.indexOf(' ')
+    def num = (end < 0) ? rest : rest.substring(0, end)
+    return (num ==~ /^[0-9]+$/) ? num : null
+  }
+
+  if (s.endsWith(')')) {
+    def open = s.lastIndexOf('(#')
+    if (open >= 0) {
+      def num = s.substring(open + 2, s.length() - 1)
+      return (num ==~ /^[0-9]+$/) ? num : null
+    }
+  }
+  return null
+}
+
+// Map a PR title to a semver bump.
+//
+// Priority:
+//   1. [major] / [minor] / [patch]   <- THE convention (WH-313). Mandatory on PRs
+//      to main, enforced by .github/workflows/pr-title-bump.yml. This form is used
+//      because the release PRs that actually merge to main are
+//      "PROD Release (WH-XXX): ..." — which carries the Jira key but no bump — and
+//      the team had already started writing "[Minor] PROD Release ..." by hand.
+//   2. MAJOR: / MINOR: / PATCH:      <- equivalent colon form
+//   3. conventional commits          <- feat: -> minor, fix:/chore: -> patch,
+//                                       feat!: / feat(api)!: -> major. Kept for
+//                                       repos that use it (ai-interviewer: 21/30).
+// Returns null when the title carries no signal. The caller decides what that
+// means; this never guesses.
+String bumpFromTitle(String title) {
+  if (!title) return null
+  def t = title.trim()
+
+  // 1. leading [bump] marker
+  if (t.startsWith('[')) {
+    def close = t.indexOf(']')
+    if (close > 1) {
+      def tag = t.substring(1, close).trim().toLowerCase()
+      if (tag == 'major' || tag == 'minor' || tag == 'patch') return tag
+    }
+  }
+
+  if (t.contains('BREAKING CHANGE')) return 'major'
+
+  // Everything before the first ':' is the type.
+  def colon = t.indexOf(':')
+  if (colon < 0) return null
+  def type = t.substring(0, colon).trim().toLowerCase()
+
+  // 2. explicit colon form
+  if (type == 'major' || type == 'minor' || type == 'patch') return type
+
+  // 3. conventional commits; a trailing '!' marks a breaking change
+  boolean breaking = type.endsWith('!')
+  if (breaking) type = type.substring(0, type.length() - 1).trim()
+
+  def paren = type.indexOf('(')
+  if (paren >= 0) {
+    if (!type.endsWith(')')) return null
+    type = type.substring(0, paren).trim()
+  }
+  if (!(type ==~ /^[a-z]+$/)) return null
+
+  if (breaking) return 'major'
+  if (type == 'feat') return 'minor'
+  if (type in ['fix', 'chore', 'docs', 'refactor', 'perf', 'test', 'style', 'build', 'ci', 'revert']) {
+    return 'patch'
+  }
+  return null
+}
+
+// Key extraction moved to scripts/jira_release_metadata.sh in WH-355 — it now has
+// to read the PR body too, and that belongs next to the code that fetches it.
+// owner/repo from the git remote, so nothing is hardcoded per repo.
+String slugFrom(String remoteUrl) {
+  if (!remoteUrl) return null
+  def u = remoteUrl.trim()
+  def i = u.indexOf('github.com')
+  if (i < 0) return null
+  def rest = u.substring(i + 'github.com'.length())
+  if (rest.startsWith(':') || rest.startsWith('/')) rest = rest.substring(1)
+  if (rest.endsWith('.git')) rest = rest.substring(0, rest.length() - 4)
+  rest = rest.trim()
+  def parts = rest.tokenize('/')
+  return (parts.size() == 2 && parts.every { it }) ? "${parts[0]}/${parts[1]}".toString() : null
+}
+
 // signal-agent CI/CD — validate on every branch/PR, deploy on main via SSM.
 //
 // Requirements on the Jenkins node:
@@ -19,14 +129,113 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '30'))
   }
 
+  // WH-313. Semantic version bump, decided HERE rather than by hand-editing the
+  // version in a PR. 'none' rebuilds the current version (the old behaviour, and
+  // the right choice for a re-deploy or a rollback).
+  //
+  // Deliberately a choice, not derived from commit messages: whether a change is
+  // breaking is a judgement call someone should make explicitly, and a `feat!:`
+  // prefix is easy to forget and impossible to correct after the fact.
+  parameters {
+    choice(
+      name: 'BUMP',
+      choices: ['auto', 'none', 'patch', 'minor', 'major'],
+      description: '''How to version this release.
+
+auto  (default) — derive from the merged PR's title. MAJOR:/MINOR:/PATCH: prefix wins;
+                  otherwise the conventional-commit prefix is used (feat: -> minor,
+                  fix:/chore:/docs: -> patch, feat!: -> major). No signal -> patch.
+                  This is what every webhook-triggered deploy uses, so releases merged
+                  through a PR are versioned with nobody selecting anything.
+none            — rebuild the CURRENT version; no bump, no commit, no tag. Use for a
+                  re-deploy of what HEAD names — NOT a rollback. Use ROLLBACK_TO.
+patch/minor/major — explicit override, wins over the PR title. Use for a direct push
+                  that never went through a PR.'''
+    )
+    string(
+      name: 'ROLLBACK_TO',
+      defaultValue: '',
+      description: '''ROLLBACK. Leave BLANK for a normal release.
+
+Put a released VERSION here — 0.1.4, or v0.1.4 — and this build redeploys that
+version's existing artifact from S3. Nothing is packaged, bumped, tagged or
+written to Jira. You name a version, never an S3 key or a sha.
+
+BUMP is ignored when this is set. The build asks for confirmation first, and
+refuses if no artifact carries that version (it lists the ones that do).
+
+latest.tgz is re-pointed at the rolled-back artifact, because a replacement
+instance boots from it — otherwise the rollback would be undone the next time the
+box is rebuilt.
+
+NOTE it does not rewind package.json on main — the next release bumps on from
+there rather than re-cutting a version that already shipped.'''
+    )
+  }
+
   environment {
     AWS_REGION = 'ap-south-1'
     PROJECT    = 'signal-agent'
     APP_ENV    = 'prod'
+    // Resolved HERE, not read as $BUMP inside a shell: Jenkins registers
+    // `parameters {}` only at the END of a run, so on the FIRST build after this
+    // parameter is added the variable does not exist in the environment and a
+    // `set -u` shell aborts on the expansion (exactly how everhope_nextjs main #5
+    // died on ALLOW_RETAG). ?: gives the safe default on that first run.
+    //
+    // That default MUST be 'auto', not 'none'. A build triggered by branch
+    // indexing carries no ParametersAction at all — not even the declared
+    // defaults — so params.BUMP is null on every automatic deploy even though
+    // the parameter is registered on the job. Defaulting to 'none' there meant
+    // Xponentiate-strapi main #4 rebuilt 0.1.0 and never bumped: it silently
+    // disabled versioning for exactly the webhook-driven releases this versions.
+    BUMP        = "${params.BUMP ?: 'auto'}"
+    // Same reasoning as BUMP's default: automatic builds carry no parameter values,
+    // and a rollback must never be what an automatic build does.
+    ROLLBACK_TO = "${params.ROLLBACK_TO ?: ''}"
+    GIT_CRED_ID = 'github-signal-agent'
+
   }
 
   stages {
+
+    // WH-313. Breaks the bump recursion: 'Bump version' pushes a commit, GitHub
+    // fires the webhook, and this job builds again. Without this gate that second
+    // run would bump again and loop forever.
+    //
+    // A webhook rebuild of a bump commit is a no-op — the artifact for that version
+    // was already built by the run that made the commit. Abort NOT_BUILT instead of
+    // rebuilding identical bytes. Only the AUTOMATIC path is blocked: a human
+    // pressing Build is a deliberate re-deploy, and getBuildCauses() lets it through.
+    stage('Skip CI for bump commits') {
+      steps {
+        script {
+          // SUBJECT line only (%s), and an anchored match on the exact shape this
+          // pipeline writes. A `contains('[skip ci]')` over the full message (%B) is
+          // wrong: a squash merge folds the PR body into the commit, so any commit whose
+          // description merely MENTIONS [skip ci] — including the PR that introduced this
+          // very stage — gets blocked. That misfired on ai-interviewer build #13.
+          def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+          def isBumpCommit = subject ==~ /^chore: bump version to [0-9]+\.[0-9]+\.[0-9]+ \[skip ci\]$/
+          def manual = currentBuild.getBuildCauses().any {
+            it._class?.contains('UserIdCause') || it._class?.contains('ReplayCause')
+          }
+          if (isBumpCommit && !manual) {
+            currentBuild.result = 'NOT_BUILT'
+            error("Skipping: HEAD is a CI bump commit ([skip ci]) and this build was triggered automatically. The release it names was already built.")
+          }
+          if (isBumpCommit) {
+            echo "HEAD is a bump commit, but this build was started manually — continuing as an explicit re-deploy."
+          }
+        }
+      }
+    }
+
+
     stage('Agent — tests') {
+      // The stored artifact passed these tests when it was cut; re-running them
+      // against main's CURRENT source proves nothing about it.
+      when { expression { env.ROLLBACK != 'true' } }
       environment {
         // tests/test_config.py preflights that a configured env exists (on a
         // dev machine that's the real .env). CI has no secrets by design —
@@ -73,6 +282,7 @@ pipeline {
     }
 
     stage('Admin — typecheck + build') {
+      when { expression { env.ROLLBACK != 'true' } }
       steps {
         dir('admin') {
           sh '''
@@ -81,6 +291,257 @@ pipeline {
             npm run typecheck
             npm run build
           '''
+        }
+      }
+    }
+    // WH-313. Resolves the bump ONCE here so 'Bump version' below is pure arithmetic.
+    //
+    // Two ways in, deliberately:
+    //   - BUMP=auto (the default, and what every webhook build gets) reads the merged
+    //     PR title, so a PR-driven deploy versions itself with no human involved.
+    //   - An explicit patch/minor/major from the Jenkins dropdown always wins — the
+    //     manual path for a direct push that never went through a PR.
+    //
+    // A title lookup NEVER fails the build: the deploy is downstream and this only
+    // decides a name. On any failure it warns and falls back to patch.
+    // ---- WH-313 rollback --------------------------------------------------
+    // Rollback by VERSION, reusing 'Deploy (main)' below rather than a separate
+    // pipeline. Every release already leaves a versioned tarball in S3, so there is
+    // nothing to rebuild: resolve the version to its key and let the same deploy
+    // stage ship it, re-point latest.tgz and run the same health check.
+    stage('Resolve rollback target') {
+      when { expression { (env.ROLLBACK_TO ?: '').trim() != '' } }
+      steps {
+        script {
+          if (env.BRANCH_NAME != 'main') {
+            error("ROLLBACK_TO is only valid on main (this is ${env.BRANCH_NAME}).")
+          }
+          def want = env.ROLLBACK_TO.trim().replaceFirst(/^v/, '')
+          // feedback-bucket, NOT artifact-bucket: this repo's own deploy stage reads
+          // that name, and the two services share one bucket (orglife-bot publishes
+          // to signal-agent-prod-feedback-*). Reading a different parameter here
+          // would resolve a version against a bucket nothing deploys from.
+          def bucket = sh(returnStdout: true, script: """
+            aws ssm get-parameter --region "${env.AWS_REGION}" \
+              --name "/${env.PROJECT}/${env.APP_ENV}/feedback-bucket" \
+              --query Parameter.Value --output text
+          """).trim()
+          def key = sh(returnStdout: true,
+                       script: "./scripts/resolve-release-artifact.sh '${bucket}' '${env.PROJECT}' '${want}'").trim()
+
+          env.ROLLBACK       = 'true'
+          env.VERSION        = want
+          env.ROLLBACK_KEY   = key
+          // <version>-<sha> read back off the key, so the build name and the deploy
+          // comment describe the artifact actually being shipped.
+          env.RELEASE_TAG    = key.tokenize('/').last().replaceFirst(/\.tgz$/, '')
+          env.GIT_SHA        = env.RELEASE_TAG.substring(want.length() + 1)
+          // Load-bearing: 'Bump version' gates only on RESOLVED_BUMP != 'none' and
+          // 'Resolve version bump' is skipped below, so a null here would let a
+          // rollback bump and commit. Also switches off the Jira stage.
+          env.RESOLVED_BUMP  = 'none'
+
+          currentBuild.displayName = "#${env.BUILD_NUMBER}  ROLLBACK \u2192 ${env.RELEASE_TAG}"
+          echo "Rolling back to s3://${bucket}/${key}"
+        }
+      }
+    }
+
+    stage('Approve rollback') {
+      when { expression { env.ROLLBACK == 'true' } }
+      steps {
+        timeout(time: 30, unit: 'MINUTES') {
+          input message: "Roll ${env.PROJECT} back to ${env.RELEASE_TAG}?", ok: 'Roll back'
+        }
+      }
+    }
+
+    stage('Resolve version bump') {
+      when { expression { env.ROLLBACK != 'true' } }
+      steps {
+        script {
+          // A re-run of a FAILED release lands here with HEAD at the pipeline's own
+          // bump commit. That commit means the version it names is already assigned
+          // to this exact tree — so on 'auto' this build REDEPLOYS that version
+          // instead of burning a new number. Before this guard, the resolver found
+          // no PR in the bump-commit subject and silently defaulted to patch, so
+          // retrying a failed deploy cost a version every time (ai-interviewer went
+          // 1.0.5 -> 1.0.7 across one failure). An explicit patch/minor/major from
+          // the dropdown still forces a bump.
+          def headSubject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+          def headIsBump  = headSubject ==~ /^chore: bump version to [0-9]+\.[0-9]+\.[0-9]+ \[skip ci\]$/
+          if (env.BUMP == 'auto' && headIsBump) {
+            echo "HEAD is this pipeline's own bump commit — redeploying the version it names. Pick patch/minor/major explicitly to force a bump."
+            env.RESOLVED_BUMP = 'none'
+          } else if (env.BUMP == 'none') {
+            echo "BUMP=none — rebuilding the current version. No bump, no commit, no tag."
+            env.RESOLVED_BUMP = 'none'
+          } else {
+            // WH-355: the PR is fetched for EVERY build that will bump, not only on
+            // BUMP=auto. The whole response is kept, because the Jira stage reads
+            // .body from it for the ticket keys the title does not carry. Before
+            // this, an explicitly-chosen patch/minor/major skipped the fetch
+            // entirely, so PR_TITLE was empty and NOTHING got a Fix Version on
+            // exactly the releases a human had steered by hand.
+            //
+            // The workspace is persisted, so a stale file from an earlier release
+            // would attribute this version to the WRONG tickets. Removed first,
+            // unconditionally — a missing file is the Jira stage's "no keys" signal.
+            def remote  = sh(returnStdout: true, script: 'git config --get remote.origin.url').trim()
+            def pr      = prNumberFrom(headSubject)
+            def slug    = slugFrom(remote)
+            sh 'rm -f .jira-pr.json'
+            String title = null
+
+            if (pr && slug) {
+              withCredentials([string(credentialsId: 'github-api-token', variable: 'GH_TOKEN')]) {
+                // set +x so the token is never echoed. curl writes the body to the
+                // file, so stdout carries only the title. `|| true` + `// empty` so a
+                // failed lookup yields "" rather than aborting the shell under set -e.
+                title = sh(returnStdout: true, script: '''#!/usr/bin/env bash
+                  set -eu
+                  set +x
+                  curl -sS --max-time 20 -o .jira-pr.json \
+                       -H "Authorization: Bearer $GH_TOKEN" \
+                       -H "Accept: application/vnd.github+json" \
+                       "https://api.github.com/repos/''' + slug + '''/pulls/''' + pr + '''" \
+                    2>/dev/null || true
+                  jq -r '.title // empty' .jira-pr.json 2>/dev/null || true
+                ''').trim()
+              }
+              if (title) {
+                echo "PR #${pr} title: ${title}"
+              } else {
+                echo "WARNING: could not read PR #${pr} (token scope, or the API is down)."
+              }
+            } else {
+              echo "HEAD is not a PR merge (subject: ${headSubject}) — no PR to read."
+            }
+
+            // The Jira stage reads .jira-pr.json directly; this is its fallback for
+            // when the fetch failed, since the bump commit subject carries no key.
+            env.PR_TITLE = title ?: ''
+
+            if (env.BUMP != 'auto') {
+              echo "BUMP=${env.BUMP} — selected explicitly in Jenkins, so the PR title is not consulted for the bump."
+              env.RESOLVED_BUMP = env.BUMP
+            } else {
+              def derived = bumpFromTitle(title)
+              if (derived) {
+                echo "Bump resolved from the PR title: ${derived}"
+                env.RESOLVED_BUMP = derived
+              } else {
+                // Defaulting to patch, not minor: of the last 30 everhope_nextjs PROD
+                // releases the ticket graded 21 patch / 8 minor / 1 major, and a
+                // default of minor is what produced the manual "correct this bump to
+                // 1.3.1 — the release is a fix, not a feature" commit on 2026-07-30.
+                echo "WARNING: no bump signal in the PR title — defaulting to patch."
+                echo "         Prefix the PR title with [major]/[minor]/[patch] to be explicit."
+                env.RESOLVED_BUMP = 'patch'
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // WH-313. Runs BEFORE the artifact is named so the version reaches it. Skipped
+    // when BUMP=none, so a re-deploy or rollback rebuilds the current version and
+    // pushes nothing.
+    stage('Bump version') {
+      when { allOf { branch 'main'; expression { env.RESOLVED_BUMP != 'none' } } }
+      steps {
+        script {
+          def cur = readFile('VERSION').trim()
+          // NO regex Matcher here. Jenkins CPS serializes every local variable at each
+          // step boundary, and java.util.regex.Matcher is not serializable — holding one
+          // across the `sh` steps below dies with
+          //   java.io.NotSerializableException: java.util.regex.Matcher
+          // which is exactly how xponentiate-nextjs main #3 failed, AFTER correctly
+          // computing 0.1.0 -> 0.2.0. A standalone Groovy test does not catch this
+          // because it never runs under CPS.
+          //
+          // `==~` elsewhere in this file is safe: it returns a boolean. It is `=~`
+          // (the find operator, which returns a Matcher) that must be avoided.
+          def parts = cur.tokenize('.')
+          if (parts.size() != 3 || !parts.every { it ==~ /^[0-9]+$/ }) {
+            error("package.json version must be MAJOR.MINOR.PATCH before bumping, got '${cur}'")
+          }
+          int maj = parts[0].toInteger()
+          int min = parts[1].toInteger()
+          int pat = parts[2].toInteger()
+          def next
+          switch (env.RESOLVED_BUMP) {
+            case 'major': next = "${maj + 1}.0.0"           ; break
+            case 'minor': next = "${maj}.${min + 1}.0"      ; break
+            case 'patch': next = "${maj}.${min}.${pat + 1}" ; break
+            default: error("unknown bump '${env.RESOLVED_BUMP}'")
+          }
+          echo "Bumping ${cur} -> ${next} (${env.RESOLVED_BUMP})"
+          env.NEW_VERSION = next
+
+          writeFile file: 'VERSION', text: "${next}\n"
+
+          // Push over SSH with the repo's deploy key (read_only=false, verified).
+          // "[skip ci]" is what stops the recursion: this push fires the webhook,
+          // which would build and bump again — forever. The guard stage below
+          // aborts that rebuild.
+          sshagent([env.GIT_CRED_ID]) {
+            sh '''
+              set -eu
+              mkdir -p ~/.ssh && ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+              git config user.email "jenkins@xponentiate.com"
+              git config user.name  "Jenkins CI"
+              git add VERSION
+              git commit -m "chore: bump version to ${NEW_VERSION} [skip ci]"
+              # WH-313: tag the release so the version is a real git ref, not just a
+              # value in a file. The multibranch checkout fetches without tags, so
+              # existing tags are not local — fetch them before testing for one.
+              git fetch --tags --force origin
+              # Ask the REMOTE, not the local ref store. A tag left in this workspace by
+              # an earlier run that died between `git tag` and the push is
+              # indistinguishable from a published one via rev-parse — which is exactly
+              # what blocked `Everhope Data` #15 and `sso data`: both had an UNPUBLISHED
+              # v1.1.0 sitting in the workspace from their previous GH013 push failure,
+              # so the guard refused a release that had never actually happened.
+              # ls-remote is authoritative; the workspace is not.
+              if [ -n "$(git ls-remote --tags origin "refs/tags/v${NEW_VERSION}")" ]; then
+                echo "tag v${NEW_VERSION} already exists on origin — refusing to move it." >&2
+                echo "A tag pointing somewhere new breaks every rollback aimed at it." >&2
+                exit 1
+              fi
+              # -f overwrites a stale LOCAL tag only. The push below is deliberately not
+              # --force, so a tag that really is published still cannot be moved: that
+              # remains the actual safety net, this check just fails clearly instead.
+              git tag -f -a "v${NEW_VERSION}" -m "Release ${NEW_VERSION}"
+              # HEAD:<branch> — multibranch checks out a detached HEAD, so a bare
+              # `git push origin main` would push nothing.
+              # Commit and tag land together or not at all: a bump commit with no tag
+              # leaves a version git cannot name; a tag with no commit is orphaned.
+              git push --atomic origin "HEAD:main" "refs/tags/v${NEW_VERSION}"
+            '''
+          }
+        }
+      }
+    }
+
+
+    // WH-313. Names the release. Runs after 'Bump version' so it sees the new
+    // value, and before 'Deploy' which uses it as the S3 artifact key.
+    stage('Resolve release tag') {
+      // Skipped on a rollback: it reads package.json at main's HEAD and would
+      // overwrite the resolved artifact with the version being rolled AWAY from.
+      when { expression { env.ROLLBACK != 'true' } }
+      steps {
+        script {
+          env.VERSION = readFile('VERSION').trim()
+          if (!(env.VERSION ==~ /^[0-9]+\.[0-9]+\.[0-9]+$/)) {
+            error("version must be MAJOR.MINOR.PATCH, got '${env.VERSION}'")
+          }
+          env.GIT_SHA     = sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
+          env.RELEASE_TAG = "${env.VERSION}-${env.GIT_SHA}"
+          currentBuild.displayName = "#${env.BUILD_NUMBER}  ${env.VERSION} (${env.GIT_SHA})"
+          echo "Release ${env.VERSION} -> artifact ${env.RELEASE_TAG}.tgz"
         }
       }
     }
@@ -95,24 +556,38 @@ pipeline {
                     --name "/$PROJECT/$APP_ENV/feedback-bucket" --query Parameter.Value --output text)"
           IID="$(aws ssm get-parameter --region "$AWS_REGION" \
                   --name "/$PROJECT/$APP_ENV/instance-id" --query Parameter.Value --output text)"
-          KEY="artifacts/signal-agent/${GIT_COMMIT}.tgz"
+          # WH-313: artifact key is <version>-<sha>, not a bare 40-char sha, so the S3
+          # object names the release. GIT_COMMIT stays in it: the version alone is
+          # re-pointable (a rebuild of the same version would overwrite the object).
+          KEY="artifacts/signal-agent/${RELEASE_TAG}.tgz"
 
           # PUSH model: package the reviewed workspace and upload to S3. Build
           # artifacts (.venv/.next/node_modules) and data/ are excluded — the box
           # rebuilds and keeps its own state. The box never talks to GitHub.
+          if [ "${ROLLBACK:-}" = "true" ]; then
+            # The artifact already exists in S3 and ROLLBACK_KEY names it. There is
+            # nothing to package: re-packaging the workspace would ship main's
+            # CURRENT source under an old version's name.
+            KEY="$ROLLBACK_KEY"
+            echo "Rollback: deploying existing s3://$BUCKET/$KEY"
+          else
           echo "Packaging workspace -> s3://$BUCKET/$KEY"
           tar czf /tmp/sa-app.tgz \
             --exclude=./.git --exclude=./.venv --exclude=./admin/node_modules \
             --exclude=./admin/.next --exclude=./data --exclude=./__pycache__ \
             --exclude='*.pyc' .
           aws s3 cp /tmp/sa-app.tgz "s3://$BUCKET/$KEY" --region "$AWS_REGION"
-          aws s3 cp "s3://$BUCKET/$KEY" "s3://$BUCKET/artifacts/signal-agent/latest.tgz" --region "$AWS_REGION"
           rm -f /tmp/sa-app.tgz
+          fi
+
+          # BOTH paths: a replacement instance boots from latest.tgz, so it has to
+          # name what we just deployed or the next rebuild undoes this deploy.
+          aws s3 cp "s3://$BUCKET/$KEY" "s3://$BUCKET/artifacts/signal-agent/latest.tgz" --region "$AWS_REGION"
 
           echo "Deploying $KEY to $IID"
           CMD_ID="$(aws ssm send-command \
             --region "$AWS_REGION" --instance-ids "$IID" \
-            --document-name AWS-RunShellScript --comment "signal-agent deploy ${GIT_COMMIT}" \
+            --document-name AWS-RunShellScript --comment "signal-agent deploy ${RELEASE_TAG}" \
             --timeout-seconds 900 \
             --parameters '{"commands":["/usr/local/bin/sa-fetch.sh '"$KEY"'","bash /opt/signal-agent/repo/deploy/deploy.sh"]}' \
             --query Command.CommandId --output text)"
@@ -143,6 +618,41 @@ pipeline {
           [ "${BAD:-0}" = "1" ] && { echo "DEPLOY FAILED"; exit 1; } || echo "DEPLOY OK"
         '''
         // }
+      }
+    }
+
+    // WH-313. Last stage: Jira is a bookkeeping side effect, so it must never be
+    // able to fail a deploy that already succeeded — hence catchError(SUCCESS).
+    // ---- WH-313 / WH-355: Jira release metadata --------------------------
+    // Creates the version, fills the three writable fields on it, and puts the Fix
+    // Version on EVERY ticket in the release — not only the one the PR title
+    // happens to name. The logic lives in scripts/jira_release_metadata.sh so it
+    // can be run and tested outside Jenkins; scripts/test_jira_release_metadata.sh
+    // exercises it against a stubbed Jira.
+    //
+    // Bookkeeping, so it must never fail a deploy that already succeeded: the
+    // script only ever reports HTTP codes, and catchError keeps the build green.
+    stage('Jira release metadata') {
+      when { allOf { branch 'main'; expression { env.RESOLVED_BUMP != 'none' && env.VERSION } } }
+      steps {
+        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+          script {
+            def subject = sh(returnStdout: true, script: 'git log -1 --pretty=%s').trim()
+            def slug = slugFrom(sh(returnStdout: true, script: 'git config --get remote.origin.url').trim())
+            def repo = slug ? slug.tokenize('/')[1] : env.JOB_NAME.tokenize('/')[0]
+
+            withCredentials([usernamePassword(credentialsId: 'jira-api',
+                                              usernameVariable: 'JIRA_EMAIL',
+                                              passwordVariable: 'JIRA_API_TOKEN')]) {
+              withEnv(["JIRA_BASE_URL=https://2070health.atlassian.net",
+                       "FIX_VERSION=${repo}-${env.VERSION}",
+                       "GIT_SUBJECT=${subject}",
+                       "PR_TITLE=${env.PR_TITLE ?: ''}"]) {
+                sh 'bash scripts/jira_release_metadata.sh'
+              }
+            }
+          }
+        }
       }
     }
   }

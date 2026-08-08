@@ -1,0 +1,79 @@
+name: PR title — release bump
+
+# WH-313. A release must declare its own size. The bump prefix is MANDATORY on PRs
+# to the deploy branch: the pipeline reads this title to decide the version, so a
+# title with no signal means the version is a guess.
+#
+# `edited` is in the trigger list on purpose — without it, fixing the title would
+# leave this check stuck red.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bump-prefix:
+    name: requires [major] | [minor] | [patch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          echo "Title: $TITLE"
+
+          BUMP=""
+          # THE convention, and the only accepted form: a leading [major]/[minor]/[patch].
+          # The colon form and conventional-commit fallbacks were removed 2026-08-03 —
+          # one convention, no dialects. Note this means Dependabot titles fail until
+          # a human prefixes them.
+          if [[ "$TITLE" =~ ^\[[[:space:]]*([Mm][Aa][Jj][Oo][Rr]|[Mm][Ii][Nn][Oo][Rr]|[Pp][Aa][Tt][Cc][Hh])[[:space:]]*\] ]]; then
+            BUMP="$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+          fi
+
+          if [ -z "$BUMP" ]; then
+            {
+              echo "### ❌ PR title needs a release bump prefix"
+              echo
+              echo "This PR merges to \`main\`, which cuts a release. The pipeline reads this"
+              echo "title to decide the version, so it has to say how big the change is."
+              echo
+              echo "**Add one of these to the front of the title:**"
+              echo '```'
+              echo "[patch] PROD Release (WH-123): a fix, copy change, revert, config or CI-only change"
+              echo "[minor] PROD Release (WH-123): a capability that did not exist before"
+              echo "[major] PROD Release (WH-123): a surface is cut over, removed or replaced"
+              echo '```'
+              echo
+              echo "Only the \[bump\] form counts — conventional prefixes (feat:/fix:) are NOT accepted."
+              echo "Dependabot PRs: edit the title to put \[patch\] in front, then the check re-runs."
+              echo
+              echo "Current title:"
+              echo '```'
+              echo "$TITLE"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Missing bump prefix::Add [patch], [minor] or [major] to the start of the PR title"
+            exit 1
+          fi
+
+          echo "Resolved bump: $BUMP"
+          echo "### ✅ Release bump: \`$BUMP\`" >> "$GITHUB_STEP_SUMMARY"
+
+          # Jira keys drive the Fix Version that the PM sees. Missing keys are a
+          # WARNING, not a failure: this check was asked to enforce the bump only.
+          # Note bare-number shorthand (WH-270/272/258) only yields WH-270 — the
+          # others carry no project prefix and cannot be recovered.
+          KEYS="$(echo "$TITLE" | tr -c 'A-Za-z0-9-' ' ' \
+                  | tr ' ' '\n' | grep -oE '^[A-Z][A-Z0-9]*-[0-9]+$' | sort -u | paste -sd, - || true)"
+          if [ -z "$KEYS" ]; then
+            echo "::warning title=No Jira key in the title::No Fix Version will be set, so this release will not be visible on any ticket"
+            echo "> ⚠️ No Jira key found — no Fix Version will be set." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Jira keys: $KEYS"
+            echo "> Jira keys to receive the Fix Version: \`$KEYS\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

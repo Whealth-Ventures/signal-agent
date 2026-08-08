@@ -180,6 +180,11 @@ def _discover_with_body(
 
     body, status, _err = _safe_get(http, site_url)
     if status == 200 and body:
+        # The configured URL may already BE a feed (e.g. a direct .rss/.xml or a
+        # /feed link the heuristic appends don't land on). Prefer it as-is before
+        # scraping the page HTML for a <link rel="alternate">.
+        if _is_parseable_feed(body):
+            return site_url, "direct", body
         href = _parse_html_for_feed_link(body, site_url)
         if href:
             return href, "html_link", None
@@ -198,6 +203,11 @@ async def _discover_with_body_async(
 
     body, status, _err = await _safe_get_async(http, site_url)
     if status == 200 and body:
+        # The configured URL may already BE a feed (e.g. a direct .rss/.xml or a
+        # /feed link the heuristic appends don't land on). Prefer it as-is before
+        # scraping the page HTML for a <link rel="alternate">.
+        if _is_parseable_feed(body):
+            return site_url, "direct", body
         href = _parse_html_for_feed_link(body, site_url)
         if href:
             return href, "html_link", None
