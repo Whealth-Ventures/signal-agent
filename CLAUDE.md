@@ -25,10 +25,19 @@ gh pr merge <n> --squash --delete-branch
 
 **Then stop — do NOT deploy by hand.** Jenkins builds on merge (GitHub webhook →
 `jenkins.xponentiate.com`), runs the tests, bumps `VERSION`, tags `vX.Y.Z`,
-uploads the artifact and deploys to the box over SSM. It takes **2–3 minutes**;
-checking the box sooner than that and concluding "Jenkins didn't fire" is a
-mistake that has been made — watch for the `chore: bump version to X [skip ci]`
-commit from `Jenkins CI` on `main` instead.
+uploads the artifact and deploys to the box over SSM. Measured end-to-end:
+**~100 seconds**. Checking the box sooner than that and concluding "Jenkins
+didn't fire" is a mistake that has been made — watch for the
+`chore: bump version to X [skip ci]` commit from `Jenkins CI` on `main` instead.
+
+Don't eyeball it — ask:
+
+```bash
+scripts/deploy-status.sh    # main vs release vs what the box is running
+```
+
+It distinguishes "still building" from "actually stuck", and flags box/release
+drift. Run it before you even consider a manual deploy.
 
 A manual artifact build fights this: it repoints `latest.tgz` at a commit that
 carries no version bump, so a replacement instance boots unversioned and
