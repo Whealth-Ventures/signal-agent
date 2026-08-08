@@ -12,9 +12,11 @@
 # ("08:00") in each geo's timezone (India → Asia/Kolkata, US → America/New_York),
 # so the timers only need to fire before that instant and the app holds to it.
 #
-# PUSH model: the box runs the inputs/ + prompts/ that shipped in the last
-# deploy. Tuning/prompt edits made in the admin UI (which commits them to the
-# repo) take effect on the NEXT deploy. The box never talks to GitHub.
+# inputs/ is PULLED from SharePoint at the top of every run (see
+# src/sharepoint_sync.py) — SharePoint is the source of truth for the workbooks
+# and the content corpus, so an edit there lands on the next run with no deploy.
+# prompts/ and the code are still PUSH: they run from the last deployed S3
+# artifact, and prompt edits made in the admin UI take effect on the NEXT deploy.
 set -euo pipefail
 
 GEO="${1:-both}"
@@ -24,6 +26,10 @@ export PATH=/usr/local/bin:/usr/bin:/bin:$PATH
 
 REPO="$APP_DIR/repo"
 cd "$REPO"
+
+# Must be its own process, before main.py: config.py parses inputs/tuning.xlsx at
+# import time. Never fatal — falls back to the inputs/ already on disk.
+.venv/bin/python src/sharepoint_sync.py
 
 echo ">> running digest geo=$GEO (post-at ${DIGEST_POST_AT:-immediate})"
 .venv/bin/python src/main.py --geo "$GEO" --post-at "${DIGEST_POST_AT:-}"

@@ -44,6 +44,29 @@ pipeline {
           . .venv/bin/activate
           pip install --quiet --upgrade pip
           pip install --quiet -r requirements.txt pytest
+
+          # inputs/ is NOT in git — SharePoint owns it. Pull the same
+          # SHAREPOINT_* credentials the box uses so CI tests against the real,
+          # current inputs. Best-effort: if the Jenkins role can't read the
+          # secret, the sync no-ops and the input-dependent tests skip
+          # themselves (the skip reason says so) rather than failing the build.
+          SECRET_JSON="$(aws secretsmanager get-secret-value --region "$AWS_REGION" \
+              --secret-id "$PROJECT/$APP_ENV/agent-env" \
+              --query SecretString --output text 2>/dev/null || echo '{}')"
+          for K in SHAREPOINT_TENANT_ID SHAREPOINT_CLIENT_ID SHAREPOINT_CLIENT_SECRET \
+                   SHAREPOINT_SITE SHAREPOINT_INPUTS_PATH; do
+            V="$(printf '%s' "$SECRET_JSON" | jq -r --arg k "$K" '.[$k] // ""')"
+            # `|| true` matters: under `set -e` a false test would abort the build.
+            [ -n "$V" ] && export "$K=$V" || true
+          done
+          unset SECRET_JSON
+          python src/sharepoint_sync.py
+
+          # config.py parses inputs/tuning.xlsx at import time, so *something*
+          # must be there or every test dies on import. Bootstrap code defaults
+          # only if the sync didn't provide one.
+          test -f inputs/tuning.xlsx || python scripts/build_default_tuning_xlsx.py
+
           pytest -q
         '''
       }

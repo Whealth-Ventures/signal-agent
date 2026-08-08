@@ -150,8 +150,15 @@ OOMs (the box has a 2 GB swapfile as headroom).
   nothing depends on a stable IP.
 - **No inbound SSH by default** — access is SSM only. Set `ssh_ingress_cidrs`
   for break-glass.
-- **Code vs data split** — code ships only via Jenkins/SSM (reviewed commits);
-  `inputs/` + `prompts/` are pulled fresh from `origin/main` at the start of each
-  daily run, so admin tuning edits take effect next morning without a redeploy.
-- **GitHub token is never persisted** — a git askpass helper fetches it from
-  Secrets Manager per git operation.
+- **Code vs data split** — code and `prompts/` ship only via Jenkins/SSM
+  (reviewed commits, PUSH model: S3 artifact → `sa-fetch.sh` → `deploy.sh`). The
+  box never talks to GitHub at runtime, so a prompt edit needs a redeploy.
+  `inputs/` is different: it is PULLED from SharePoint at the top of every run
+  (`src/sharepoint_sync.py`, app-only Graph with `Sites.Selected`), so workbook
+  edits take effect next morning without a redeploy. Credentials come from the
+  five `SHAREPOINT_*` keys in the agent secret; leave them blank and the box
+  falls back to the `inputs/` baked into the artifact.
+- **The admin UI runs on Vercel**, not on this box — project `signal-agent-admin`
+  under the 2070Health team, git-connected to this repo. The `signal-admin`
+  service and the `signal-admin.xponentiate.com` ALB route described above are
+  the older EC2-hosted arrangement and are not the live path.

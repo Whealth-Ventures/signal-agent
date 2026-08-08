@@ -22,6 +22,15 @@ import storage  # noqa: E402
 from models import story_id  # noqa: E402
 from perplexity_client import ChatResponse, RateLimitExceeded  # noqa: E402
 
+# inputs/ is not in git — SharePoint is the source of truth and
+# src/sharepoint_sync.py mirrors it down. Tests that exercise the real
+# workbooks only run once a sync has happened.
+needs_inputs = unittest.skipUnless(
+    config.KEYWORDS_XLSX.is_file(),
+    "inputs/ not synced — run `python src/sharepoint_sync.py`",
+)
+
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -163,6 +172,7 @@ class ParseResponseTest(unittest.TestCase):
         self.assertEqual(signals, [])
 
 
+@needs_inputs
 class FetchPerplexityCapTest(unittest.TestCase):
     def test_short_circuits_when_cap_at_headroom(self) -> None:
         # remaining_today = 2 == headroom → loop should break before any call
@@ -208,6 +218,7 @@ class EnsureIndexedTest(unittest.TestCase):
 
 # --- End-to-end pipeline -----------------------------------------------
 
+@needs_inputs
 class _PipelineBase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

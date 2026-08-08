@@ -1,5 +1,52 @@
 # Signal Agent — Release Notes
 
+## v1.5.0 — "SharePoint is the source of truth for inputs" (2026-08-07)
+
+Until now, the agent's inputs lived as files committed into the repo — a copy of
+what was already in SharePoint. Changing a keyword or a tuning number meant
+downloading the workbook, editing it, committing it, and waiting for a deploy.
+
+**Now: edit the file in SharePoint and you're done.** Every run mirrors the
+SharePoint inputs folder down before it starts, so the change is live on the next
+morning's digest. No download, no commit, no deploy.
+
+This covers everything under `inputs/`: `keywords.xlsx`, `voices.xlsx`,
+`tuning.xlsx`, `portfolio.xlsx`, `portfolio_context.md`, and the whole
+`content/` corpus. A file deleted in SharePoint disappears from the agent too.
+
+### The input files are gone from the repo
+`inputs/` is no longer in git at all — it's a local cache the sync fills in.
+There is now exactly one copy of each input, in SharePoint, so the two can't
+drift and there's no question about which is authoritative.
+
+Practical effects: a fresh checkout must sync before it can run anything, and
+tests that read the real workbooks skip themselves until it has. CI pulls the
+same SharePoint credentials the production box uses, so it keeps testing against
+the real inputs.
+
+### The admin UI is now prompts-only
+Its **Keywords, Sources, Tuning, Portfolio, and Content corpus** pages have been
+removed — SharePoint owns those files, and anything the UI wrote would be
+overwritten within a day. Leaving them in place would have meant edits vanishing
+silently, which is worse than not having the page.
+
+**Prompts** remains, and still works exactly as before: it commits to the repo
+and applies on the next deploy. The LLM prompts are not in SharePoint.
+
+### If SharePoint is down
+The digest still ships. A failed sync prints a warning and the run continues on
+the last successfully-synced files, so an Azure or SharePoint outage can't take
+out the 08:00 post. The flip side: if a SharePoint edit doesn't show up in a
+digest, look for `WARN: sharepoint sync failed` in that run's log.
+
+### Setup (one-time, needs a tenant admin)
+Access is an Azure AD app registration with app-only Microsoft Graph permission
+scoped to the single SharePoint site (`Sites.Selected` — it can read that one
+site and nothing else in the tenant). `scripts/grant_sharepoint_access.py`
+performs the site-level grant, which can only be done over the Graph API, not in
+the portal. Credentials live in AWS Secrets Manager alongside the other keys.
+With them unset the sync is a no-op, which is how local development runs.
+
 ## v1.4.0 — "Sector Agent" (2026-07-22)
 
 A **third agent** joins the two daily geo digests: a **weekly, portfolio-focused

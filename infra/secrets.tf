@@ -24,6 +24,16 @@ resource "aws_secretsmanager_secret_version" "agent_placeholder" {
     SLACK_CHANNEL_ID_US    = ""
     # PUSH deploy: the box gets its code as an S3 artifact from Jenkins, so no
     # GitHub credential is needed here.
+    #
+    # SharePoint is the source of truth for inputs/ — src/sharepoint_sync.py
+    # mirrors the folder down at the top of every run. Azure AD app registration
+    # with app-only Graph Sites.Selected on the one site. Leave blank to disable
+    # the sync (the box then runs the inputs/ baked into the artifact).
+    SHAREPOINT_TENANT_ID     = ""
+    SHAREPOINT_CLIENT_ID     = ""
+    SHAREPOINT_CLIENT_SECRET = ""
+    SHAREPOINT_SITE          = "" # e.g. contoso.sharepoint.com:/sites/SignalAgent
+    SHAREPOINT_INPUTS_PATH   = "" # drive-relative folder, e.g. Signal Agent/inputs
   })
 
   lifecycle {

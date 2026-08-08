@@ -26,6 +26,15 @@ from models import Story, story_id  # noqa: E402
 from perplexity_client import ChatResponse  # noqa: E402
 from slack_client import SlackResult  # noqa: E402
 
+# inputs/ is not in git — SharePoint is the source of truth and
+# src/sharepoint_sync.py mirrors it down. Tests that exercise the real
+# workbooks only run once a sync has happened.
+needs_inputs = unittest.skipUnless(
+    config.PORTFOLIO_XLSX.is_file(),
+    "inputs/ not synced — run `python src/sharepoint_sync.py`",
+)
+
+
 
 class _FakePerp:
     """Sync-only fake → run() takes the fetch_perplexity (sync) branch. Its
@@ -79,6 +88,7 @@ def _fake_scoring_factory(company_names: list[str]):
     return fake_scoring
 
 
+@needs_inputs
 class SectorMainWiringTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

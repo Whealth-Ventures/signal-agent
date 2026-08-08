@@ -2,27 +2,52 @@
 
 Five files (well, three files and two folders) control everything about what the agent fetches, ranks, and posts. None of them require Python knowledge to edit. Pick the right one based on what you want to change.
 
-**Easiest path: the admin UI.** Every input below is editable from the web admin
-panel (see `admin/README.md`) — no Excel, no git. Each save writes back to the
-same file listed here and commits it to this repo. The table shows the underlying
-file (the source of truth) plus the direct-edit fallback.
+**Two editing surfaces, split by file:**
 
-| Want to change… | Edit | Admin UI page / direct edit |
+- **`inputs/` → edit in SharePoint.** SharePoint is the source of truth for the
+  four workbooks, `portfolio_context.md`, and the content corpus. Open the file
+  in SharePoint, edit, save — done. Every run mirrors that folder down before it
+  starts (`src/sharepoint_sync.py`), so the change is live on the **next run**
+  with no commit and no deploy. The copies of these files in this repo are a
+  seed for a fresh clone and the fallback if SharePoint is unreachable; editing
+  them there does nothing lasting, because the next sync overwrites them.
+- **`prompts/` → edit in the admin UI** (see `admin/README.md`) or directly in
+  git. These are not in SharePoint. A prompt edit commits to this repo and takes
+  effect on the **next deploy**, not the next run.
+
+| Want to change… | Edit | Where |
 |---|---|---|
-| Numbers, thresholds, model names, timeouts, dedup window, priority bucket structure, source tier list | `inputs/tuning.xlsx` | **Tuning** · or open in Excel, edit cell, save |
-| What keywords the agent searches for | `inputs/keywords.xlsx` | **Keywords** · or open in Excel, edit/add rows, save |
-| Which named voices and newsletters the agent watches | `inputs/voices.xlsx` | **Sources** · or open in Excel, edit/add rows, save |
-| LLM tone & how strictly the ranker interprets the rubric | `prompts/ranker_system.md` | **Prompts** · or open in any text editor, edit, save |
-| Which stories qualify as Tier S/A/B/C | `prompts/magnitude_rubric.md` | **Prompts** · or open in any text editor, edit, save |
-| What "sounds like the firm" — the taste profile for relevance scoring | `inputs/content/*.md` | **Content corpus** · or add/remove/edit the firm's articles, blog posts, interviews, etc. |
-| Which portfolio companies the **weekly Sector Agent** watches (name, sector, what they do, geo) | `inputs/portfolio.xlsx` | **Portfolio** · or open in Excel, edit/add rows, save |
-| Sector Agent tone / what counts as "material impact" (Tier + direction) | `prompts/sector_system.md`, `prompts/sector_impact_rubric.md` | **Prompts** · or open in any text editor, edit, save |
+| Numbers, thresholds, model names, timeouts, dedup window, priority bucket structure, source tier list | `inputs/tuning.xlsx` | **SharePoint** · open in Excel, edit cell, save |
+| What keywords the agent searches for | `inputs/keywords.xlsx` | **SharePoint** · edit/add rows, save |
+| Which named voices and newsletters the agent watches | `inputs/voices.xlsx` | **SharePoint** · edit/add rows, save |
+| What "sounds like the firm" — the taste profile for relevance scoring | `inputs/content/*.md` | **SharePoint** · add/remove/edit the firm's articles, blog posts, interviews, etc. |
+| Which portfolio companies the **weekly Sector Agent** watches (name, sector, what they do, geo) | `inputs/portfolio.xlsx` | **SharePoint** · edit/add rows, save |
+| Deeper portfolio context — competitors, what materially moves each company | `inputs/portfolio_context.md` | **SharePoint** · edit, save |
+| LLM tone & how strictly the ranker interprets the rubric | `prompts/ranker_system.md` | **Admin UI → Prompts** · or any text editor + commit |
+| Which stories qualify as Tier S/A/B/C | `prompts/magnitude_rubric.md` | **Admin UI → Prompts** · or any text editor + commit |
+| Sector Agent tone / what counts as "material impact" (Tier + direction) | `prompts/sector_system.md`, `prompts/sector_impact_rubric.md` | **Admin UI → Prompts** · or any text editor + commit |
 
 After any edit:
-- If you edit via the admin UI, Save commits it for you — the next cron run picks it up.
-- If you edit via GitHub's web UI, commit on the same screen — the next 04:30 UTC cron run picks it up automatically.
-- If you edit on your laptop, save and commit/push.
-- A `--test` flag (`python src/main.py --test`) lets you run the full pipeline and see the Slack output with a `[TEST]` marker before the change goes live.
+- SharePoint edits need nothing further — the next scheduled run pulls them.
+- Prompt edits need a deploy before the box sees them.
+- A `--test` flag (`python src/main.py --test`) lets you run the full pipeline and see the Slack output with a `[TEST]` marker before the change goes live. Run `python src/sharepoint_sync.py` first if you want it to reflect a fresh SharePoint edit.
+
+### Setting up / debugging the SharePoint sync
+
+First-time Azure setup is a separate walkthrough: **`docs/sharepoint-setup.md`**.
+
+The sync is off unless all five `SHAREPOINT_*` env vars are set (tenant id,
+client id, client secret, site, inputs path — see `src/sharepoint_sync.py`). With
+them unset it prints "not configured" and the agent runs on the `inputs/` in git,
+which is what happens on a laptop by default.
+
+- Preview what it would pull, without writing: `python src/sharepoint_sync.py --dry-run`
+- Verify the app's site permission: `python scripts/grant_sharepoint_access.py --site <host:/sites/Name> --list`
+
+A sync failure is never fatal — it warns and the run proceeds on the last
+successfully-synced files, so a SharePoint or Azure outage can't stop the 08:00
+digest. That also means a silently stale digest is possible: if a SharePoint edit
+doesn't show up, check the run's log for a `WARN: sharepoint sync failed` line.
 
 ## `inputs/tuning.xlsx` — the four sheets
 
