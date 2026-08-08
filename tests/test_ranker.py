@@ -342,9 +342,15 @@ class _OrchestratorBase(unittest.TestCase):
             config, "LOGS_DIR", Path(self.tmp.name),
         )
         self._patch_logs.start()
+        # Pin the ranking vendor to Perplexity so the injected fake client is
+        # the one actually used. Without this, a machine with ANTHROPIC_API_KEY
+        # in its .env would route these tests to the real Claude API.
+        self._patch_key = mock.patch.object(config, "ANTHROPIC_API_KEY", "")
+        self._patch_key.start()
         self.conn.commit()
 
     def tearDown(self) -> None:
+        self._patch_key.stop()
         self._patch_logs.stop()
         self.conn.close()
         self.tmp.cleanup()
@@ -450,6 +456,62 @@ class LoggingTest(_OrchestratorBase):
         lines = log_files[0].read_text().strip().splitlines()
         rec = json.loads(lines[-1])
         self.assertEqual(rec["candidates_count"], 2)
+
+
+class RankStoriesVendorTest(_OrchestratorBase):
+    """The regression guard, at the level the bug actually lived: rank_stories().
+
+    Testing _build_ranker_client() alone does NOT catch it — that function was
+    always correct. The bug was its call site skipping it whenever a client was
+    passed, which is exactly what main.py does on every production run.
+    """
+
+    def test_passed_client_unused_when_anthropic_configured(self) -> None:
+        storage.upsert_story(
+            _mk_story("a", score=0.7, priority_bucket="venture_ipo"), conn=self.conn,
+        )
+        self.conn.commit()
+
+        passed = FakePerplexityClient('{"stories":[]}')      # main.py's fetch client
+        claude = FakePerplexityClient('{"stories":[]}', model="claude-sonnet-4-5")
+
+        with mock.patch.object(config, "RANKER_PROVIDER", "anthropic"), \
+             mock.patch.object(config, "ANTHROPIC_API_KEY", "sk-ant-test"), \
+             mock.patch("anthropic_client.AnthropicClient", return_value=claude):
+            ranker.rank_stories(conn=self.conn, client=passed)
+
+        self.assertEqual(passed.calls, [], "ranking must not go to the fetch client")
+        self.assertEqual(len(claude.calls), 1, "ranking must go to Claude")
+        self.assertEqual(claude.calls[0]["model"], config.ANTHROPIC_MODEL_RANK)
+
+
+class RankerVendorSelectionTest(unittest.TestCase):
+    """The ranking vendor must follow config, not whoever passed a client.
+
+    Regression: main.py hands rank_stories() its Perplexity *fetch* client for
+    budget accounting. rank_stories() used to consult _build_ranker_client()
+    only when no client was passed, so that argument silently pinned every
+    production run to Perplexity — the Claude path never executed, despite
+    ranker_provider=anthropic and a key being set.
+    """
+
+    def test_passed_client_is_reused_on_the_perplexity_path(self) -> None:
+        # Reusing it matters: a client built here carries no geo scope and
+        # would bill against the wrong per-(date, geo) budget log.
+        passed = FakePerplexityClient('{"stories":[]}')
+        with mock.patch.object(config, "RANKER_PROVIDER", "perplexity"), \
+             mock.patch.object(config, "ANTHROPIC_API_KEY", ""):
+            client, model = ranker._build_ranker_client(fallback=passed)
+        self.assertIs(client, passed)
+        self.assertEqual(model, config.PERPLEXITY_MODEL_RANK)
+
+    def test_no_key_falls_back_even_when_provider_is_anthropic(self) -> None:
+        passed = FakePerplexityClient('{"stories":[]}')
+        with mock.patch.object(config, "RANKER_PROVIDER", "anthropic"), \
+             mock.patch.object(config, "ANTHROPIC_API_KEY", ""):
+            client, model = ranker._build_ranker_client(fallback=passed)
+        self.assertIs(client, passed)
+        self.assertEqual(model, config.PERPLEXITY_MODEL_RANK)
 
 
 if __name__ == "__main__":

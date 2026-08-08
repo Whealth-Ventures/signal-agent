@@ -421,14 +421,26 @@ def _log(rec: dict) -> None:
 RECENT_SENT_WINDOW_DAYS = config.DEDUP_WINDOW_DAYS
 
 
-def _build_ranker_client() -> tuple[_RankerClient, str]:
+def _build_ranker_client(
+    fallback: "_RankerClient | None" = None,
+) -> tuple[_RankerClient, str]:
     """Pick the ranking vendor. Claude when RANKER_PROVIDER=='anthropic' AND a
     key is set; otherwise Perplexity sonar-reasoning-pro. Returns (client,
-    model_to_use)."""
+    model_to_use).
+
+    `fallback` is the caller's already-built Perplexity client (main.py hands
+    over its fetch client). It is used ONLY on the Perplexity path, and only so
+    the per-(date, geo) budget counter stays shared — a client built here would
+    carry no geo scope and would bill against the wrong log file.
+
+    It must never win over an explicit anthropic provider: it used to, because
+    rank_stories() called this only when no client was passed, which silently
+    pinned every production run to Perplexity and left the Claude path dead.
+    """
     if config.RANKER_PROVIDER == "anthropic" and config.ANTHROPIC_API_KEY:
         from anthropic_client import AnthropicClient
         return AnthropicClient(), config.ANTHROPIC_MODEL_RANK
-    return PerplexityClient(), config.PERPLEXITY_MODEL_RANK
+    return fallback or PerplexityClient(), config.PERPLEXITY_MODEL_RANK
 
 
 def _effective_bucket(
@@ -454,6 +466,11 @@ def rank_stories(
     conn: sqlite3.Connection | None = None,
     client: _RankerClient | None = None,
 ) -> RankingResult:
+    """`client` is a FALLBACK, not an override — see _build_ranker_client().
+    When RANKER_PROVIDER=='anthropic' and a key is set, ranking goes to Claude
+    and this client is ignored. Tests injecting a fake must therefore pin the
+    provider (patch config.ANTHROPIC_API_KEY to "") or they will reach the real
+    API on any machine that has the key in its .env."""
     start = time.monotonic()
     # Exclude stories already shipped in the last N days — otherwise evergreens
     # keep winning the candidate pool and the digest repeats itself. The pool is
@@ -489,9 +506,7 @@ def rank_stories(
     response_model: str | None = None
     response_cost = 0.0
     call_error: str | None = None
-    rank_model = config.PERPLEXITY_MODEL_RANK
-    if client is None:
-        client, rank_model = _build_ranker_client()
+    client, rank_model = _build_ranker_client(fallback=client)
     prompt = build_prompt(grouped_for_prompt)
     try:
         resp = client.complete(
