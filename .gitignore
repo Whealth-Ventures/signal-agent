@@ -4,6 +4,12 @@
 !.env.example
 data/
 
+# Agent inputs. SharePoint is the source of truth — src/sharepoint_sync.py
+# mirrors them down at the start of every run, so they are a local cache, not
+# source. Keeping them out of git is what stops the two copies from drifting.
+# Nothing here runs until you've synced at least once; see docs/EDITING.md.
+inputs/
+
 # Python
 __pycache__/
 *.pyc

@@ -12,7 +12,17 @@ sys.path.insert(0, str(ROOT / "src"))
 import config  # noqa: E402
 import query_planner as qp  # noqa: E402
 
+# inputs/ is not in git — SharePoint is the source of truth and
+# src/sharepoint_sync.py mirrors it down. These tests exercise the real
+# workbooks, so they only run once a sync has happened. In CI that means
+# whenever the SharePoint credentials are available.
+needs_inputs = unittest.skipUnless(
+    config.KEYWORDS_XLSX.is_file() and config.VOICES_XLSX.is_file(),
+    "inputs/ not synced — run `python src/sharepoint_sync.py`",
+)
 
+
+@needs_inputs
 class KeywordsTest(unittest.TestCase):
     def test_count_reasonable(self) -> None:
         # Master Keywords tab — single tab with ~2,240 keywords.
@@ -27,6 +37,7 @@ class KeywordsTest(unittest.TestCase):
             self.assertTrue(r.keyword)
 
 
+@needs_inputs
 class VoicesTest(unittest.TestCase):
     def test_count(self) -> None:
         # India ~170 + US ~170.
@@ -48,6 +59,7 @@ class VoicesTest(unittest.TestCase):
         self.assertGreaterEqual(len(us_t1), 20)
 
 
+@needs_inputs
 class NewslettersTest(unittest.TestCase):
     def test_count(self) -> None:
         self.assertGreaterEqual(len(qp.load_newsletters()), 20)
@@ -58,6 +70,7 @@ class NewslettersTest(unittest.TestCase):
         self.assertTrue(first.name)
 
 
+@needs_inputs
 class CompanyPagesTest(unittest.TestCase):
     def test_count(self) -> None:
         self.assertGreaterEqual(len(qp.load_company_pages()), 50)
@@ -68,6 +81,7 @@ class CompanyPagesTest(unittest.TestCase):
         self.assertTrue(first.name)
 
 
+@needs_inputs
 class FirmAdditionsTest(unittest.TestCase):
     def test_count(self) -> None:
         # ~44 firms across A/B/C categories.
@@ -83,6 +97,7 @@ class FirmAdditionsTest(unittest.TestCase):
         self.assertGreaterEqual(len(cats), 3)
 
 
+@needs_inputs
 class QueryPlansTest(unittest.TestCase):
     TEST_DATE = date(2026, 5, 26)
 
@@ -130,6 +145,7 @@ class QueryPlansTest(unittest.TestCase):
         self.assertIn("firm__india_pe_vc", ids)
 
 
+@needs_inputs
 class TrackACoverageTest(unittest.TestCase):
     """Every PriorityBucket × geo combination should produce exactly one plan,
     except AI in Healthcare which produces two (ventures + clinical)."""
@@ -155,6 +171,7 @@ class TrackACoverageTest(unittest.TestCase):
             self.assertIsNotNone(p.priority_bucket, f"{p.id} missing priority_bucket")
 
 
+@needs_inputs
 class TrackBRotationTest(unittest.TestCase):
     def test_same_date_same_plans(self) -> None:
         d = date(2026, 5, 26)
@@ -187,6 +204,7 @@ class TrackBRotationTest(unittest.TestCase):
                 self.assertIsNone(p.priority_bucket)
 
 
+@needs_inputs
 class GeoFilteringTest(unittest.TestCase):
     """Verify Track A geo-filter logic: India plan only includes India + Both
     keywords; US plan only includes US + Both; Global plan includes everything."""
@@ -223,6 +241,7 @@ class GeoFilteringTest(unittest.TestCase):
             self.assertIn(kw, eligible)
 
 
+@needs_inputs
 class VoiceAndFirmPlansTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

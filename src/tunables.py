@@ -260,9 +260,12 @@ def load_tunables(path: Path = TUNING_XLSX) -> Tunables:
     """
     if not path.exists():
         raise RuntimeError(
-            f"tuning.xlsx not found at {path}. Run "
-            f"`python scripts/build_default_tuning_xlsx.py` to bootstrap "
-            f"with defaults."
+            f"tuning.xlsx not found at {path}.\n"
+            f"inputs/ is not in git — SharePoint is the source of truth. Run:\n"
+            f"    python src/sharepoint_sync.py\n"
+            f"(needs the SHAREPOINT_* vars in .env; see docs/sharepoint-setup.md)\n"
+            f"Offline, `python scripts/build_default_tuning_xlsx.py` writes code "
+            f"defaults instead — enough to import, not the real tuning."
         )
     wb = load_workbook(path, read_only=True, data_only=True)
     for required_sheet in ("Settings", "Boosters", "Priority Buckets", "Source Tiers"):

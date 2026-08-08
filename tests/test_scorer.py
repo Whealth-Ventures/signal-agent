@@ -19,6 +19,15 @@ import storage  # noqa: E402
 from content_indexer import ScoredChunk  # noqa: E402
 from models import Signal, story_id  # noqa: E402
 
+# inputs/ is not in git — SharePoint is the source of truth and
+# src/sharepoint_sync.py mirrors it down. Tests that exercise the real
+# workbooks only run once a sync has happened.
+needs_inputs = unittest.skipUnless(
+    config.VOICES_XLSX.is_file(),
+    "inputs/ not synced — run `python src/sharepoint_sync.py`",
+)
+
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -168,6 +177,7 @@ class ScoreStoryTest(unittest.TestCase):
 
 # --- End-to-end test ----------------------------------------------------
 
+@needs_inputs
 class RunScoringTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

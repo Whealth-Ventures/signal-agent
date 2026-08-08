@@ -165,6 +165,10 @@ class RateLimitTest(_ClientTestBase):
 
 
 class SearchRecentTest(_ClientTestBase):
+    @unittest.skipUnless(
+        config.KEYWORDS_XLSX.is_file(),
+        "inputs/ not synced — run `python src/sharepoint_sync.py`",
+    )
     def test_uses_sonar_pro_and_day_recency_with_plan_prompt(self) -> None:
         captured: dict = {}
         def handler(req: httpx.Request) -> httpx.Response:

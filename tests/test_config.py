@@ -15,10 +15,18 @@ class ConfigPathsTest(unittest.TestCase):
     def test_root_is_repo_root(self) -> None:
         self.assertEqual(config.ROOT, ROOT)
 
+    # inputs/ is not in git — SharePoint owns it (src/sharepoint_sync.py). These
+    # assert the sync has run, so they skip on a clone that hasn't synced yet.
+    @unittest.skipUnless(
+        config.KEYWORDS_XLSX.is_file(), "inputs/ not synced — run src/sharepoint_sync.py"
+    )
     def test_input_files_exist(self) -> None:
         self.assertTrue(config.KEYWORDS_XLSX.is_file())
         self.assertTrue(config.VOICES_XLSX.is_file())
 
+    @unittest.skipUnless(
+        config.CONTENT_DIR.is_dir(), "inputs/ not synced — run src/sharepoint_sync.py"
+    )
     def test_content_dir_exists(self) -> None:
         self.assertTrue(config.CONTENT_DIR.is_dir())
 
@@ -134,6 +142,12 @@ class ConfigEnvTest(unittest.TestCase):
         self.assertIsInstance(config.SLACK_CHANNEL_LABEL, str)
         self.assertTrue(config.SLACK_CHANNEL_LABEL)
 
+    # check_env() asserts the input files exist as well as the API keys, and
+    # inputs/ comes from SharePoint rather than git — so this only means
+    # anything once a sync has run.
+    @unittest.skipUnless(
+        config.KEYWORDS_XLSX.is_file(), "inputs/ not synced — run src/sharepoint_sync.py"
+    )
     def test_check_env_passes_with_real_dotenv(self) -> None:
         # The .env in the repo is the source of truth for this run; if it's
         # missing keys, this should fail and tell us which.

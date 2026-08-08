@@ -24,57 +24,7 @@ export default async function Home() {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-10">
-        <div className="grid md:grid-cols-3 gap-4">
-          <Link
-            href="/keywords"
-            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
-          >
-            <h2 className="font-semibold mb-1">Keywords</h2>
-            <p className="text-sm text-gray-600">
-              Edit the ~2,240 keywords (bucket, sub-bucket, geo) the agent
-              clusters into each day’s Perplexity searches — its core input.
-            </p>
-          </Link>
-          <Link
-            href="/sources"
-            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
-          >
-            <h2 className="font-semibold mb-1">Sources</h2>
-            <p className="text-sm text-gray-600">
-              Add or remove the publications, voices, and firms the agent
-              watches (e.g. ET, VCCircle). RSS feeds are auto-discovered.
-            </p>
-          </Link>
-          <Link
-            href="/portfolio"
-            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
-          >
-            <h2 className="font-semibold mb-1">Portfolio</h2>
-            <p className="text-sm text-gray-600">
-              The portfolio companies the weekly Sector Agent watches — name,
-              sector, what they do, and geography. Drives the third channel.
-            </p>
-          </Link>
-          <Link
-            href="/content"
-            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
-          >
-            <h2 className="font-semibold mb-1">Content corpus</h2>
-            <p className="text-sm text-gray-600">
-              Add, edit, or remove the firm’s own published pieces — the taste
-              profile the agent scores story relevance against.
-            </p>
-          </Link>
-          <Link
-            href="/tuning"
-            className="block p-6 bg-white border rounded-lg hover:border-gray-400"
-          >
-            <h2 className="font-semibold mb-1">Tuning</h2>
-            <p className="text-sm text-gray-600">
-              Edit every numeric knob: thresholds, dedup window, booster
-              weights, priority categories, source tier list.
-            </p>
-          </Link>
+        <div className="grid md:grid-cols-2 gap-4">
           <Link
             href="/prompts"
             className="block p-6 bg-white border rounded-lg hover:border-gray-400"
@@ -85,16 +35,36 @@ export default async function Home() {
               counts as Tier S / A / B / C).
             </p>
           </Link>
+
+          <div className="block p-6 bg-gray-50 border border-dashed rounded-lg">
+            <h2 className="font-semibold mb-1 text-gray-700">
+              Keywords, Sources, Tuning, Portfolio, Content
+            </h2>
+            <p className="text-sm text-gray-600">
+              Now edited in{" "}
+              <a
+                className="underline"
+                href="https://2070health.sharepoint.com/sites/SignalAgent"
+                target="_blank"
+                rel="noreferrer"
+              >
+                SharePoint
+              </a>
+              , not here. The agent reads that folder directly at the start of
+              every run, so an edit there is live the next morning — no deploy.
+            </p>
+          </div>
         </div>
 
         <p className="mt-10 text-xs text-gray-500">
-          Saved changes commit directly to{" "}
-          <code>{process.env.GITHUB_OWNER || "signal-agent"}/
+          Prompt changes commit to{" "}
+          <code>
+            {process.env.GITHUB_OWNER || "signal-agent"}/
             {process.env.GITHUB_REPO || "signal-agent"}@
-            {process.env.GITHUB_BRANCH || "main"}</code>.
-          {" "}and, when auto-deploy is configured, kick a deploy so the change
-          goes live within a few minutes (otherwise it applies on the next
-          deploy).
+            {process.env.GITHUB_BRANCH || "main"}
+          </code>{" "}
+          and apply on the next deploy. Everything under <code>inputs/</code>{" "}
+          comes from SharePoint instead and needs no deploy.
         </p>
       </main>
     </div>

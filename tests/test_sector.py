@@ -21,6 +21,15 @@ import sector  # noqa: E402
 from models import Story  # noqa: E402
 from perplexity_client import ChatResponse  # noqa: E402
 
+# inputs/ is not in git — SharePoint is the source of truth and
+# src/sharepoint_sync.py mirrors it down. Tests that exercise the real
+# workbooks only run once a sync has happened.
+needs_inputs = unittest.skipUnless(
+    config.PORTFOLIO_XLSX.is_file(),
+    "inputs/ not synced — run `python src/sharepoint_sync.py`",
+)
+
+
 
 def _story(sid: str, company: str | None, *, title: str = "Regulatory shift") -> Story:
     url = f"https://e.example/{sid}"
@@ -55,6 +64,7 @@ class _FakeClient:
         return _resp(self.payload or {"items": []})
 
 
+@needs_inputs
 class PortfolioTest(unittest.TestCase):
     def test_load(self) -> None:
         cos = sector.load_portfolio()
@@ -76,6 +86,7 @@ class PortfolioTest(unittest.TestCase):
         self.assertIn(cos[0].name, plans[0].prompt_text)
 
 
+@needs_inputs
 class RankImpactTest(unittest.TestCase):
     def setUp(self) -> None:
         self.cos = sector.load_portfolio()
@@ -121,6 +132,7 @@ class RankImpactTest(unittest.TestCase):
         self.assertEqual(res.grouped, {})
 
 
+@needs_inputs
 class BlocksTest(unittest.TestCase):
     def test_grouped_blocks_within_limits(self) -> None:
         cos = sector.load_portfolio()
@@ -144,6 +156,7 @@ class BlocksTest(unittest.TestCase):
         self.assertIn("No material sector developments", json.dumps(blocks))
 
 
+@needs_inputs
 class RecencyRegressionTest(unittest.TestCase):
     """The shared change (optional recency param) must not alter daily defaults."""
 

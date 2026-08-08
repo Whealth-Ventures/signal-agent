@@ -80,6 +80,13 @@ SETTINGS: list[tuple[str, object, str]] = [
     ("perplexity_recency", "day",
      "Recency filter on the fetch sweep."),
 
+    # Ranker vendor
+    ("ranker_provider", "anthropic",
+     "Which vendor runs the single ranking call: 'anthropic' (Claude) or 'perplexity'. "
+     "An unset ANTHROPIC_API_KEY forces the Perplexity fallback either way."),
+    ("anthropic_model_rank", "claude-sonnet-4-5",
+     "Claude model for the ranking call when ranker_provider=anthropic."),
+
     # Embeddings
     ("embedding_model", "text-embedding-3-small",
      "Embedding model for both content-corpus indexing and signal embedding. Switching requires re-indexing."),

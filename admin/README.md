@@ -1,8 +1,9 @@
 # Signal Agent — Admin UI
 
-A small Next.js app for editing every input to the [`signal-agent`](https://github.com/Whealth-Ventures/signal-agent)
-daily healthcare digest. Shared-login auth, no database. Each save serializes back
-to the same file the agent reads and commits it to the agent repo via the GitHub API.
+A small Next.js app for editing the LLM prompts of the
+[`signal-agent`](https://github.com/Whealth-Ventures/signal-agent) daily
+healthcare digest. Shared-login auth, no database. Each save commits back to the
+agent repo via the GitHub API.
 
 Lives in the `admin/` subdirectory of the agent repo (not a separate repo).
 
@@ -10,30 +11,32 @@ Lives in the `admin/` subdirectory of the agent repo (not a separate repo).
 
 | Page | File in the agent repo | Notes |
 |---|---|---|
-| **Keywords** | `inputs/keywords.xlsx` | The ~2,240 keywords (Bucket / Sub-bucket / Keyword / Geo) the query planner clusters into each day's Perplexity searches. Flat editable table with a filter. |
-| **Sources** | `inputs/voices.xlsx` | Publications, top voices, org pages, PE/VC firms. Add a publication with its URL and the fetcher auto-discovers its RSS feed. Five tabs matching the xlsx sheets. |
-| **Tuning** | `inputs/tuning.xlsx` | Every numeric knob, regex booster, priority bucket, and source tier. Four tabs matching the four xlsx sheets. |
 | **Prompts** | `prompts/ranker_system.md`, `prompts/magnitude_rubric.md` | The two LLM prompts, edited as plain textareas. |
-| **Content corpus** | `inputs/content/**/*.md` | The firm's own published pieces — the "taste profile" the agent scores relevance against. Browse / edit / add / delete. |
 
-Parse and serialize preserve the exact layout the agent's positional loaders
-(`src/query_planner.py`, `src/tunables.py`) depend on, so edits are round-trip safe
-(`node lib/keywords.check.mjs`, `node lib/voices.check.mjs`). The xlsx / md files
-stay the single source of truth — the UI is only an editor over them.
+**That's the whole surface.** It used to edit Keywords, Sources, Tuning,
+Portfolio, and the Content corpus as well. Those pages were removed when
+SharePoint became the source of truth for `inputs/`: the agent mirrors that
+SharePoint folder down at the start of every run (`src/sharepoint_sync.py`), so
+anything this UI wrote there would be overwritten within a day. Edit those in
+SharePoint — see `docs/EDITING.md`.
+
+Note the Sector Agent's prompts (`prompts/sector_system.md`,
+`prompts/sector_impact_rubric.md`) are not exposed here either; edit them in git.
 
 ## How a save reaches the agent
 
-Each save is its own commit on the agent repo's `main` branch (`git log inputs/`
-and `git log prompts/` show the history; the shared-login name is recorded in the
-commit author name + message for audit).
+Each save is its own commit on the agent repo's `main` branch (`git log prompts/`
+shows the history; the shared-login name is recorded in the commit author name +
+message for audit).
 
 **Important — a commit does not automatically reach the running agent.** The
-production box does not read GitHub at runtime; it runs the `inputs/` + `prompts/`
-baked into the **last deployed S3 artifact** (push model — see the agent repo's
-`deploy/` + `Jenkinsfile`). So an admin save takes effect only after a new
-artifact is built and deployed to the box. Automating that (build on push →
-deploy) is the top open item in the repo-root **`FEEDBACK.md`**; until it lands,
-input/prompt edits reach the box only on the next deploy.
+production box does not read GitHub at runtime; it runs the `prompts/` baked into
+the **last deployed S3 artifact** (push model — see the agent repo's `deploy/` +
+`Jenkinsfile`). So a prompt save takes effect only after a new artifact is built
+and deployed. Automating that is an open item in the repo-root **`FEEDBACK.md`**.
+
+(`inputs/` is different — it comes from SharePoint at runtime and needs no
+deploy. That asymmetry is the whole reason this UI is now prompts-only.)
 
 ## Deployment
 

@@ -35,6 +35,25 @@ transport but runs against its **own SQLite db** (`data/db/sector.db`) so its
 stories never touch the daily candidate pool.
 
 ## Inputs
+**SharePoint is the source of truth for everything under `inputs/`, and
+`inputs/` is NOT in git** (it's gitignored — a local cache, not source).
+`src/sharepoint_sync.py` mirrors the SharePoint folder down at the top of every
+run, as its own process before `main.py` — `config.py` parses `tuning.xlsx` at
+*import* time, so an in-process sync would apply one run late. A SharePoint edit
+is live on the next run: no commit, no deploy.
+
+Consequences to know:
+- A fresh clone can't run anything until it syncs once — `import config` raises
+  without `inputs/tuning.xlsx`. CI bootstraps via `scripts/build_default_tuning_xlsx.py`.
+- Tests touching the real workbooks are `skipUnless`-guarded on the file
+  existing, so they skip rather than fail on an unsynced checkout.
+- Sync failure is deliberately non-fatal: the run proceeds on the previously
+  synced files. A box therefore keeps working through a SharePoint outage, but a
+  *stale* digest is possible — grep runs for `WARN: sharepoint sync failed`.
+
+`prompts/` is NOT in SharePoint — it stays git-backed, admin-UI-editable, and
+needs a deploy. See `docs/EDITING.md`.
+
 - `inputs/keywords.xlsx` — single `Master Keywords` tab with columns Bucket / Sub-bucket / Keyword / Geo; ~2,240 keywords.
 - `inputs/voices.xlsx` — 5 tabs (India Top Voices, US Top Voices, Newsletters & Publications, Firms & Org Pages, New Additions); ~225+ rows across them.
 - `inputs/tuning.xlsx` — 4 sheets (Settings, Boosters, Priority Buckets, Source Tiers). Every numeric knob, every regex booster pattern, the priority-bucket structure, and the source tier list. The single editable surface for tuning. See `docs/EDITING.md`.
@@ -47,6 +66,7 @@ stories never touch the daily candidate pool.
 4. **Ranker** — a single LLM call assigns each candidate a magnitude tier (S/A/B/C), a one-line headline, AND its best-fit bucket (one of the 8). Uses **Claude** when `ANTHROPIC_API_KEY` is set (`ranker_provider=anthropic`), else falls back to Perplexity `sonar-reasoning-pro`. Within a tier, ordering is by recency.
 
 ## Modules
+- `src/sharepoint_sync.py` — mirrors the SharePoint inputs folder into `inputs/` before a run. Standalone (must not import `config`), app-only Graph, fail-soft.
 - `src/config.py` — paths, env, prompt loading; re-exposes tunables from `inputs/tuning.xlsx`.
 - `src/tunables.py` — loader for `inputs/tuning.xlsx`.
 - `src/query_planner.py` — reads both Excels, emits list of query plans.
@@ -80,7 +100,8 @@ stories never touch the daily candidate pool.
 - SQLite + sqlite3 stdlib (no ORM)
 - Slack Incoming Webhook (modern, provisioned via a Slack App — not the legacy custom integration) for delivery; the digest posts with `unfurl_links/unfurl_media=false` so links don't render as preview cards
 - anthropic SDK for the Claude ranking call (optional — `ANTHROPIC_API_KEY`; falls back to Perplexity when unset)
-- python-dotenv for config; tenacity for retries; msal/azure pieces NOT yet wired (SharePoint migration is paused)
+- python-dotenv for config; tenacity for retries
+- Microsoft Graph (app-only client credentials, `Sites.Selected`) for the SharePoint input sync — plain `httpx`, no `msal` dependency
 
 ## What "done" looks like for v1
 Running `python src/main.py` end-to-end:
@@ -93,15 +114,16 @@ Running `python src/main.py` end-to-end:
 - Costs under $3/run
 
 ## What to defer to v2
-- SharePoint sync for inputs (paused; needs Azure admin access)
 - n8n integration
 
 ## Admin UI
-All inputs are editable from a web admin panel (Next.js app in `admin/`, deployed
-on Vercel — see `admin/README.md`): Keywords, Sources, Tuning, Prompts, and the
-Content corpus. Each save serializes back to the same `inputs/*.xlsx` / `prompts/*.md`
-files and commits them to this repo via the GitHub API — the xlsx files remain the
-single source of truth; the UI is just an editor over them.
+A small Next.js app in `admin/`, deployed on Vercel (see `admin/README.md`). It
+edits **`prompts/` only** — the LLM prompt markdown — saving via the GitHub API,
+which means prompt changes apply on the next deploy.
+
+It used to edit Keywords / Sources / Tuning / Portfolio / Content too. Those
+pages are gone: SharePoint owns `inputs/` now and the sync would overwrite
+anything the UI wrote there.
 
 ## Editing the agent's behavior
 For "I want to change X, where do I edit it?", see `docs/EDITING.md`.
