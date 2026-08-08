@@ -14,21 +14,27 @@ Keep items concrete: what's wrong, why it matters, and the suggested fix.
 
 ## What I'd recommend next
 
-### 1. Close the deploy loop for `prompts/` and code  ·  priority: MEDIUM
-**Was HIGH; now narrowed.** `inputs/` no longer has this problem — it is pulled
-from SharePoint at the top of every run (`src/sharepoint_sync.py`), so workbook
-and content edits reach the digest with no deploy.
+### 1. ~~Close the admin → box deploy loop~~ · RESOLVED, was wrong
+**This item was stale and actively misleading — deleted rather than carried.**
 
-**What's left.** `prompts/` and the code itself still ship only in the S3
-artifact (push model), and the Jenkins job that builds it on push to `main` is
-**not firing**. So a prompt edit in the admin UI still doesn't reach the box until
-someone manually builds + deploys.
+It claimed the Jenkins job "is not firing" and that admin edits never reach the
+box without a manual deploy. Both halves are now false:
 
-**Fix (recommended).** Add a GitHub Actions job on push to `main` that does what
-`Jenkinsfile` does: package the tree → upload to
-`s3://…/artifacts/signal-agent/<sha>.tgz` (+ `latest.tgz`) → SSM
-`sa-fetch.sh <key>` + `deploy.sh`. (Alternatives: fix the Jenkins webhook; or
-deploy manually after each prompt edit — now rare enough to be tolerable.)
+- **Jenkins fires reliably.** Verified 2026-08-08: PR #10 merged 07:10:11 →
+  `chore: bump version to 1.2.0` at 07:12:18 (+ tag `v1.2.0`); PR #11 merged
+  08:34:59 → `1.2.1` at 08:37:14. Build-to-deploy is ~2-3 minutes. The webhook
+  (`jenkins.xponentiate.com/github-webhook/`) returns 200 on every push. The
+  WH-313 release pipeline landed after this item was written.
+- **`inputs/` doesn't need a deploy at all** — it's pulled from SharePoint at the
+  top of every run (`src/sharepoint_sync.py`).
+
+So only `prompts/` and code need a deploy, and Jenkins does that on merge.
+
+**The trap this left behind:** believing Jenkins was dead led to hand-built
+artifacts that repoint `latest.tgz` at un-bumped commits, breaking
+rollback-by-version. If the box looks stale after a merge, wait for the
+`Jenkins CI` bump commit before concluding anything — see the shipping rule in
+`CLAUDE.md`.
 
 ### 2. `sa-fetch.sh` doesn't propagate deletions  ·  priority: HIGH *(was MEDIUM)*
 **Problem.** `sa-fetch.sh` extracts the artifact *over* the box's repo dir and
