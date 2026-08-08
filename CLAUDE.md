@@ -82,7 +82,7 @@ needs a deploy. See `docs/EDITING.md`.
 - `src/main.py` — orchestrator (this is what the systemd timers trigger). `--geo` selects the sweep + target channel; `ranker.filter_by_geo` routes stories; `compute_post_at(spec, tz=...)` resolves 08:00 in each geo's timezone.
 
 ## Key constraints
-- Total Perplexity calls per day must stay under 60 (enforced). The ranker no longer counts against this — it runs on Claude — so the budget is fetch-only (~51 plans at a 7-day Track B rotation).
+- Total Perplexity calls per day must stay under 60 (enforced). The ranker runs on Claude when `ANTHROPIC_API_KEY` is set, so the budget is then fetch-only (~51 plans at a 7-day Track B rotation). With no key it falls back to Perplexity `sonar-reasoning-pro` and costs one more call per run — budget for 52, not 51. (This was silently the case in production until Aug 2026: `main.py` passed its fetch client to `rank_stories()`, which skipped vendor selection entirely. See `ranker._build_ranker_client`.)
 - Must NOT repeat stories sent in the last 30 days (URL filter + cross-day embedding similarity check; window configurable via `dedup_window_days` in `inputs/tuning.xlsx`).
 - Perplexity budget (`max_perplexity_calls_per_day`) is enforced PER GEO RUN — the India and US runs each get their own daily count (per-`(date, geo)` log file), so same-day runs don't starve each other.
 - Idempotency + "already sent today" is PER CHANNEL (`has_sent_digest_for_date(..., slack_channel=...)`) — India shipping doesn't suppress US.
