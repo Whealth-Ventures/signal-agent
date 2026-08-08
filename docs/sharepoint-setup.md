@@ -228,6 +228,48 @@ save, re-run the sync, and confirm the change is in your local copy.
 
 ---
 
+## Live configuration (as deployed)
+
+| | |
+|---|---|
+| Site | `2070health.sharepoint.com:/sites/SignalAgent` |
+| Folder | `inputs` (in the default *Documents* library) |
+| App registration | `signal-agent-sharepoint` |
+| Graph permission | `Sites.Selected`, role **`read`**, that one site only |
+| Credentials | AWS Secrets Manager `signal-agent/prod/agent-env`, 5 `SHAREPOINT_*` keys |
+| Files mirrored | 63 |
+
+### The grant is read-only — deliberately
+
+The app can only **read**. Nothing in this repo, and no agent operating it, can
+write to SharePoint. Updating an input is always a human action in the browser.
+
+That's the right default (the agent has no business editing its own inputs), but
+it means **a file that exists only in git cannot be pushed to SharePoint by
+tooling** — someone has to upload it. If that ever becomes a real bottleneck, the
+same `scripts/grant_sharepoint_access.py` call with `roles: ["write"]` would
+change it; don't do that casually.
+
+### Known drift: `voices.xlsx` has 34 publication rows, git had 48
+
+Commit `37c4108` added 14 India publications (Entrackr, Medical Dialogues,
+The Ken — Healthcare, PIB Press Releases, Fortune India and 9 others) to
+`inputs/voices.xlsx` in git. The copy uploaded to SharePoint predates that
+commit, so it carries 34 publication rows rather than 48.
+
+This was **flagged and consciously accepted** on 2026-08-08 — SharePoint wins, so
+those 14 sources are no longer swept. The 48-row workbook is still recoverable
+from git history if that decision is revisited:
+
+```bash
+git show 37c4108:inputs/voices.xlsx > voices.xlsx   # then upload to SharePoint
+```
+
+This is the general hazard of the cutover, not a one-off: **any input change that
+lands in git from now on is invisible to the running agent.** `inputs/` is
+gitignored, so this shouldn't recur — but anyone working from a pre-cutover
+branch could reintroduce it.
+
 ## Rotating the secret later
 
 Repeat **step 2 only** — new secret, copy the `Value`, update `.env` and Secrets

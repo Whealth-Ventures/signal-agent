@@ -5,10 +5,36 @@ Before starting new work, **read `FEEDBACK.md`** (repo root) and address its ope
 items first. When you fix one:
 1. Remove it from `FEEDBACK.md`.
 2. Record what changed, in plain language, in `RELEASE_NOTES.md`.
-3. Push the fixes.
+3. Ship it — via a PR, see below.
 
 `FEEDBACK.md` is the backlog (what's broken / recommended next); `RELEASE_NOTES.md`
 is the record of what's been shipped. Fixed things move from the first to the second.
+
+## How to ship — PR only, never a direct push
+`main` is branch-protected. `git push origin main` is rejected with
+`GH013: Repository rule violations`. Every change goes through a PR whose
+**title** begins with `[major]`, `[minor]` or `[patch]` — a required status check
+enforces it (`.github/workflows/pr-title-bump.yml`), and Jenkins reads that
+marker to pick the semver bump.
+
+```bash
+git checkout -b my-change
+gh pr create --title "[patch] what this does" --body "..."
+gh pr merge <n> --squash --delete-branch
+```
+
+**Then stop — do NOT deploy by hand.** Jenkins builds on merge (GitHub webhook →
+`jenkins.xponentiate.com`), runs the tests, bumps `VERSION`, tags `vX.Y.Z`,
+uploads the artifact and deploys to the box over SSM. It takes **2–3 minutes**;
+checking the box sooner than that and concluding "Jenkins didn't fire" is a
+mistake that has been made — watch for the `chore: bump version to X [skip ci]`
+commit from `Jenkins CI` on `main` instead.
+
+A manual artifact build fights this: it repoints `latest.tgz` at a commit that
+carries no version bump, so a replacement instance boots unversioned and
+rollback-by-version (`scripts/resolve-release-artifact.sh`) can't resolve it.
+Only deploy by hand when Jenkins is genuinely broken — and confirm that from the
+absence of a bump commit, not from the box being stale 30 seconds after a merge.
 
 ## What this is
 A daily healthcare news digest agent for a VC firm (W Health Ventures / 2070 Health).
