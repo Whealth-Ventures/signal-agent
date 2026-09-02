@@ -88,7 +88,74 @@ The same blind spot applies to the SharePoint sync — it fails soft by design, 
 a stale-inputs run also looks healthy. `WARN: sharepoint sync failed` is in the
 log but nothing surfaces it.
 
-### 5. Remove the dead feedback infrastructure  ·  priority: LOW
+### 5. Every story tagged [GLOBAL] in both daily digests  ·  priority: HIGH  ·  target: 1 September 2026 release
+**Problem.** Since at least 29–30 Aug 2026, every story in both the India and US
+digests renders as `[GLOBAL]`, and digests are short (~7 stories vs the 15–25
+target), heavy on RSS sources (STAT+).
+
+**Diagnosis so far (code trace, box not yet checked).** Geo is not decided
+per-story: it's inherited from the fetch plan (`main.py` stamps
+`raw["geo"] = plan.geography` on each Perplexity signal), majority-voted per
+cluster (`scorer.pick_geo`), and RSS signals carry **no geo** → `None` →
+rendered `[GLOBAL]` (`slack_client._GEO_TAG`) and routed to BOTH channels
+(`ranker.filter_by_geo` keeps `None`). So an all-GLOBAL digest means no
+Perplexity-derived signals survived — RSS-only pipeline. Almost certainly a
+recurrence of item #4's failure mode (Perplexity `insufficient_quota` 401s,
+1–8 Aug) — which is also why nobody was alerted.
+
+**CONFIRMED on the box, 31 Aug 2026 (read-only via SSM, i-0803d6edfc54c1bb0):**
+- Every Perplexity call returns **401 `insufficient_quota`** ("exceeded your
+  current quota… check plan and billing") — India, US, and sector runs alike.
+- **Last successful Perplexity signal: 21 Aug 2026 11:52 UTC.** Zero since
+  22 Aug — 10 days of silent RSS-only digests. Recent stories are ~85–100%
+  `geo=NULL` → rendered `[GLOBAL]`, sent to both channels.
+- Exact repeat of item #4's outage (31 Jul–7 Aug gap in the same table; quota
+  topped up 8 Aug, burned through again in 14 days at 100–220 signals/day).
+- **Bonus finding:** the SharePoint sync failed on the 31 Aug run too —
+  `FileNotFoundError` renaming
+  `inputs/content/articles_blog/…nivaan.md.tmp` → `.md` — so inputs are also
+  stale. Separate bug in `sharepoint_sync.py`'s tmp-rename step; investigate
+  alongside.
+
+**Fix.** Top up / fix billing on the Perplexity account (the account is
+burning its quota in ~2 weeks — consider a bigger plan or auto-recharge), then
+ship item #4's visibility fix in the same release so the next silent
+degradation can't run for 10 days unnoticed. Look at the sharepoint tmp-rename
+error too.
+
+**RESOLVED 1 Sept 2026 (Perplexity half):** payment restored the account
+(key unchanged — Perplexity reports a suspended account as `invalid_api_key`).
+Verified by a `[TEST]` India run: 82 perplexity signals, correct [IND]/[GLOBAL]
+tags, posted to the channel. **BUT the same test exposed item #9 — the
+Anthropic org is disabled too**, so the run shipped with the score-based
+fallback (no tiers, junk stories slip in). Geo fixed; ranking still degraded.
+
+### 9. Anthropic organization disabled — ranker (and 1 Sept headline rewrite) dead  ·  priority: HIGH
+**Problem.** Every Claude call since at least 1 Sept returns
+`organization_on_hold`: "This organization has been disabled. An organization
+admin can appeal at https://console.anthropic.com/appeal"
+(`data/logs/anthropic_2026-09-01.jsonl`, both the 02:21 UTC scheduled run and
+the 06:04 UTC test run). The ranker silently drops to the score-based fallback
+— digest ships untier'd, and the new headline-rewrite step will no-op the same
+way. `ranker_provider=anthropic`, model `claude-sonnet-4-5`, key present — the
+account itself is the blocker, only an org admin can resolve it (billing or
+appeal at console.anthropic.com).
+
+### 10. SharePoint sync Monday race (`.tmp` rename FileNotFoundError)  ·  priority: LOW  ·  DEFERRED to next sector-agent work
+**Root cause (confirmed 1 Sept 2026).** The India daily and sector timers both
+fire Mon 02:20 UTC; both run `sharepoint_sync.py` into the same `inputs/`, and
+both write the same `.tmp` path per file — the loser's `os.replace` hits
+`FileNotFoundError` (failed on every Monday in Aug 2026; victim alternates).
+Impact is mild: the loser falls back to last-known-good inputs and the winner
+completes the mirror, so inputs stay fresh. Interleaved writes to the same
+`.tmp` are a latent corruption risk.
+
+**Scoped fix (not written):** blocking `fcntl.flock` on `inputs/.sync.lock`
+around `sync()` — ~6 lines, stdlib, `[patch]`. Deliberately deferred: pick up
+alongside any sector-agent work. Only the India-daily/sector pair collides;
+the US run (11:50 UTC) never does.
+
+### 7. Remove the dead feedback infrastructure  ·  priority: LOW
 **Problem.** The Slack-reaction feedback feature was removed from the code, but its
 **Terraform still provisions live AWS resources**: the S3 "feedback" bucket and its
 wiring (`infra/s3.tf`, `ssm.tf`, `locals.tf`, `ec2.tf`, `Jenkinsfile`).
@@ -97,6 +164,6 @@ wiring (`infra/s3.tf`, `ssm.tf`, `locals.tf`, `ec2.tf`, `Jenkinsfile`).
 truly unused. Note: the same bucket is currently also used for nightly state
 backups (`run-digest.sh`) — keep a bucket for that, or repoint the backup first.
 
-### 6. `RELEASE_NOTES.md` history mentions the removed Suggestions feature  ·  priority: LOW
+### 8. `RELEASE_NOTES.md` history mentions the removed Suggestions feature  ·  priority: LOW
 The v1.2.0 notes still advertise the Suggestions/feedback loop. Left as historical
 record; trim or annotate if it confuses readers.
