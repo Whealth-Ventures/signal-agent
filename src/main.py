@@ -22,6 +22,7 @@ import chromadb
 import httpx
 
 import config
+import headline_rewriter
 import ranker
 import scorer
 import slack_client
@@ -460,6 +461,7 @@ def run_pipeline(
     dry_run: bool = False,
     test_mode: bool = False,
     geo: str = "both",
+    skip_headline_rewrite: bool = False,
 ) -> PipelineStats:
     start = time.monotonic()
     target = _resolve_geo(geo)
@@ -601,6 +603,24 @@ def run_pipeline(
                 f"      geo={target.geo}: kept {len(ranking.flat)} of {before} "
                 f"stories for #{target.channel_label}"
             )
+
+        # 5c) Headline rewrite: read the winners' articles, sharpen the
+        # one-liners with one more LLM call. Fail-soft — a fetch or LLM
+        # failure keeps the ranker's one-liners and the digest still ships.
+        if not skip_headline_rewrite and ranking.flat:
+            _progress(
+                f"[4b] Headline rewrite: fetching {len(ranking.flat)} "
+                f"articles + 1 LLM call…"
+            )
+            t_hr = time.monotonic()
+            ranking = headline_rewriter.rewrite_headlines(
+                ranking, fallback_client=perplexity_client,
+            )
+            _log({
+                "step": "headline_rewrite_done",
+                "stories": len(ranking.flat),
+                "elapsed_seconds": time.monotonic() - t_hr,
+            })
 
         # 6) Console
         print_digest_to_console(ranking, digest_date)
@@ -760,6 +780,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Skip the auto content-corpus indexing check on startup.")
     p.add_argument("--skip-url-validation", action="store_true",
                    help="Skip HEAD-validating story URLs before email.")
+    p.add_argument("--skip-headline-rewrite", action="store_true",
+                   help="Skip the post-selection article-read headline rewrite "
+                        "(one extra LLM call).")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="Render the digest blocks to disk but don't persist "
@@ -794,6 +817,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_rss=args.skip_rss,
         skip_content_indexing=args.skip_content_index,
         skip_url_validation=args.skip_url_validation,
+        skip_headline_rewrite=args.skip_headline_rewrite,
         dry_run=args.dry_run,
         test_mode=args.test,
         post_at=post_at,

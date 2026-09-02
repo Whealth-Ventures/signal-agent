@@ -97,6 +97,8 @@ The agent sends every candidate story to a reasoning AI (**Claude**, used only o
 
 The one-line headline is newsroom style, max ~120 characters — specific (who, how much, what, outcome), no fluff. (You can shape this by editing `prompts/ranker_system.md` and the examples in the ranker prompt.)
 
+After the final story list is chosen, the agent **reads each winning article** (just those 15–25, not all candidates) and asks the AI once more to sharpen every headline from the article body itself — 5–10 words, opinion pieces attributed to their author. This fixes stories whose source headline is vague. If an article can't be fetched or the AI call fails, the original headline is kept. (Shape this via `prompts/headline_system.md`.)
+
 The agent then assembles the Slack post in a **uniform shape** every day:
 - Every story is prefixed with a geography tag — **[IND]**, **[US]**, or **[GLOBAL]** — so you always know where it applies.
 - The 5 highest-rated stories get pulled into a **"Today's biggest stories"** section at the top. This is a flat highlight list — it is *not* broken out by category.
@@ -138,5 +140,6 @@ For a one-page "where do I edit X?" index, see [`docs/EDITING.md`](docs/EDITING.
 | `python src/main.py --max-plans 3` | Run only the first 3 of ~51 search questions (fast iteration) |
 | `python src/main.py --skip-rss` | Skip the RSS pull (saves ~30s) |
 | `python src/main.py --skip-url-validation` | Skip the link-check before posting |
+| `python src/main.py --skip-headline-rewrite` | Skip the article-read headline polish (one extra AI call) |
 
 If a full run takes much longer than 2–3 minutes, check `data/logs/pipeline_<date>.jsonl` for the bottleneck. Each module also writes its own daily log (e.g., `data/logs/perplexity_<date>.jsonl`) — that's where every API call, every cost, every story considered is recorded.

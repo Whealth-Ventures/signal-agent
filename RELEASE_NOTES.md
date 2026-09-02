@@ -1,5 +1,29 @@
 # Signal Agent — Release Notes
 
+## Headline rewrite — one-liners written from the article body (2026-09-01)
+
+Digest one-liners used to be written by the ranker from the fetched title plus
+a ≤500-char snippet — it never read the article. When the source headline was
+vague ("Care has gone continuous. Operating system hasn't"), the digest line
+was equally opaque.
+
+**Now: a post-selection rewrite pass reads the winning articles.** After
+ranking and geo filtering, `src/headline_rewriter.py` fetches the ~15–25
+stories that actually made the digest, extracts a body excerpt, and makes ONE
+further LLM call (same Claude/Perplexity vendor selection as the ranker) that
+rewrites each one-liner from the article body — 5–10 words, newsroom sentence
+case, attribution for op-eds, no invented facts (prompt:
+`prompts/headline_system.md`).
+
+- **Fail-soft everywhere**: a fetch or LLM failure keeps the ranker's
+  one-liners; the digest never blocks on a rewrite.
+- **Cost**: one extra ranker-class LLM call per geo run (counts against the
+  Perplexity budget only when the ranker is on the Perplexity path).
+- **Audit log**: `data/logs/headlines_<date>.jsonl` records every rewrite.
+- **Opt-out**: `--skip-headline-rewrite`.
+- Verified live on Perplexity `sonar-reasoning-pro` (1 Sept 2026): vague
+  op-ed and mismatched-slug articles all rewritten correctly from body text.
+
 ## v1.5.0 — "SharePoint is the source of truth for inputs" (2026-08-07)
 
 Until now, the agent's inputs lived as files committed into the repo — a copy of

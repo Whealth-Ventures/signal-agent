@@ -206,6 +206,10 @@ RANKER_SYSTEM_PROMPT = _load_prompt("ranker_system")
 # only when a category would otherwise be empty, Tier C dropped.
 MAGNITUDE_RUBRIC = _load_prompt("magnitude_rubric")
 
+# Post-selection headline rewrite (src/headline_rewriter.py): rewrites the
+# digest winners' one-liners from the fetched article body, one LLM call.
+HEADLINE_SYSTEM_PROMPT = _load_prompt("headline_system")
+
 # Sector Agent's single impact-ranking call (see src/sector.py). System prompt
 # sets the "portfolio sector analyst" tone; the rubric defines materiality +
 # impact direction and what's in/out of scope.
