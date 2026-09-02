@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from datetime import date
 from pathlib import Path
 
@@ -159,8 +160,33 @@ class TrackACoverageTest(unittest.TestCase):
 
     def test_each_priority_bucket_represented(self) -> None:
         seen_keys = {p.priority_bucket for p in self.plans}
-        expected = {b.key for b in config.PRIORITY_BUCKETS}
+        # A bucket with no geos is display-only: a legal home for a story, but
+        # deliberately not something we spend Perplexity calls searching for.
+        expected = {b.key for b in config.PRIORITY_BUCKETS if b.geos}
         self.assertSetEqual(seen_keys, expected)
+
+    def test_display_only_bucket_emits_no_plans(self) -> None:
+        """A geos-less bucket must cost zero query plans — that is what makes
+        an 'Other healthcare news' catch-all free to add."""
+        display_only = config.PriorityBucket(
+            key="other_healthcare",
+            display="Other healthcare news",
+            sub_buckets=("(catch-all)",),
+            geos=(),
+        )
+        with mock.patch.object(
+            config, "PRIORITY_BUCKETS",
+            tuple(config.PRIORITY_BUCKETS) + (display_only,),
+        ):
+            plans = [
+                p for p in qp.build_query_plans(today=date(2026, 5, 26))
+                if p.track == "A"
+            ]
+        self.assertEqual(
+            [p.id for p in plans if p.priority_bucket == "other_healthcare"], [],
+        )
+        # And it didn't disturb the real buckets.
+        self.assertEqual(len(plans), len(self.plans))
 
     def test_ai_has_two_variants(self) -> None:
         ai_plans = [p for p in self.plans if p.priority_bucket == "ai_healthcare"]

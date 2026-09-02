@@ -1,5 +1,57 @@
 # Signal Agent — Release Notes
 
+## Better story choice, honest geo tags, and a visible warning when the digest is degraded (2026-09-02)
+
+Answers the 2 Sept feedback on the India digest: too much `[GLOBAL]`, a missing
+Ultrahuman funding story, and an opinion piece filed under Venture & IPO.
+
+### Indian publications are now tagged India, not Global
+An RSS story carried no geography at all, so it came out unclassified, rendered
+as `[GLOBAL]`, and was sent to **both** channels. On 2 Sept that was 105 of 160
+stories. Each publication's own `Geography` from `voices.xlsx` is now stamped on
+every item it produces: on a live sweep, **130 signals became 103 India and 27
+US, with none left unclassified.**
+
+Practical effect: the India digest stops calling Indian news global, and
+US-only publications stop appearing in it. The US digest correspondingly stops
+receiving Indian RSS.
+
+### The best story of the day can no longer be pushed out by a newer, weaker one
+Story ordering put publish time first and relevance score last, so within a
+category a fresher story always beat a stronger one. With only 1–2 slots per
+category, that dropped real news: on 2 Sept an Ultrahuman funding exclusive
+(the day's second-highest scored story, caught by three separate sources) and a
+$22M Series B (the highest scored) both missed the digest, beaten by items
+published a few hours later. Ordering is now magnitude tier, then score, then
+recency.
+
+### "Venture & IPO" is no longer the dumping ground
+A story that the ranker didn't categorise used to land in whichever bucket sat
+first in the sheet, which is Venture & IPO. That is how an opinion piece about
+the American Diabetes Association was published as venture news. The catch-all
+is now an explicit `default_bucket` setting, and a bucket can be marked
+display-only (no geographies) so "Other healthcare news" can exist as an honest
+destination without spending any search budget on it. The ranker can also assign
+it directly, so it no longer has to force non-deal news into a deal category.
+
+### A degraded digest now says so
+When ranking falls back, the post carries a warning line: no magnitude tiers, no
+categories, no written summaries, story choice less reliable than usual.
+Previously this was printed only to the server console, which is how ten days of
+RSS-only digests (22–31 Aug) shipped without anyone noticing. Closes the ranker
+half of `FEEDBACK.md` #4.
+
+### Headline rewrite hardening
+Follow-ups from the review of the previous release. One malformed article URL
+used to abort all 25 article fetches and silently disable the rewrite for the
+whole run (`httpx.InvalidURL` is not an `httpx.HTTPError`). An over-length
+headline was discarded entirely rather than trimmed at a word boundary. The
+headline length cap now follows the same `tuning.xlsx` setting as the rest of the
+digest, the rewrite's cost is included in the run total, and an unparseable
+response is logged with its body so it can be told apart from "the model kept
+every headline".
+
+
 ## Headline rewrite — one-liners written from the article body (2026-09-01)
 
 Digest one-liners used to be written by the ranker from the fetched title plus

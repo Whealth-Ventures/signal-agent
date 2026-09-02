@@ -317,6 +317,102 @@ class TopSummaryTest(unittest.TestCase):
         self.assertEqual(len(top), 1)
         self.assertEqual(top[0].story.id, _mk_story("a").id)
 
+    def test_score_beats_recency_within_a_tier(self) -> None:
+        """Regression, 2 Sept 2026: recency used to be the primary key, so a
+        newer low-scored item displaced the day's best story."""
+        older_better = _mk_story(
+            "ultrahuman", score=0.68, priority_bucket="venture_ipo",
+            published_at=_FIXED_TS - timedelta(hours=6),
+        )
+        newer_worse = _mk_story(
+            "oped", score=0.31, priority_bucket="venture_ipo",
+            published_at=_FIXED_TS,
+        )
+        by_priority = {"venture_ipo": [
+            ranker.RankedStory(story=newer_worse, tier="A", one_liner="x"),
+            ranker.RankedStory(story=older_better, tier="A", one_liner="x"),
+        ]}
+        top = ranker._top_summary(by_priority, [], n=1)
+        self.assertEqual(top[0].story.id, older_better.id)
+
+
+class DefaultBucketTest(unittest.TestCase):
+    """The catch-all must be a deliberate choice, not sheet row order — an
+    unbucketed opinion piece filed under 'Venture & IPO' on 2 Sept 2026."""
+
+    def test_configured_bucket_wins(self) -> None:
+        target = config.PRIORITY_BUCKETS[-1].key
+        self.assertNotEqual(target, config.PRIORITY_BUCKETS[0].key)
+        with mock.patch.object(config, "DEFAULT_BUCKET", target):
+            self.assertEqual(ranker._default_bucket_key(), target)
+
+    def test_unset_falls_back_to_first_bucket(self) -> None:
+        with mock.patch.object(config, "DEFAULT_BUCKET", ""):
+            self.assertEqual(
+                ranker._default_bucket_key(), config.PRIORITY_BUCKETS[0].key,
+            )
+
+    def test_unknown_key_falls_back_rather_than_crashing(self) -> None:
+        with mock.patch.object(config, "DEFAULT_BUCKET", "not_a_bucket"):
+            self.assertEqual(
+                ranker._default_bucket_key(), config.PRIORITY_BUCKETS[0].key,
+            )
+
+    def test_unbucketed_story_lands_in_the_configured_bucket(self) -> None:
+        target = config.PRIORITY_BUCKETS[-1].key
+        story = _mk_story("oped", score=0.4, priority_bucket=None)
+        with mock.patch.object(config, "DEFAULT_BUCKET", target):
+            eff = ranker._effective_bucket(
+                story, {}, ranker._valid_bucket_keys(),
+                ranker._default_bucket_key(),
+            )
+        self.assertEqual(eff, target)
+
+
+class OrderWithinCategoryTest(unittest.TestCase):
+    def test_higher_score_wins_the_bucket_slot(self) -> None:
+        """The Ultrahuman case: per_bucket_max is small, so ordering decides
+        whether the day's best story ships at all."""
+        older_better = _mk_story(
+            "ultrahuman", score=0.68,
+            published_at=_FIXED_TS - timedelta(hours=6),
+        )
+        newer_worse = _mk_story(
+            "smartwalker", score=0.31, published_at=_FIXED_TS,
+        )
+        ordered = ranker._ordered_within_category(
+            [newer_worse, older_better], decisions={},
+        )
+        self.assertEqual(
+            [s.id for s, _t, _ol in ordered],
+            [older_better.id, newer_worse.id],
+        )
+
+    def test_tier_still_outranks_score(self) -> None:
+        low_score_top_tier = _mk_story("s_tier", score=0.20)
+        high_score_low_tier = _mk_story("b_tier", score=0.95)
+        decisions = {
+            low_score_top_tier.id: ("S", "x"),
+            high_score_low_tier.id: ("B", "x"),
+        }
+        ordered = ranker._ordered_within_category(
+            [high_score_low_tier, low_score_top_tier], decisions=decisions,
+        )
+        self.assertEqual(
+            [s.id for s, _t, _ol in ordered],
+            [low_score_top_tier.id, high_score_low_tier.id],
+        )
+
+    def test_recency_breaks_a_score_tie(self) -> None:
+        newer = _mk_story("newer", score=0.50, published_at=_FIXED_TS)
+        older = _mk_story(
+            "older", score=0.50, published_at=_FIXED_TS - timedelta(hours=3),
+        )
+        ordered = ranker._ordered_within_category([older, newer], decisions={})
+        self.assertEqual(
+            [s.id for s, _t, _ol in ordered], [newer.id, older.id],
+        )
+
 
 class RemovePromotedTest(unittest.TestCase):
     def test_drops_promoted_and_removes_empty_categories(self) -> None:

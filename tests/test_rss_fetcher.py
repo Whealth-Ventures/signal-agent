@@ -216,6 +216,52 @@ class FetchFeedTest(unittest.TestCase):
         self.assertEqual(s.summary, "An atom summary.")
         self.assertLess((now - s.published_at).total_seconds(), 60 * 60 * 3)
 
+    def test_publication_geography_is_stamped_on_every_signal(self) -> None:
+        """Without this, an RSS story has geo=NULL, renders [GLOBAL] and is
+        routed to BOTH channels — the 'predominantly global' bug."""
+        now = datetime.now(timezone.utc)
+        body = _rss_body([
+            {"title": "India story", "link": "https://e.com/1",
+             "pubDate": _rss_pubdate(now - timedelta(hours=1))},
+            {"title": "Another", "link": "https://e.com/2",
+             "pubDate": _rss_pubdate(now - timedelta(hours=2))},
+        ])
+        http = _client_with_routes(
+            {"https://feed.example/": httpx.Response(200, text=body)}
+        )
+        signals, _ = rf.fetch_feed(
+            "https://feed.example/", source_name="Entrackr",
+            since=now - timedelta(hours=24), http=http, geography="India",
+        )
+        self.assertEqual(len(signals), 2)
+        self.assertTrue(all(s.raw.get("geo") == "India" for s in signals))
+
+    def test_geography_normalisation(self) -> None:
+        # The sheet's real vocabulary, plus the unknown-cell case.
+        self.assertEqual(rf._norm_signal_geo("India"), "India")
+        self.assertEqual(rf._norm_signal_geo("india"), "India")
+        self.assertEqual(rf._norm_signal_geo("US"), "US")
+        self.assertEqual(rf._norm_signal_geo("Global"), "Global")
+        # Unknown degrades to Global (kept by both channels), never to a drop.
+        self.assertEqual(rf._norm_signal_geo("APAC"), "Global")
+        self.assertEqual(rf._norm_signal_geo(""), "Global")
+
+    def test_no_geography_leaves_geo_unset(self) -> None:
+        """Callers that pass no geography keep the pre-existing behaviour."""
+        now = datetime.now(timezone.utc)
+        body = _rss_body([
+            {"title": "x", "link": "https://e.com/1",
+             "pubDate": _rss_pubdate(now - timedelta(hours=1))},
+        ])
+        http = _client_with_routes(
+            {"https://feed.example/": httpx.Response(200, text=body)}
+        )
+        signals, _ = rf.fetch_feed(
+            "https://feed.example/", source_name="Sample",
+            since=now - timedelta(hours=24), http=http,
+        )
+        self.assertNotIn("geo", signals[0].raw)
+
     def test_bad_xml_returns_empty(self) -> None:
         body = "<not valid xml<"
         http = _client_with_routes({"https://feed.example/": httpx.Response(200, text=body)})

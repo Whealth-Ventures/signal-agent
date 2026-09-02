@@ -71,10 +71,21 @@ def _valid_bucket_keys() -> set[str]:
 
 
 def _default_bucket_key() -> str:
-    """Catch-all for the rare story that has no LLM-assigned bucket AND no
-    Track-A priority bucket (e.g. the ranker omitted it for an RSS/voice item).
-    We force it into the first priority bucket rather than drop it — per the
-    'never drop for lack of a bucket' rule. Logged when it happens."""
+    """Catch-all for a story with no LLM-assigned bucket AND no Track-A
+    priority bucket (e.g. the ranker omitted it for an RSS/voice item). We
+    force it into a bucket rather than drop it — per the 'never drop for lack
+    of a bucket' rule. Logged when it happens.
+
+    Read from the `default_bucket` tunable so the catch-all is a deliberate
+    choice. It used to be `PRIORITY_BUCKETS[0]`, i.e. whichever bucket happened
+    to sit in row 1 of the sheet: that is `venture_ipo`, which is why a STAT
+    opinion piece on the diabetes association shipped under "Venture & IPO" on
+    2 Sept 2026. An unset or unknown value keeps the old first-bucket
+    behaviour, so this is safe before the sheet is updated.
+    """
+    configured = (config.DEFAULT_BUCKET or "").strip()
+    if configured and configured in _valid_bucket_keys():
+        return configured
     return config.PRIORITY_BUCKETS[0].key
 
 
@@ -297,8 +308,21 @@ def _ordered_within_category(
     stories: list[Story],
     decisions: dict[str, tuple[Tier, str]],
 ) -> list[tuple[Story, Tier, str]]:
-    """Sort by tier (S < A < B), then by relevance_score desc. Stories without
-    an LLM decision default to Tier A so they aren't silently dropped."""
+    """Sort by tier (S < A < B), then relevance_score desc, then recency.
+
+    Stories without an LLM decision default to Tier A so they aren't silently
+    dropped.
+
+    Score before recency, deliberately (reverses the earlier recency-primary
+    rule). Signals are already windowed to the last 24h at fetch time, so
+    publish time barely discriminates inside a digest, while relevance_score
+    carries the corpus-similarity and booster signal. With recency primary and
+    every story flattened to Tier A on the degraded path, the digest became a
+    plain recency feed: on 2 Sept 2026 that dropped an Ultrahuman funding
+    exclusive scored 0.68 and a $22M Series B scored 0.72 — the day's top two
+    stories — because lower-scored items published a few hours later took the
+    per-bucket slots. Recency stays as the tiebreak.
+    """
     enriched: list[tuple[Story, Tier, str]] = []
     for st in stories:
         tier, ol = decisions.get(st.id, ("A", _fallback_one_liner(st)))
@@ -306,7 +330,7 @@ def _ordered_within_category(
             continue
         enriched.append((st, tier, ol))
     enriched.sort(key=lambda x: (
-        _TIER_RANK[x[1]], -x[0].published_at.timestamp(), -x[0].relevance_score,
+        _TIER_RANK[x[1]], -x[0].relevance_score, -x[0].published_at.timestamp(),
     ))
     return enriched
 
@@ -363,21 +387,25 @@ def _top_summary(
     n: int,
 ) -> list[RankedStory]:
     """Top n stories across all categories, ranked by (tier, -score). Tiebreak
-    by priority order from config.PRIORITY_BUCKETS, then by story id (deterministic).
-    Excludes "Other" — top_summary is for the headline news; Other is long-tail."""
+    by recency, then priority order from config.PRIORITY_BUCKETS, then story id
+    (deterministic).
+    Excludes "Other" — top_summary is for the headline news; Other is long-tail.
+
+    Score sits ahead of recency for the same reason as
+    _ordered_within_category — see its docstring."""
     bucket_order: dict[str, int] = {
         b.key: i for i, b in enumerate(config.PRIORITY_BUCKETS)
     }
-    pool: list[tuple[int, float, int, float, str, RankedStory]] = []
+    pool: list[tuple[int, float, float, int, str, RankedStory]] = []
     for key, items in by_priority.items():
         order = bucket_order.get(key, 999)
         for r in items:
             pool.append((
                 _TIER_RANK[r.tier],
-                -r.story.published_at.timestamp(),   # recency primary (post-#5)
+                -r.story.relevance_score,            # magnitude primary
+                -r.story.published_at.timestamp(),   # then recency
                 order,
-                -r.story.relevance_score,            # deep deterministic tiebreak
-                r.story.id,
+                r.story.id,                          # deterministic tiebreak
                 r,
             ))
     pool.sort(key=lambda x: x[:5])

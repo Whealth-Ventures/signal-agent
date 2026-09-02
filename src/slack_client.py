@@ -239,6 +239,7 @@ def build_blocks(
             "_No stories made the cut today. The agent ran without errors but "
             "had no qualifying signals._"
         ))
+        _append_degraded_notice(blocks, ranking)
         return blocks
 
     if ranking.top_summary:
@@ -278,7 +279,37 @@ def build_blocks(
     while len(blocks) > MAX_BLOCKS and blocks:
         blocks.pop()
 
+    _append_degraded_notice(blocks, ranking)
     return blocks
+
+
+def _append_degraded_notice(
+    blocks: list[dict], ranking: RankingResult,
+) -> None:
+    """Say so in the post when the digest was built without the LLM ranker.
+
+    A degraded digest used to look exactly like a healthy one: the console
+    printed a fallback warning, Slack showed nothing. That is how ten days of
+    RSS-only digests (22-31 Aug 2026) and five days of silently truncated
+    ranker responses shipped unnoticed. Appended after the block-ceiling trim
+    so it can't be the block that gets dropped.
+    """
+    if not ranking.used_fallback:
+        return
+    # Trim one block first if we're at the ceiling, so the notice always lands.
+    if len(blocks) >= MAX_BLOCKS:
+        blocks.pop()
+    blocks.append({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": (
+                ":warning: _Ranking ran in fallback mode: no magnitude tiers, "
+                "categories, or written summaries. Story choice and grouping "
+                "are less reliable than usual._"
+            ),
+        }],
+    })
 
 
 # --- URL validation flow ----------------------------------------------
