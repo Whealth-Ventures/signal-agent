@@ -214,11 +214,33 @@ async def _discover_with_body_async(
     return None, "failed", None
 
 
+def _norm_signal_geo(geography: str) -> str:
+    """Publication `Geography` cell → the story-geo vocabulary.
+
+    The Newsletters & Publications tab uses exactly 'India', 'US' and 'Global'.
+    Anything unrecognised becomes 'Global', which is the pre-existing routing
+    for an unclassified item (kept by both channels) — so a stray cell mislabels
+    a tag at worst, and never drops a story from a digest.
+    """
+    g = (geography or "").strip().lower()
+    if g == "india":
+        return "India"
+    if g == "us":
+        return "US"
+    return "Global"
+
+
 def _parse_feed_body(
-    body: str, *, source_name: str, since: datetime,
+    body: str, *, source_name: str, since: datetime, geography: str = "",
 ) -> tuple[list[Signal], int]:
     """Parse a feed body into Signals filtered to `since`. Returns
-    (signals, items_total). Pure function — no HTTP."""
+    (signals, items_total). Pure function — no HTTP.
+
+    `geography` is the publication's own geo from voices.xlsx. It is stamped
+    onto `raw["geo"]` so `scorer.pick_geo` can resolve an RSS-only cluster:
+    without it every RSS story is geo=NULL, renders as [GLOBAL], and is routed
+    to BOTH channels. Left empty (the test path) the old behaviour stands.
+    """
     parsed = feedparser.parse(body)
     items_total = len(parsed.entries)
     signals: list[Signal] = []
@@ -233,6 +255,9 @@ def _parse_feed_body(
         if not title or not link:
             continue
         summary = (entry.get("summary") or "").strip()[:SUMMARY_MAX_CHARS]
+        raw = dict(entry) if hasattr(entry, "keys") else {}
+        if geography:
+            raw["geo"] = _norm_signal_geo(geography)
         signals.append(Signal(
             source=source_name,
             source_type="rss",
@@ -240,7 +265,7 @@ def _parse_feed_body(
             url=link,
             published_at=pub,
             summary=summary,
-            raw=dict(entry) if hasattr(entry, "keys") else {},
+            raw=raw,
         ))
     return signals, items_total
 
@@ -251,6 +276,7 @@ def fetch_feed(
     source_name: str,
     since: datetime,
     http: httpx.Client,
+    geography: str = "",
 ) -> tuple[list[Signal], FeedFetchInfo]:
     t0 = time.monotonic()
     body, status, transport_err = _safe_get(http, feed_url)
@@ -261,7 +287,9 @@ def fetch_feed(
             latency_ms=int((time.monotonic() - t0) * 1000),
             error=transport_err or f"HTTP {status}",
         )
-    signals, items_total = _parse_feed_body(body, source_name=source_name, since=since)
+    signals, items_total = _parse_feed_body(
+        body, source_name=source_name, since=since, geography=geography,
+    )
     return signals, FeedFetchInfo(
         feed_url=feed_url, discovery="", status=status,
         items_total=items_total, items_within_window=len(signals),
@@ -277,6 +305,7 @@ async def _fetch_feed_async(
     since: datetime,
     http: httpx.AsyncClient,
     body: str | None = None,
+    geography: str = "",
 ) -> tuple[list[Signal], FeedFetchInfo]:
     """Async variant. If `body` is provided (already downloaded during
     discovery) we parse it directly instead of re-fetching."""
@@ -293,7 +322,9 @@ async def _fetch_feed_async(
     else:
         body_str = body
         status = 200
-    signals, items_total = _parse_feed_body(body_str, source_name=source_name, since=since)
+    signals, items_total = _parse_feed_body(
+        body_str, source_name=source_name, since=since, geography=geography,
+    )
     return signals, FeedFetchInfo(
         feed_url=feed_url, discovery="", status=status,
         items_total=items_total, items_within_window=len(signals),
@@ -384,7 +415,7 @@ def _fetch_all_newsletters_sync(
         if body is not None:
             # Heuristic GET already returned a parseable feed — skip re-fetching.
             signals, items_total = _parse_feed_body(
-                body, source_name=nl.name, since=since,
+                body, source_name=nl.name, since=since, geography=nl.geography,
             )
             info = FeedFetchInfo(
                 feed_url=feed_url, discovery=discovery, status=200,
@@ -395,6 +426,7 @@ def _fetch_all_newsletters_sync(
         else:
             signals, info = fetch_feed(
                 feed_url, source_name=nl.name, since=since, http=http,
+                geography=nl.geography,
             )
         all_signals.extend(signals)
         _log_record({
@@ -452,7 +484,7 @@ async def _fetch_all_newsletters_async(
                     return []
                 signals, info = await _fetch_feed_async(
                     feed_url, source_name=nl.name, since=since,
-                    http=http, body=body,
+                    http=http, body=body, geography=nl.geography,
                 )
                 _log_record({
                     "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),

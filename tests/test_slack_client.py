@@ -69,6 +69,7 @@ def _mk_ranking(
     top_summary: list[RankedStory] | None = None,
     by_priority: dict[str, list[RankedStory]] | None = None,
     other: list[RankedStory] | None = None,
+    used_fallback: bool = False,
 ) -> RankingResult:
     top = top_summary or []
     bp = by_priority or {}
@@ -81,7 +82,7 @@ def _mk_ranking(
     return RankingResult(
         top_summary=top, by_priority=bp, other=oth,
         candidates_count=len(flat),
-        used_fallback=False, cost_usd=0.0, elapsed_seconds=0.1,
+        used_fallback=used_fallback, cost_usd=0.0, elapsed_seconds=0.1,
         flat=tuple(flat),
     )
 
@@ -162,6 +163,41 @@ class BuildBlocksTest(unittest.TestCase):
         flat = json.dumps(blocks)
         self.assertIn("Wed, 27 May 2026", flat)
         self.assertIn("2 stories", flat)
+
+    def test_fallback_run_carries_a_visible_notice(self) -> None:
+        """A degraded digest used to be indistinguishable from a healthy one in
+        Slack — that is how 10 days of RSS-only digests shipped unnoticed."""
+        ranking = _mk_ranking(
+            top_summary=[_mk_ranked("a", geo="India")], used_fallback=True,
+        )
+        blocks = slack_client.build_blocks(ranking, digest_date="2026-09-02")
+        flat = json.dumps(blocks)
+        self.assertIn("fallback mode", flat)
+        self.assertEqual(blocks[-1]["type"], "context")
+
+    def test_healthy_run_carries_no_notice(self) -> None:
+        ranking = _mk_ranking(
+            top_summary=[_mk_ranked("a", geo="India")], used_fallback=False,
+        )
+        flat = json.dumps(slack_client.build_blocks(ranking, digest_date="x"))
+        self.assertNotIn("fallback mode", flat)
+
+    def test_empty_digest_still_reports_fallback(self) -> None:
+        ranking = _mk_ranking(used_fallback=True)
+        flat = json.dumps(slack_client.build_blocks(ranking, digest_date="x"))
+        self.assertIn("fallback mode", flat)
+
+    def test_notice_survives_the_block_ceiling(self) -> None:
+        """It's appended after the ceiling trim, so it can't be the block that
+        gets dropped."""
+        big = {
+            b.key: [_mk_ranked(f"{b.key}{i}", geo="India") for i in range(12)]
+            for b in config.PRIORITY_BUCKETS
+        }
+        ranking = _mk_ranking(by_priority=big, used_fallback=True)
+        blocks = slack_client.build_blocks(ranking, digest_date="x")
+        self.assertLessEqual(len(blocks), slack_client.MAX_BLOCKS)
+        self.assertIn("fallback mode", json.dumps(blocks[-1]))
 
     def test_top_summary_section_present(self) -> None:
         ranking = _mk_ranking(

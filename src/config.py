@@ -143,6 +143,12 @@ PERPLEXITY_RECENCY = _t.get_str("perplexity_recency")
 # "perplexity" keeps it on sonar-reasoning-pro. Either way, an unset
 # ANTHROPIC_API_KEY forces the Perplexity fallback (see ranker.py).
 RANKER_PROVIDER = _t.get_str("ranker_provider")
+
+# Which bucket receives a story that has neither an LLM-assigned bucket nor a
+# Track-A one. Empty (the default) falls back to the FIRST priority bucket,
+# which is how an opinion piece ended up filed under "Venture & IPO" on
+# 2 Sept 2026. Point this at a display-only catch-all instead.
+DEFAULT_BUCKET = _t.get_str("default_bucket", "")
 ANTHROPIC_MODEL_RANK = _t.get_str("anthropic_model_rank")
 ANTHROPIC_MAX_TOKENS_RANK = _t.get_int("anthropic_max_tokens_rank", 4096)
 

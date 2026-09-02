@@ -94,8 +94,8 @@ class Tunables:
                 f"Tuning setting '{name}' must be a number; got {v!r}."
             ) from e
 
-    def get_str(self, name: str) -> str:
-        v = self.get(name)
+    def get_str(self, name: str, default: Any = _MISSING) -> str:
+        v = self.get(name, default)
         if v is None:
             raise RuntimeError(f"Tuning setting '{name}' must be a non-empty string.")
         return str(v).strip()
@@ -217,11 +217,12 @@ def _load_priority_buckets(ws) -> tuple[PriorityBucket, ...]:
                 f"sub_buckets is empty. Use semicolons to separate multiple "
                 f"sub-buckets."
             )
-        if not geos:
-            raise RuntimeError(
-                f"tuning.xlsx 'Priority Buckets' row {row_idx} ({key}): "
-                f"geos is empty. Allowed: India, US, Global (semicolon-separated)."
-            )
+        # An empty `geos` means a DISPLAY-ONLY bucket: it is a legal home for a
+        # story (the ranker may assign it, and `default_bucket` may point at
+        # it), but query_planner emits no Track-A plans for it, so it costs no
+        # Perplexity calls. That is what lets "Other healthcare news" exist as
+        # an honest destination for stories that fit none of the deal buckets,
+        # instead of them defaulting into whichever bucket happens to be first.
         for g in geos:
             if g not in ("India", "US", "Global"):
                 raise RuntimeError(

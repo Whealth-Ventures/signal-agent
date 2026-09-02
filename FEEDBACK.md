@@ -71,22 +71,21 @@ page, the gap is more visible.
 **Fix.** Add the two files to `app/api/prompts/route.ts` and the page's textarea
 list — they're plain markdown, same as the existing two.
 
-### 4. A degraded digest looks exactly like a healthy one  ·  priority: HIGH
-**Problem.** Perplexity's account hit `insufficient_quota` and returned 401 on
-**every** call for at least 8 days (2026-08-01 → 08-08, 28/28 calls failing daily).
-Nobody noticed, because the digest kept posting on schedule — built from RSS
-alone, with the ranker degraded to the score-based fallback (no magnitude tiers,
-no LLM one-liners, no LLM bucket assignment). The Slack post carried no
-indication anything was wrong.
+### 4. A stale-inputs run still looks exactly like a healthy one  ·  priority: MEDIUM  *(ranker half shipped 2026-09-02)*
+**The ranker half is fixed** — a fallback run now carries a warning line in the
+Slack post (see `RELEASE_NOTES.md`). What remains is the SharePoint sync: it
+fails soft by design, so a run on stale inputs looks completely healthy.
+`WARN: sharepoint sync failed` goes to the journal and nothing surfaces it.
 
-**Fix.** Make the failure visible. Options, cheapest first: (a) a line in the
-Slack post when `perplexity_calls == 0` or `used_fallback` is true; (b) a
-non-zero exit from `run-digest.sh` on a fully-failed sweep, so the systemd unit
-records a failure; (c) alert on the 401 rate in the perplexity log.
+**Fix.** The sync runs as its own process before `main.py`, so it can't reach
+the Block Kit builder. Cheapest route: have `sharepoint_sync.py` touch a
+sentinel file (e.g. `inputs/.sync_failed`) on failure and delete it on success,
+then have `main.py` read that and add a line to the post the same way
+`used_fallback` now does.
 
-The same blind spot applies to the SharePoint sync — it fails soft by design, so
-a stale-inputs run also looks healthy. `WARN: sharepoint sync failed` is in the
-log but nothing surfaces it.
+Still open from the original item: (b) a non-zero exit from `run-digest.sh` on a
+fully-failed sweep so the systemd unit records a failure, and (c) an alert on the
+401 rate in the perplexity log.
 
 ### 5. Every story tagged [GLOBAL] in both daily digests  ·  priority: HIGH  ·  target: 1 September 2026 release
 **Problem.** Since at least 29–30 Aug 2026, every story in both the India and US
@@ -140,6 +139,29 @@ the 06:04 UTC test run). The ranker silently drops to the score-based fallback
 way. `ranker_provider=anthropic`, model `claude-sonnet-4-5`, key present — the
 account itself is the blocker, only an org admin can resolve it (billing or
 appeal at console.anthropic.com).
+
+### 11. Claude ranking is capped at half the tokens it needs  ·  priority: HIGH  ·  BLOCKS reverting to `ranker_provider=anthropic`
+**Problem.** `anthropic_max_tokens_rank` is **4096**; the ranking response needs
+about **7000**. So the JSON is truncated mid-object, `_extract_json` returns
+`None`, and `parse_ranked` reports `parse_fallback=True` — which surfaces as
+`used_fallback=True` with an **empty `call_error`**, indistinguishable in the
+console from a vendor outage.
+
+**Evidence (box call logs, read 2026-09-02).** Anthropic rank calls 8–13 Aug:
+`completion_tokens=4096` on **10 of 11 calls**, i.e. pinned at the cap. Perplexity
+`sonar-reasoning-pro` on the same prompt: 5,693–7,651 completion tokens across
+22 runs, **0 fallbacks**. So Claude ranking has never actually worked — it
+silently degraded from the day PR #11 switched to it (8 Aug), and from ~14 Aug
+the org/billing failures (#9) masked it entirely.
+
+**Fix.** Set `anthropic_max_tokens_rank` to **8192** in `tuning.xlsx` Settings —
+spreadsheet only, no deploy. **Do this before anyone flips `ranker_provider`
+back to `anthropic`**, or the 2 Sept digest comes straight back. Verify by
+checking the next Claude rank call logs `completion_tokens` below the cap.
+
+Worth doing alongside: have the ranker log a distinct warning when
+`completion_tokens >= max_tokens`, so truncation can never again look like a
+vendor error.
 
 ### 10. SharePoint sync Monday race (`.tmp` rename FileNotFoundError)  ·  priority: LOW  ·  DEFERRED to next sector-agent work
 **Root cause (confirmed 1 Sept 2026).** The India daily and sector timers both

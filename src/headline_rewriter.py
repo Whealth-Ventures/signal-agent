@@ -38,7 +38,9 @@ from ranker import (
 FETCH_CONCURRENCY = 10
 FETCH_TIMEOUT_S = 12.0
 EXCERPT_CHARS = 2000          # per-article excerpt handed to the LLM
-MAX_HEADLINE_CHARS = 90       # hard cap; longer LLM output is discarded
+# Same tunable the ranker's one-liners obey, so a tuning.xlsx change to the
+# headline length reaches the whole digest and not just part of it.
+MAX_HEADLINE_CHARS = config.ONE_LINER_MAX_CHARS
 _UA = "SignalAgent/0.1"
 
 _TAG_BLOCK_RE = re.compile(
@@ -90,7 +92,11 @@ async def _fetch_one(url: str, http: httpx.AsyncClient, sem: asyncio.Semaphore) 
             if r.status_code >= 400:
                 return ""
             return extract_excerpt(r.text)
-        except httpx.HTTPError:
+        except Exception:
+            # Deliberately broad: httpx.InvalidURL is NOT an httpx.HTTPError
+            # (its MRO is InvalidURL → Exception), and a digest URL is only as
+            # clean as the source that published it. One bad URL must cost its
+            # own excerpt, never the whole run's.
             return ""
 
 
@@ -101,23 +107,47 @@ async def _fetch_excerpts(urls: list[str]) -> dict[str, str]:
         follow_redirects=True,
         headers={"User-Agent": _UA},
     ) as http:
-        results = await asyncio.gather(*(_fetch_one(u, http, sem) for u in urls))
-    return dict(zip(urls, results))
+        # return_exceptions so a straggler that escapes _fetch_one's guard
+        # degrades to one empty excerpt instead of cancelling its siblings.
+        results = await asyncio.gather(
+            *(_fetch_one(u, http, sem) for u in urls), return_exceptions=True,
+        )
+    return {
+        u: (r if isinstance(r, str) else "")
+        for u, r in zip(urls, results)
+    }
 
 
 def _clean_headline(v: object) -> str | None:
+    """Normalise one LLM headline, or None if it's unusable.
+
+    An over-length headline is trimmed at a word boundary rather than dropped:
+    a sharp headline a few chars long beats the vague ranker one-liner this
+    step exists to replace. Matches how the ranker treats its own one-liners.
+    """
     if not isinstance(v, str):
         return None
     s = _WS_RE.sub(" ", v).strip().strip('"')
-    if not s or len(s) > MAX_HEADLINE_CHARS:
+    if not s:
         return None
+    if len(s) > MAX_HEADLINE_CHARS:
+        cut = s[:MAX_HEADLINE_CHARS].rstrip()
+        if " " in cut:
+            cut = cut[: cut.rfind(" ")].rstrip()
+        s = cut.rstrip(",;:-") or None
     return s
 
 
 def _request_rewrites(
     items: list[dict], client, model: str,
-) -> dict[str, str]:
-    """One LLM call: [{id,title,current,excerpt}] → {id: new headline}."""
+) -> tuple[dict[str, str], float]:
+    """One LLM call: [{id,title,current,excerpt}] → ({id: new headline}, cost).
+
+    A parse failure logs the response body. Without that, an unparseable
+    response and "the LLM kept every headline" both look like `rewritten: 0`
+    and there is no way to tell them apart after the fact — the same blind spot
+    that hid the ranker's max-tokens truncation for five days in Aug 2026.
+    """
     resp = client.complete(
         json.dumps({"stories": items}, ensure_ascii=False),
         model=model,
@@ -125,15 +155,22 @@ def _request_rewrites(
         system=config.HEADLINE_SYSTEM_PROMPT,
         timeout=float(config.HTTP_TIMEOUT_RANK_S),
     )
+    cost = float(getattr(resp, "estimated_cost_usd", 0.0) or 0.0)
     parsed = _extract_json(resp.text)
     if not parsed or not isinstance(parsed.get("headlines"), dict):
-        return {}
+        _log({
+            "event": "parse_failed",
+            "model": getattr(resp, "model", model),
+            "response_len": len(resp.text or ""),
+            "response_text": (resp.text or "")[:2000],
+        })
+        return {}, cost
     out: dict[str, str] = {}
     for sid, v in parsed["headlines"].items():
         s = _clean_headline(v)
         if s:
             out[str(sid)] = s
-    return out
+    return out, cost
 
 
 def _apply(items: list[RankedStory], new: dict[str, str]) -> list[RankedStory]:
@@ -157,6 +194,11 @@ def rewrite_headlines(
     if not winners:
         return ranking
     try:
+        # Build the client FIRST: when the configured vendor can't serve this
+        # step, the documented no-op should cost nothing, not 25 outbound
+        # requests and ~12s for a result we discard.
+        client, model = _build_ranker_client(fallback_client)
+
         urls = list({r.story.canonical_url for r in winners if r.story.canonical_url})
         excerpts = asyncio.run(_fetch_excerpts(urls))
         fetched = sum(1 for v in excerpts.values() if v)
@@ -175,8 +217,7 @@ def rewrite_headlines(
             _log({"event": "skip_no_excerpts", "stories": len(winners)})
             return ranking
 
-        client, model = _build_ranker_client(fallback_client)
-        new = _request_rewrites(items, client, model)
+        new, cost = _request_rewrites(items, client, model)
 
         for r in winners:
             if r.story.id in new and new[r.story.id] != r.one_liner:
@@ -192,6 +233,7 @@ def rewrite_headlines(
             "event": "run_done",
             "stories": len(winners),
             "excerpts_fetched": fetched,
+            "cost_usd": cost,
             "rewritten": sum(
                 1 for r in winners
                 if r.story.id in new and new[r.story.id] != r.one_liner
@@ -205,7 +247,17 @@ def rewrite_headlines(
             },
             other=_apply(ranking.other, new),
             flat=tuple(_apply(winners, new)),
+            # Roll this call into the run's cost so the pipeline summary isn't
+            # short by one ranker-class call.
+            cost_usd=ranking.cost_usd + cost,
         )
     except Exception as e:  # fail-soft: never block the digest on a rewrite
-        _log({"event": "error", "error": f"{type(e).__name__}: {e}"})
+        try:
+            _log({"event": "error", "error": f"{type(e).__name__}: {e}"})
+        except Exception:
+            # run_pipeline is try/finally with no except: an unwritable
+            # LOGS_DIR here would otherwise abort the run before the Slack
+            # post, which is the one hole in "this step can never block the
+            # digest".
+            pass
         return ranking
