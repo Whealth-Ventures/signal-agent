@@ -140,6 +140,54 @@ way. `ranker_provider=anthropic`, model `claude-sonnet-4-5`, key present — the
 account itself is the blocker, only an org admin can resolve it (billing or
 appeal at console.anthropic.com).
 
+### 15. A partial ranker response is visible but not repaired  ·  priority: MEDIUM
+The 2026-09-03 release treats thin decision coverage (<60% of candidates) as a
+degraded run, so `used_fallback` flips and the Slack notice fires. That makes
+the failure *visible*, which was the urgent half. It does **not** repair it: the
+undecided stories still fall back to the inherited bucket and geo, both proxies
+for where we found the story rather than what it says.
+
+The trigger is max-token truncation (#11). Perplexity currently shows no sign
+of it — 5,693 to 7,651 completion tokens across 22 runs, well inside its
+limit — so this is latent rather than live, and becomes live the moment
+`ranker_provider` goes back to `anthropic`.
+
+**Fix directions:** split the ranking into two calls when the candidate count
+is high, or retry once with a smaller candidate set when coverage comes back
+thin. Either is real work; the threshold buys time.
+
+### 12. The digest nearly posted late — the Perplexity ranking call took 331s  ·  priority: MEDIUM
+**Problem (3 Sept 2026 India run).** `sonar-reasoning-pro` ranking took
+**331.8s** against a nominal `HTTP_TIMEOUT_RANK_S` of 120s, so it retried at
+least twice. Timeline: ranking done 02:28:10 → headline rewrite done 02:30:05 →
+posted **02:30:07**, against an 02:30:00 hold. **Seven seconds of margin.** One
+slower call and the 08:00 IST digest is late.
+
+**Fix directions.** Measure first from `data/logs/perplexity_india_*.jsonl`
+(per-attempt latencies are there). Then: reduce the candidate count in the rank
+prompt (71 candidates today), start the run earlier than 02:20 UTC, or cap the
+retry count for the rank call specifically so a slow vendor fails fast into the
+score fallback rather than eating the whole window.
+
+### 13. Cost reporting is broken on the Perplexity ranking path  ·  priority: LOW
+Both the ranker and the headline-rewrite call logged `cost_usd: 0.0` on 3 Sept
+despite completing successfully on `sonar-reasoning-pro`. The per-call
+perplexity log has tokens but the estimated cost isn't reaching
+`RankingResult.cost_usd`, so the run summary understates spend. Check
+`perplexity_client`'s cost estimation for the rank models.
+
+### 14. Cross-day clustering misses near-duplicate stories  ·  priority: LOW
+The 2026-09-03 release collapses *identical* repeats (title, URL, or host+slug)
+on the candidate pool, which is what shipped twice that morning. It does **not**
+merge near-duplicates whose titles differ — e.g. "Luma Fertility plans to expand
+to 30 centres nationally" vs "Luma Fertility to expand to 30 centres nationwide;
+Sirona app…". Those are separate stories with separate embeddings, and the
+cross-day similarity check didn't link them.
+
+Only 4 duplicate-title pairs existed in a 30-day pool, so the impact is small,
+but the underlying gap is that `scorer` clusters within a scoring run and does
+not re-cluster against existing stories from previous days.
+
 ### 11. Claude ranking is capped at half the tokens it needs  ·  priority: HIGH  ·  BLOCKS reverting to `ranker_provider=anthropic`
 **Problem.** `anthropic_max_tokens_rank` is **4096**; the ranking response needs
 about **7000**. So the JSON is truncated mid-object, `_extract_json` returns
