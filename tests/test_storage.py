@@ -7,10 +7,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+import config  # noqa: E402
 import storage  # noqa: E402
 from models import Signal, Story, signal_id, story_id  # noqa: E402
 
@@ -69,6 +71,39 @@ class SignalsRoundTripTest(_DBTestBase):
         self.assertEqual(l.title, sig.title)
         self.assertEqual(l.summary, sig.summary)
         self.assertEqual(l.raw, {"k": "v"})
+
+    def test_blocked_domains_never_reach_the_db(self) -> None:
+        """Perplexity cites AI-generated social roundups that recycle old news
+        under a fresh date — 10 such stories shipped Jul-Sep 2026."""
+        blocked = self._make_signal(
+            url="https://www.facebook.com/01indiapo/posts/ai-daily-reporter",
+            title="AI daily reporter roundup",
+        )
+        allowed = self._make_signal(
+            url="https://www.digitalhealthnews.com/even-healthcare-series-b",
+            title="Even Healthcare raises Series B",
+        )
+        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)):
+            n = storage.save_signals([blocked, allowed], conn=self.conn)
+        self.conn.commit()
+        self.assertEqual(n, 1)
+        urls = {s.url for s in storage.list_unscored_signals(conn=self.conn)}
+        self.assertEqual(urls, {allowed.url})
+
+    def test_blocked_domains_match_subdomains_not_suffixes(self) -> None:
+        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)):
+            self.assertTrue(storage.is_blocked_url("https://m.facebook.com/x"))
+            self.assertTrue(storage.is_blocked_url("https://facebook.com/x"))
+            self.assertTrue(storage.is_blocked_url("https://WWW.FaceBook.com/x"))
+            # Must not block a different company that merely ends similarly.
+            self.assertFalse(storage.is_blocked_url("https://notfacebook.com/x"))
+            self.assertFalse(storage.is_blocked_url("https://facebook.com.br.evil/x"))
+
+    def test_empty_blocklist_blocks_nothing(self) -> None:
+        with mock.patch.object(config, "BLOCKED_DOMAINS", ()):
+            self.assertFalse(
+                storage.is_blocked_url("https://www.facebook.com/anything")
+            )
 
     def test_insert_or_ignore_dedupes(self) -> None:
         sig = self._make_signal()

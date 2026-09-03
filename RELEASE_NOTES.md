@@ -5,16 +5,28 @@
 Answers the 2 Sept feedback on the India digest: too much `[GLOBAL]`, a missing
 Ultrahuman funding story, and an opinion piece filed under Venture & IPO.
 
-### Indian publications are now tagged India, not Global
-An RSS story carried no geography at all, so it came out unclassified, rendered
-as `[GLOBAL]`, and was sent to **both** channels. On 2 Sept that was 105 of 160
-stories. Each publication's own `Geography` from `voices.xlsx` is now stamped on
-every item it produces: on a live sweep, **130 signals became 103 India and 27
-US, with none left unclassified.**
+### The India/US/Global tag now reflects where the news happened
+Previously a story's geography was inherited from **how we found it**, never
+from what it said. A search result took the geography of the query plan that
+surfaced it, so anything found by a Global plan was Global regardless of
+content. An RSS story carried no geography at all, so it came out
+unclassified, rendered `[GLOBAL]`, and was sent to **both** channels. On
+2 September that was 105 of 160 stories.
 
-Practical effect: the India digest stops calling Indian news global, and
-US-only publications stop appearing in it. The US digest correspondingly stops
-receiving Indian RSS.
+**The ranker now decides.** It already reads every candidate, so it returns the
+geography alongside the tier and category, judged from the story itself and
+explicitly not from the nationality of the publication that reported it. An
+Indian outlet covering a US hospital merger is now tagged US; a US outlet
+covering an Indian funding round is tagged India.
+
+Two fallbacks sit behind it, in order: the publication's own `Geography` from
+`voices.xlsx` (newly stamped onto every RSS item — a live sweep turned 130
+unclassified signals into 103 India and 27 US), then the query plan's
+geography. Both are proxies for where we *found* the story rather than where it
+happened, so they now only fill gaps.
+
+Practical effect: the India digest stops calling Indian news global, stops
+carrying US news, and the US digest stops receiving Indian coverage.
 
 ### The best story of the day can no longer be pushed out by a newer, weaker one
 Story ordering put publish time first and relevance score last, so within a
@@ -40,6 +52,30 @@ categories, no written summaries, story choice less reliable than usual.
 Previously this was printed only to the server console, which is how ten days of
 RSS-only digests (22–31 Aug) shipped without anyone noticing. Closes the ranker
 half of `FEEDBACK.md` #4.
+
+### The same story can no longer appear twice
+A publisher often serves one article under several URLs (BioSpectrum India puts
+the same piece at `/news/16/28410/…` and `/news/101/28410/…`), so URL matching
+missed it and both copies competed as separate stories. On 3 Sept, AIG Hospitals
+and Luma Fertility each appeared twice, costing 4 of 15 slots.
+
+Repeat tellings are now collapsed on the **candidate pool**, before categories
+are filled, so the freed slot goes to the next real story rather than being
+lost, and the ranker never sees two copies to rank separately. Three tests of
+sameness: normalised title, normalised URL, and host plus final URL segment.
+
+### Social and AI-generated "news roundup" sources can be blocked
+Search results sometimes cite AI-generated daily-roundup pages on social
+platforms. Those recycle weeks-old headlines under a fresh date, so an old story
+looks new and the digest links to a video post instead of the publication. Ten
+such stories shipped between 22 July and 3 September, including an "Even
+Healthcare Series B" item that was actually reported on 23 July and resurfaced
+on 2 September through a Facebook repost.
+
+There is now a **`blocked_domains`** setting in `tuning.xlsx`: a semicolon-
+separated host list, matched across subdomains, enforced at the single point
+every story passes through, so a blocked host cannot enter by any route. Adding
+or removing a host is a SharePoint edit with no deploy.
 
 ### Headline rewrite hardening
 Follow-ups from the review of the previous release. One malformed article URL

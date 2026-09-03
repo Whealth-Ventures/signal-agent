@@ -149,6 +149,22 @@ RANKER_PROVIDER = _t.get_str("ranker_provider")
 # which is how an opinion piece ended up filed under "Venture & IPO" on
 # 2 Sept 2026. Point this at a display-only catch-all instead.
 DEFAULT_BUCKET = _t.get_str("default_bucket", "")
+
+# Hosts whose URLs are never allowed into the signal pool, semicolon-separated
+# in tuning.xlsx. Matched on the registrable host and any subdomain.
+#
+# Why this exists: Perplexity cites whatever the open web gives it, including
+# AI-generated "daily news roundup" pages on social platforms. Those recycle
+# weeks-old headlines under a fresh publish date, so the story looks new, the
+# digest links to a Facebook video instead of the publication, and the real
+# article's own date is lost. 10 such stories shipped between 22 Jul and
+# 3 Sept 2026 — including "Even Healthcare Series B", which was actually
+# reported on 23 July and resurfaced on 2 September via a Facebook repost.
+BLOCKED_DOMAINS: tuple[str, ...] = tuple(
+    h.strip().lower().lstrip(".")
+    for h in _t.get_str("blocked_domains", "").split(";")
+    if h.strip()
+)
 ANTHROPIC_MODEL_RANK = _t.get_str("anthropic_model_rank")
 ANTHROPIC_MAX_TOKENS_RANK = _t.get_int("anthropic_max_tokens_rank", 4096)
 

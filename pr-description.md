@@ -12,16 +12,41 @@ already handled outside this PR: `ranker_provider` was flipped to `perplexity` i
 
 ## What changed
 
-### 1. RSS signals carry their publication's geography
+### 1. Geo is decided from the story, not from how we found it
 
-An RSS story had no geo at all, so it came out `NULL`, rendered `[GLOBAL]`, and
-was routed to **both** channels — 105 of 160 stories on 2 Sept.
-`Newsletter.geography` was already parsed from `voices.xlsx`; `_parse_feed_body`
-just never received it.
+Two layers here, because the first one alone gets it wrong.
 
-Verified on a live sweep: **130 signals → 103 India, 27 US, 0 unclassified.**
+**1a. The ranker returns a per-story `geo`.** It already reads every candidate
+and already returns `tier`, `bucket` and `one_liner` per story; `geo` is a
+fourth field on the same call, so this costs nothing. The prompt is explicit
+that this is where the *news* happened and **not** the nationality of the
+publication. `_effective_geo` precedence: ranker → inherited → `None`.
 
-Unknown geography values degrade to `Global` (both channels), never to a dropped
+This is the actual answer to "not the right logic". Before it, geo was
+inherited from the query plan that surfaced the story, so anything a Global
+plan found was Global whatever it said.
+
+**1b. RSS signals carry their publication's `Geography`** from `voices.xlsx`,
+as the fallback layer. `Newsletter.geography` was already parsed;
+`_parse_feed_body` never received it. Live sweep: **130 signals → 103 India,
+27 US, 0 unclassified.**
+
+Why 1b is only a fallback — measured on the 3 Sept digest, publication
+geography is right for local reporting and wrong for international:
+
+```
+Gland Pharma Visakhapatnam USFDA        -> India   correct
+AIG Hospitals Rs 2000 cr Visakhapatnam  -> India   correct
+Sanford Health / North Memorial         -> India   WRONG, Minnesota
+Medtronic / Cornerstone Robotics        -> India   WRONG, US
+```
+
+Both were reported by Digital Health News, an Indian publication. The same
+mechanism is why *"Novartis pauses eight CAR-T trials"* shipped tagged `[IND]`
+that morning: `medicaldialogues.in` is India-geo, the news is global. So the
+proxy fills gaps and the ranker decides.
+
+Unknown values degrade to `Global` (kept by both channels), never to a dropped
 story.
 
 ### 2. Ordering is tier → score → recency, not tier → recency → score
@@ -86,6 +111,37 @@ Not adopted: the prompt-injection note on the 2,000-char excerpt. Real, but
 bounded by `_escape_mrkdwn` and the length cap to one misleading line, with no
 link or markup escape.
 
+### 6. The same story can no longer occupy two slots
+
+A publisher serves one article under several URLs — BioSpectrum India uses
+`/news/16/28410/<slug>` and `/news/101/28410/<slug>` — so URL matching missed it
+and both copies competed separately. On the 3 Sept India digest, AIG Hospitals
+and Luma Fertility each shipped twice, costing **4 of 15 slots**.
+
+`collapse_duplicates` now runs on the **candidate pool**, before bucketing and
+selection, so the freed slot goes to the next real story instead of being lost,
+and the ranker prompt never contains two copies to tier separately. Sameness is
+any of: normalised title, normalised URL, or host + final path segment (only for
+segments of 12+ chars, so it can't collide on `/feed` or `/news`). The
+highest-scoring copy survives.
+
+### 7. `blocked_domains`, to keep AI-generated social roundups out
+
+Perplexity cites whatever the open web offers, including AI-generated
+"daily news roundup" pages on social platforms that recycle weeks-old headlines
+under a fresh publish date. Verified on the box: **13 Facebook-cited signals in
+30 days producing 11 stories, 10 of which shipped** between 22 Jul and 3 Sept.
+The clearest case is 3 Sept's "Even Healthcare Series B", whose canonical URL was
+`facebook.com/01indiapo/posts/ai-daily-reporter-2-september-2026…` — the same
+cluster held the real report at `digitalhealthnews.com`, published **23 July**.
+So it was simultaneously the wrong link and six-week-old news presented as new.
+
+Facebook was never a configured source, so it could not be removed from
+SharePoint. New `blocked_domains` setting: semicolon-separated host list,
+matched across subdomains, enforced in `storage.save_signals` — the single choke
+point every signal passes through, Perplexity and RSS, daily and sector — so a
+blocked host cannot enter the pool by any route.
+
 ## Testing
 
 244 tests pass. New coverage:
@@ -113,14 +169,39 @@ confirmed against a clean tree; CI supplies them.
 
 No env, schema, dependency or infra changes.
 
-Two `tuning.xlsx` edits activate item 3 (SharePoint, no deploy):
+Three `tuning.xlsx` edits activate items 3 and 7 (SharePoint, no deploy). The
+first must NOT be made until this is deployed, since the currently deployed code
+rejects a bucket with empty `geos`:
 
-1. `Priority Buckets` → add a final row: key `other_healthcare`, display
+1. `Priority Buckets` → add row 10: key `other_healthcare`, display
    `Other healthcare news`, `sub_buckets` any placeholder, **`geos` blank**.
 2. `Settings` → add `default_bucket` = `other_healthcare`.
+3. `Settings` → add `blocked_domains` =
+   `facebook.com; fb.com; fb.watch; instagram.com; x.com; twitter.com; linkedin.com; reddit.com; youtube.com; youtu.be`
+
+   All-time pollution this removes: 98 signals / ~87 stories (facebook 46,
+   instagram 25, linkedin 12, x 8, youtube 4, reddit 3), every one a Perplexity
+   citation rather than a configured feed. Verified that nothing configured
+   breaks: the 373 LinkedIn URLs in `voices.xlsx` are identity metadata for
+   voices and firms, which are named inside prompts and never crawled, so they
+   never become signal URLs. The one YouTube source (Newsletters row 32,
+   `AHealthcareZ`) has produced zero signals in its entire history — feed
+   discovery never worked on its `/c/` channel URL — so blocking `youtube.com`
+   costs nothing live, though that row can now never work and may as well be
+   deleted from the sheet.
 
 One further edit is required **before** `ranker_provider` ever goes back to
 `anthropic` (FEEDBACK #11): `anthropic_max_tokens_rank` 4096 → 8192.
+
+A one-shot `scripts/backfill_story_geo.py` repairs the 1,186 pre-change
+NULL-geo rows still in the 30-day pool (dry-run by default, writes a revert
+snapshot on `--apply`). Verified plan: 804 → India, 374 → US, 8 → Global, none
+left NULL.
+
+Item 1a demotes that backfill from important to **optional**: the ranker
+re-derives geo on every run regardless of what the DB holds, so a NULL row now
+only matters if the ranker also omits that story's geo. Worth running anyway so
+the fallback layer is sound, but it is no longer on the critical path.
 
 **Behaviour change to expect:** the US digest stops receiving Indian RSS, so it
 gets smaller and more American. On 2 Sept it was taking all 148 RSS signals

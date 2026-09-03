@@ -35,6 +35,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlparse
 
 import config
 import storage
@@ -181,6 +182,15 @@ def build_prompt(grouped: dict[str, list[Story]]) -> str:
         f"story: {bucket_keys}. Every story must get a bucket; if it doesn't "
         "obviously fit one, choose the CLOSEST. Buckets:",
         _bucket_legend(),
+        "  - `geo`: EXACTLY \"India\", \"US\" or \"Global\" — where the NEWS "
+        "happened, judged from the story itself. This is NOT the nationality of "
+        "the publication that reported it: an Indian outlet covering a US "
+        "hospital merger is \"US\", and a US outlet covering an Indian funding "
+        "round is \"India\". Use \"Global\" only when the news genuinely spans "
+        "regions or has no single home — a multinational drug approval, a "
+        "worldwide product launch, cross-border research. The `geo=` value shown "
+        "against each candidate below is a weak hint from where we found it; "
+        "correct it when the story says otherwise.",
         "",
         "Examples of one_liner quality:",
         "  BAD  (vague, no specifics): "
@@ -193,7 +203,7 @@ def build_prompt(grouped: dict[str, list[Story]]) -> str:
         "{",
         '  "stories": [',
         '    {"story_id": "<id from below>", "tier": "S", '
-        '"bucket": "fda_regulatory", '
+        '"bucket": "fda_regulatory", "geo": "US", '
         '"one_liner": "FDA approves Eli Lilly\'s Kisunla for early Alzheimer\'s."},',
         "    ...",
         "  ]",
@@ -264,23 +274,38 @@ def _coerce_tier(v: object) -> Tier | None:
     return None
 
 
+VALID_GEOS = ("India", "US", "Global")
+
+
+def _coerce_geo(v: object) -> str | None:
+    """Model's `geo` → one of India / US / Global, or None if unusable."""
+    if not isinstance(v, str):
+        return None
+    g = v.strip().lower()
+    for valid in VALID_GEOS:
+        if g == valid.lower():
+            return valid
+    return None
+
+
 def parse_ranked(
     response_text: str,
     stories_by_id: dict[str, Story],
-) -> tuple[dict[str, tuple[Tier, str]], dict[str, str], bool]:
+) -> tuple[dict[str, tuple[Tier, str]], dict[str, str], dict[str, str], bool]:
     """Returns ({story_id → (tier, one_liner)}, {story_id → bucket_key},
-    used_fallback).
+    {story_id → geo}, used_fallback).
 
     Fallback triggers when nothing parseable came back. Stories present in
     `stories_by_id` but missing from the response are filled in by the
     selection logic later (defaulting to Tier A + fallback one-liner). The
-    bucket map only includes stories the model assigned a valid bucket key;
-    the caller falls back to the story's own priority_bucket otherwise."""
+    bucket and geo maps only include stories the model gave a valid value for;
+    the caller falls back to the story's own priority_bucket / geo otherwise."""
     parsed = _extract_json(response_text)
     out: dict[str, tuple[Tier, str]] = {}
     buckets: dict[str, str] = {}
+    geos: dict[str, str] = {}
     if not (parsed and isinstance(parsed.get("stories"), list)):
-        return out, buckets, True
+        return out, buckets, geos, True
 
     valid_buckets = _valid_bucket_keys()
     for entry in parsed["stories"]:
@@ -299,7 +324,10 @@ def parse_ranked(
         bucket = entry.get("bucket")
         if isinstance(bucket, str) and bucket.strip() in valid_buckets:
             buckets[sid] = bucket.strip()
-    return out, buckets, False
+        geo = _coerce_geo(entry.get("geo"))
+        if geo:
+            geos[sid] = geo
+    return out, buckets, geos, False
 
 
 # --- Selection ----------------------------------------------------------
@@ -471,6 +499,63 @@ def _build_ranker_client(
     return fallback or PerplexityClient(), config.PERPLEXITY_MODEL_RANK
 
 
+_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _identity_keys(story: Story) -> list[str]:
+    """Every key by which this story counts as "the same news" as another.
+
+    A publisher can serve one article under several URLs — BioSpectrum India
+    puts the same piece at /news/16/28410/<slug> and /news/101/28410/<slug> —
+    so URL equality alone misses it, and the two copies then eat two slots in
+    the same digest section. Three keys, any of which is a match:
+
+      t:<title>     normalised title (case, punctuation and spacing removed)
+      u:<url>       normalised URL (scheme, www, query, fragment, trailing /)
+      s:<host>/<slug>  host + last path segment, which survives the differing
+                    middle segments above. Only used for segments of 12+ chars
+                    so it can't collide on /feed, /news or /2026.
+    """
+    keys: list[str] = []
+    title = _PUNCT_RE.sub(" ", (story.canonical_title or "").lower()).strip()
+    if title:
+        keys.append(f"t:{title}")
+
+    p = urlparse(story.canonical_url or "")
+    host = (p.hostname or "").lower().removeprefix("www.")
+    path = (p.path or "").rstrip("/")
+    if host:
+        keys.append(f"u:{host}{path.lower()}")
+        segments = [seg for seg in path.split("/") if seg]
+        if segments and len(segments[-1]) >= 12:
+            keys.append(f"s:{host}/{segments[-1].lower()}")
+    return keys
+
+
+def collapse_duplicates(stories: list[Story]) -> tuple[list[Story], int]:
+    """Drop repeat tellings of the same story, keeping the best-scoring one.
+
+    Runs on the CANDIDATE pool, before bucketing and selection, for two
+    reasons: the freed slot goes to the next real story instead of being lost,
+    and the ranker prompt never shows the model two copies to tier separately
+    (on 3 Sept 2026 it tiered both, and AIG Hospitals and Luma Fertility each
+    shipped twice, costing 4 of 15 slots).
+
+    Returns (survivors in their original order, dropped_count).
+    """
+    best_first = sorted(stories, key=lambda s: -s.relevance_score)
+    seen: set[str] = set()
+    keep: set[str] = set()
+    for st in best_first:
+        keys = _identity_keys(st)
+        if any(k in seen for k in keys):
+            continue
+        seen.update(keys)
+        keep.add(st.id)
+    survivors = [st for st in stories if st.id in keep]
+    return survivors, len(stories) - len(survivors)
+
+
 def _effective_bucket(
     story: Story, llm_buckets: dict[str, str], valid: set[str], default: str,
 ) -> str:
@@ -482,6 +567,26 @@ def _effective_bucket(
     if story.priority_bucket in valid:
         return story.priority_bucket
     return default
+
+
+def _effective_geo(story: Story, llm_geos: dict[str, str]) -> str | None:
+    """Where the news happened: the ranker's judgement → what we inherited.
+
+    The ranker reads the story, so it is the only component that can tell an
+    Indian outlet's report on a US hospital merger from Indian news. What we
+    inherit is a proxy and a poor one in both directions:
+
+      - a Perplexity signal takes the geography of the PLAN that found it, so
+        anything found by a Global plan is Global whatever it says;
+      - an RSS signal takes its PUBLICATION's geography, so Digital Health
+        News reporting on Sanford/North Memorial in Minnesota came out India,
+        and medicaldialogues.in on Novartis halting CAR-T trials came out
+        India (both observed 3 Sept 2026).
+
+    So the proxy is the fallback, never the answer, and None still means
+    "unknown" — rendered [GLOBAL] and kept by both channels, as before.
+    """
+    return llm_geos.get(story.id) or story.geo
 
 
 def rank_stories(
@@ -520,6 +625,12 @@ def rank_stories(
     dropped_non_healthcare = len(pool) - len(candidates)
     if dropped_non_healthcare:
         _log({"step": "topicality_gate", "dropped_non_healthcare": dropped_non_healthcare})
+
+    # Same news, told twice (or under two URLs) must never occupy two slots.
+    candidates, dropped_duplicates = collapse_duplicates(candidates)
+    if dropped_duplicates:
+        _log({"step": "duplicate_collapse", "dropped_duplicates": dropped_duplicates})
+
     if not candidates:
         return _empty_result(start)
 
@@ -550,25 +661,39 @@ def rank_stories(
     except Exception as e:  # any vendor error → degrade to fallback, still ship
         call_error = f"{type(e).__name__}: {e}"
 
-    decisions, llm_buckets, parse_fallback = parse_ranked(response_text, stories_by_id)
+    decisions, llm_buckets, llm_geos, parse_fallback = parse_ranked(
+        response_text, stories_by_id,
+    )
     used_fallback = bool(call_error) or parse_fallback
 
     # Force every candidate into one of the 8 buckets (no 'Other' section). The
     # LLM picks the best fit; Track-A stories fall back to their own bucket; the
     # rare straggler lands in the default bucket rather than being dropped.
+    # Geo is re-derived here too: the ranker read the story, the inherited
+    # plan/publication geo only knows where we found it. See _effective_geo.
     valid = _valid_bucket_keys()
     default_bucket = _default_bucket_key()
     bucketed: list[Story] = []
     default_assigned = 0
+    geo_corrected = 0
     for st in candidates:
         eff = _effective_bucket(st, llm_buckets, valid, default_bucket)
         if eff == default_bucket and llm_buckets.get(st.id) not in valid \
                 and st.priority_bucket not in valid:
             default_assigned += 1
-        bucketed.append(replace(st, priority_bucket=eff))
+        eff_geo = _effective_geo(st, llm_geos)
+        if eff_geo != st.geo:
+            geo_corrected += 1
+        bucketed.append(replace(st, priority_bucket=eff, geo=eff_geo))
     if default_assigned:
         _log({"step": "bucket_default_assigned", "count": default_assigned,
               "default_bucket": default_bucket})
+    _log({
+        "step": "geo_resolution",
+        "llm_supplied": len(llm_geos),
+        "candidates": len(candidates),
+        "changed_from_inherited": geo_corrected,
+    })
 
     grouped = _group_for_prompt(bucketed)
     # Uniform per-bucket selection: fixed top-5 highlights + up to per_bucket_max

@@ -156,14 +156,14 @@ class ParseRankedTest(unittest.TestCase):
             {"story_id": a.id, "tier": "A", "one_liner": "Decent news"},
             {"story_id": c.id, "tier": "C", "one_liner": "Drop me"},
         ]})
-        decisions, buckets, fallback = ranker.parse_ranked(text, self.by_id)
+        decisions, buckets, _geos, fallback = ranker.parse_ranked(text, self.by_id)
         self.assertFalse(fallback)
         self.assertEqual(decisions[b.id], ("S", "Big news"))
         self.assertEqual(decisions[a.id], ("A", "Decent news"))
         self.assertEqual(decisions[c.id], ("C", "Drop me"))
 
     def test_garbage_marks_fallback(self) -> None:
-        decisions, buckets, fallback = ranker.parse_ranked("not json", self.by_id)
+        decisions, buckets, _geos, fallback = ranker.parse_ranked("not json", self.by_id)
         self.assertTrue(fallback)
         self.assertEqual(decisions, {})
         self.assertEqual(buckets, {})
@@ -172,14 +172,14 @@ class ParseRankedTest(unittest.TestCase):
         text = json.dumps({"stories": [
             {"story_id": "definitely_not_an_id", "tier": "S", "one_liner": "x"},
         ]})
-        decisions, _buckets, _ = ranker.parse_ranked(text, self.by_id)
+        decisions, _buckets, _geos, _ = ranker.parse_ranked(text, self.by_id)
         self.assertEqual(decisions, {})
 
     def test_invalid_tier_dropped(self) -> None:
         text = json.dumps({"stories": [
             {"story_id": self.stories[0].id, "tier": "D", "one_liner": "x"},
         ]})
-        decisions, _buckets, _ = ranker.parse_ranked(text, self.by_id)
+        decisions, _buckets, _geos, _ = ranker.parse_ranked(text, self.by_id)
         self.assertEqual(decisions, {})
 
     def test_bucket_parsed_when_valid(self) -> None:
@@ -188,7 +188,7 @@ class ParseRankedTest(unittest.TestCase):
             {"story_id": a.id, "tier": "S", "one_liner": "x",
              "bucket": "fda_regulatory"},
         ]})
-        decisions, buckets, _ = ranker.parse_ranked(text, self.by_id)
+        decisions, buckets, _geos, _ = ranker.parse_ranked(text, self.by_id)
         self.assertEqual(buckets[a.id], "fda_regulatory")
 
     def test_invalid_bucket_ignored(self) -> None:
@@ -197,9 +197,56 @@ class ParseRankedTest(unittest.TestCase):
             {"story_id": a.id, "tier": "S", "one_liner": "x",
              "bucket": "not_a_real_bucket"},
         ]})
-        decisions, buckets, _ = ranker.parse_ranked(text, self.by_id)
+        decisions, buckets, _geos, _ = ranker.parse_ranked(text, self.by_id)
         self.assertIn(a.id, decisions)
         self.assertNotIn(a.id, buckets)
+
+    def test_geo_parsed_and_normalised(self) -> None:
+        a, b, c = self.stories
+        text = json.dumps({"stories": [
+            {"story_id": a.id, "tier": "S", "one_liner": "x", "geo": "US"},
+            {"story_id": b.id, "tier": "A", "one_liner": "x", "geo": "india"},
+            {"story_id": c.id, "tier": "A", "one_liner": "x", "geo": "GLOBAL"},
+        ]})
+        _d, _b, geos, _f = ranker.parse_ranked(text, self.by_id)
+        self.assertEqual(geos[a.id], "US")
+        self.assertEqual(geos[b.id], "India")
+        self.assertEqual(geos[c.id], "Global")
+
+    def test_invalid_or_missing_geo_ignored(self) -> None:
+        a, b, c = self.stories
+        text = json.dumps({"stories": [
+            {"story_id": a.id, "tier": "S", "one_liner": "x", "geo": "APAC"},
+            {"story_id": b.id, "tier": "A", "one_liner": "x", "geo": 42},
+            {"story_id": c.id, "tier": "A", "one_liner": "x"},
+        ]})
+        decisions, _b, geos, _f = ranker.parse_ranked(text, self.by_id)
+        self.assertEqual(geos, {})
+        # Unusable geo must not cost the story its tier or one-liner.
+        self.assertEqual(len(decisions), 3)
+
+
+class EffectiveGeoTest(unittest.TestCase):
+    """The ranker read the story; the inherited geo only knows where we found
+    it. Real 3 Sept 2026 mislabels: Digital Health News (an Indian outlet) on
+    Sanford/North Memorial in Minnesota, and medicaldialogues.in on Novartis
+    halting CAR-T trials."""
+
+    def test_llm_geo_overrides_inherited_publication_geo(self) -> None:
+        st = _mk_story("sanford", geo="India")   # inherited from an Indian outlet
+        self.assertEqual(ranker._effective_geo(st, {st.id: "US"}), "US")
+
+    def test_llm_geo_overrides_inherited_plan_geo(self) -> None:
+        st = _mk_story("indian_funding", geo="Global")  # found by a Global plan
+        self.assertEqual(ranker._effective_geo(st, {st.id: "India"}), "India")
+
+    def test_falls_back_to_inherited_when_llm_silent(self) -> None:
+        st = _mk_story("x", geo="India")
+        self.assertEqual(ranker._effective_geo(st, {}), "India")
+
+    def test_unknown_stays_unknown(self) -> None:
+        st = _mk_story("x", geo=None)
+        self.assertIsNone(ranker._effective_geo(st, {}))
 
 
 # --- Selection ---------------------------------------------------------
@@ -334,6 +381,75 @@ class TopSummaryTest(unittest.TestCase):
         ]}
         top = ranker._top_summary(by_priority, [], n=1)
         self.assertEqual(top[0].story.id, older_better.id)
+
+
+class CollapseDuplicatesTest(unittest.TestCase):
+    """Real pairs that each ate two slots in the 3 Sept 2026 India digest."""
+
+    @staticmethod
+    def _story(sid_url: str, title: str, score: float) -> Story:
+        return Story(
+            id=story_id(sid_url),
+            canonical_url=sid_url,
+            canonical_title=title,
+            canonical_summary="",
+            published_at=_FIXED_TS,
+            relevance_score=score,
+        )
+
+    def test_same_publisher_two_url_paths_collapses(self) -> None:
+        # BioSpectrum serves one article under two path prefixes.
+        a = self._story(
+            "https://www.biospectrumindia.com/news/16/28410/aig-hospitals-invest",
+            "AIG Hospitals to invest Rs 2000 Cr in new ecosystem", 0.59,
+        )
+        b = self._story(
+            "https://www.biospectrumindia.com/news/101/28410/aig-hospitals-invest",
+            "AIG Hospitals to invest Rs 2000 Cr in new ecosystem", 0.59,
+        )
+        kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 1)
+        self.assertEqual(len(kept), 1)
+
+    def test_different_hosts_same_title_collapses_keeping_best_score(self) -> None:
+        weak = self._story(
+            "https://www.digitalhealthnews.com/luma-fertility-30-centres",
+            "Luma Fertility plans to expand to 30 centres nationally", 0.52,
+        )
+        strong = self._story(
+            "https://www.biospectrumindia.com/news/20/28407/luma-fertility",
+            "Luma Fertility plans to expand to 30 centres nationally", 0.71,
+        )
+        kept, dropped = ranker.collapse_duplicates([weak, strong])
+        self.assertEqual(dropped, 1)
+        self.assertEqual(kept[0].id, strong.id)
+
+    def test_title_punctuation_and_case_ignored(self) -> None:
+        a = self._story("https://a.example/x-story-here", "Gland Pharma clears USFDA", 0.4)
+        b = self._story("https://b.example/y-story-there", "gland pharma  clears usfda!", 0.3)
+        _kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 1)
+
+    def test_distinct_stories_are_untouched_and_order_preserved(self) -> None:
+        a = self._story("https://a.example/alpha-article-one", "Alpha raises money", 0.3)
+        b = self._story("https://b.example/beta-article-two", "Beta buys Gamma", 0.9)
+        c = self._story("https://c.example/gamma-article-three", "Delta wins approval", 0.6)
+        kept, dropped = ranker.collapse_duplicates([a, b, c])
+        self.assertEqual(dropped, 0)
+        self.assertEqual([s.id for s in kept], [a.id, b.id, c.id])
+
+    def test_short_last_segments_do_not_collide(self) -> None:
+        """/feed and /news must not make two articles look like one."""
+        a = self._story("https://a.example/health/feed", "First article", 0.5)
+        b = self._story("https://a.example/business/feed", "Second article", 0.4)
+        _kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 0)
+
+    def test_trailing_slash_and_www_normalised(self) -> None:
+        a = self._story("https://www.a.example/some-long-article/", "Title one", 0.5)
+        b = self._story("https://a.example/some-long-article", "Title two", 0.4)
+        _kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 1)
 
 
 class DefaultBucketTest(unittest.TestCase):
@@ -477,6 +593,42 @@ class FullPathTest(_OrchestratorBase):
             storage.upsert_story(s, conn=self.conn)
         self.conn.commit()
         return stories
+
+    def test_llm_geo_reaches_the_result_and_the_channel_filter(self) -> None:
+        """End-to-end: the ranker's geo must beat the inherited one, and must
+        then drive channel routing. Story 'c' is inherited India (an Indian
+        publication) but the ranker says the news is US — it must not ship to
+        the India channel."""
+        stories = self._seed()
+        c = stories[2]
+        text = json.dumps({"stories": [
+            {"story_id": s.id, "tier": "A", "one_liner": f"line {i}",
+             **({"geo": "US"} if s.id == c.id else {})}
+            for i, s in enumerate(stories[:6])
+        ]})
+        result = ranker.rank_stories(
+            conn=self.conn, client=FakePerplexityClient(text),
+        )
+        by_id = {r.story.id: r for r in result.flat}
+        self.assertEqual(by_id[c.id].story.geo, "US")
+
+        india = ranker.filter_by_geo(result, {"India", "Global"})
+        self.assertNotIn(c.id, {r.story.id for r in india.flat})
+        us = ranker.filter_by_geo(result, {"US", "Global"})
+        self.assertIn(c.id, {r.story.id for r in us.flat})
+
+    def test_inherited_geo_kept_when_llm_omits_it(self) -> None:
+        stories = self._seed()
+        e = stories[4]   # inherited India
+        text = json.dumps({"stories": [
+            {"story_id": s.id, "tier": "A", "one_liner": "x"}
+            for s in stories[:6]
+        ]})
+        result = ranker.rank_stories(
+            conn=self.conn, client=FakePerplexityClient(text),
+        )
+        by_id = {r.story.id: r for r in result.flat}
+        self.assertEqual(by_id[e.id].story.geo, "India")
 
     def test_llm_response_used(self) -> None:
         stories = self._seed()

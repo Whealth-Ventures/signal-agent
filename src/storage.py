@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
+from urllib.parse import urlparse
 
 import config
 from models import Signal, Story, signal_id
@@ -227,16 +228,44 @@ def _story_from_row(row: sqlite3.Row) -> Story:
 
 # --- Signals ------------------------------------------------------------
 
+def is_blocked_url(url: str) -> bool:
+    """Is this URL on the `blocked_domains` list from tuning.xlsx?
+
+    Matches the host and any subdomain of it, so `facebook.com` also blocks
+    `m.facebook.com` and `www.facebook.com`. See config.BLOCKED_DOMAINS for
+    why the list exists.
+    """
+    if not config.BLOCKED_DOMAINS:
+        return False
+    host = urlparse(url or "").hostname or ""
+    host = host.lower().rstrip(".")
+    if not host:
+        return False
+    return any(
+        host == d or host.endswith("." + d) for d in config.BLOCKED_DOMAINS
+    )
+
+
 def save_signals(
     signals: Iterable[Signal],
     *,
     fetched_at: datetime | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> int:
+    """Persist signals, skipping any whose URL is on the blocked-domain list.
+
+    The filter lives here because this is the single choke point every signal
+    passes through — Perplexity, RSS, daily and sector alike — so a blocked
+    host can never reach the story pool by any route.
+    """
     fetched_at = fetched_at or _utcnow()
     fetched_iso = _iso(fetched_at)
     rows = []
+    blocked = 0
     for s in signals:
+        if is_blocked_url(s.url):
+            blocked += 1
+            continue
         sid = signal_id(s.source, s.url)
         rows.append((
             sid, s.source, s.source_type, s.title, s.url,
@@ -244,6 +273,8 @@ def save_signals(
             json.dumps(s.raw, default=str) if s.raw else None,
             fetched_iso,
         ))
+    if blocked:
+        print(f"      dropped {blocked} signal(s) on blocked domains")
     if not rows:
         return 0
     with _maybe_own(conn) as c:
