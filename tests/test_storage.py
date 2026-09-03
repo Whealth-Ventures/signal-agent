@@ -83,8 +83,14 @@ class SignalsRoundTripTest(_DBTestBase):
             url="https://www.digitalhealthnews.com/even-healthcare-series-b",
             title="Even Healthcare raises Series B",
         )
-        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)):
+        # _log_blocked patched for the same reason the ranker's audit is: an
+        # unpatched test writes a production-shaped blocked URL into
+        # data/logs/blocked_<date>.jsonl, which an operator cannot tell from a
+        # real drop.
+        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)), \
+                mock.patch.object(storage, "_log_blocked") as log:
             n = storage.save_signals([blocked, allowed], conn=self.conn)
+        self.assertEqual(log.call_count, 1)
         self.conn.commit()
         self.assertEqual(n, 1)
         urls = {s.url for s in storage.list_unscored_signals(conn=self.conn)}
@@ -413,3 +419,40 @@ class RecentlySentUrlsTest(_DBTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoadStoryEmbeddingsTest(_DBTestBase):
+    """The pre-digest duplicate check needs the vectors, which Story doesn't
+    carry — two publications on the same news differ in title and URL."""
+
+    def _story(self, sid_url: str, score: float = 0.5) -> Story:
+        return Story(
+            id=story_id(sid_url), canonical_url=sid_url,
+            canonical_title=f"Title {sid_url}", canonical_summary="",
+            published_at=_utcnow(), relevance_score=score,
+        )
+
+    def test_round_trips_only_the_ids_that_have_one(self) -> None:
+        a, b = self._story("https://a.example/1"), self._story("https://b.example/2")
+        storage.upsert_story(a, embedding=[0.1, 0.2, 0.3], conn=self.conn)
+        storage.upsert_story(b, conn=self.conn)          # no embedding
+        self.conn.commit()
+        got = storage.load_story_embeddings([a.id, b.id], conn=self.conn)
+        self.assertEqual(set(got), {a.id})
+        self.assertEqual([round(v, 4) for v in got[a.id]], [0.1, 0.2, 0.3])
+
+    def test_empty_input_and_unknown_ids(self) -> None:
+        self.assertEqual(storage.load_story_embeddings([], conn=self.conn), {})
+        self.assertEqual(
+            storage.load_story_embeddings(["nope"], conn=self.conn), {},
+        )
+
+    def test_handles_more_ids_than_the_sqlite_variable_limit(self) -> None:
+        ids = []
+        for i in range(1200):
+            s = self._story(f"https://x.example/{i}")
+            storage.upsert_story(s, embedding=[float(i), 0.0], conn=self.conn)
+            ids.append(s.id)
+        self.conn.commit()
+        got = storage.load_story_embeddings(ids, conn=self.conn)
+        self.assertEqual(len(got), 1200)
