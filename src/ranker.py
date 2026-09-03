@@ -126,6 +126,16 @@ class RankingResult:
     # Convenience flat list (top_summary + by_priority + other, in display order)
     # so main.py can record everything in digest_stories without re-ordering.
     flat: tuple[RankedStory, ...] = field(default_factory=tuple)
+    # EVERY ranked candidate (Tier-C excluded), grouped by bucket and ordered —
+    # not just the ~21 that made this cut. `top_summary`/`by_priority` are one
+    # geo-blind selection out of these; `filter_by_geo` needs the full lists to
+    # make a second, geo-scoped selection. Without it a channel could only ever
+    # see the stories that survived the geo-blind per-bucket cap, so the US
+    # digest lost 7 of 8 category sections to Indian stories that outranked its
+    # own. Empty on a hand-built result; filter_by_geo degrades gracefully.
+    ranked_by_bucket: dict[str, tuple[RankedStory, ...]] = field(
+        default_factory=dict,
+    )
 
 
 _SYSTEM_PROMPT = config.RANKER_SYSTEM_PROMPT
@@ -375,8 +385,13 @@ def _select(
     *,
     per_bucket_max: int,
     top_summary_size: int,
-) -> tuple[list[RankedStory], dict[str, list[RankedStory]]]:
-    """Uniform per-bucket selection. Returns (top_summary, by_priority).
+) -> tuple[list[RankedStory], dict[str, list[RankedStory]],
+           dict[str, list[RankedStory]]]:
+    """Uniform per-bucket selection.
+
+    Returns (top_summary, by_priority, all_ranked_by_bucket) — the third is
+    every ranked candidate grouped by bucket, kept so filter_by_geo can
+    re-select per channel instead of being stuck with this geo-blind cut.
 
     Rule (see #2):
       1. Order each of the 8 buckets by tier (S<A<B), then recency. Tier-C
@@ -401,10 +416,11 @@ def _select(
             rs_by_key[b.key] = [
                 RankedStory(story=s, tier=t, one_liner=ol) for s, t, ol in ordered
             ]
-    return _split_top_and_bodies(
+    top, by_priority = _split_top_and_bodies(
         rs_by_key, per_bucket_max=per_bucket_max,
         top_summary_size=top_summary_size,
     )
+    return top, by_priority, rs_by_key
 
 
 def _rank_within_bucket(r: RankedStory) -> tuple[int, float, float]:
@@ -760,8 +776,13 @@ def rank_stories(
     # a healthy one: it is the shape max-token truncation takes (FEEDBACK #11),
     # and the undecided remainder silently falls back to the inherited geo and
     # bucket. Treat thin coverage as fallback so the Slack notice fires.
+    # No `if decisions` guard: a response that decides ZERO stories is the
+    # worst degraded state, not an exempt one. `{"stories": []}` and a response
+    # whose story_ids match nothing both parse cleanly, so parse_fallback stays
+    # False, and without this they shipped a wholly un-ranked digest — every
+    # story Tier A on its inherited geo and bucket — reported as a normal run.
     coverage = len(decisions) / len(candidates) if candidates else 1.0
-    partial = bool(decisions) and coverage < MIN_DECISION_COVERAGE
+    partial = coverage < MIN_DECISION_COVERAGE
     if partial:
         _log({
             "step": "partial_response",
@@ -803,7 +824,7 @@ def rank_stories(
     grouped = _group_for_prompt(bucketed)
     # Uniform per-bucket selection: fixed top-5 highlights + up to per_bucket_max
     # (1-2) per bucket, no 'Other' section.
-    top, by_priority = _select(
+    top, by_priority, all_ranked = _select(
         grouped, decisions,
         per_bucket_max=per_bucket_max, top_summary_size=top_summary_size,
     )
@@ -842,6 +863,7 @@ def rank_stories(
         cost_usd=response_cost,
         elapsed_seconds=elapsed,
         flat=tuple(flat),
+        ranked_by_bucket={k: tuple(v) for k, v in all_ranked.items()},
     )
 
 
@@ -885,14 +907,24 @@ def filter_by_geo(
     def keep(rs: RankedStory) -> bool:
         return rs.story.geo is None or rs.story.geo in allowed
 
-    # Re-merge the promoted highlights back into the buckets they came from.
-    merged: dict[str, list[RankedStory]] = {
-        k: list(v) for k, v in r.by_priority.items()
-    }
-    default_key = _default_bucket_key()
-    for rs in r.top_summary:
-        key = rs.story.priority_bucket or default_key
-        merged.setdefault(key, []).append(rs)
+    # Select from EVERY ranked candidate, not from the geo-blind cut. Using
+    # by_priority here would cap each channel at the ~21 stories that already
+    # won a geo-blind slot: with a 70/20 India/US split that left the US
+    # channel 6 items and 1 of 8 category sections while 24 eligible US
+    # stories sat unused in the pool.
+    if r.ranked_by_bucket:
+        merged: dict[str, list[RankedStory]] = {
+            k: list(v) for k, v in r.ranked_by_bucket.items()
+        }
+    else:
+        # Hand-built result (tests, or a caller that didn't come through
+        # _select): fall back to re-merging the promoted highlights so the
+        # highlight slots at least get refilled.
+        merged = {k: list(v) for k, v in r.by_priority.items()}
+        default_key = _default_bucket_key()
+        for rs in r.top_summary:
+            key = rs.story.priority_bucket or default_key
+            merged.setdefault(key, []).append(rs)
 
     scoped: dict[str, list[RankedStory]] = {}
     for key, items in merged.items():

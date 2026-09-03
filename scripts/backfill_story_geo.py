@@ -142,12 +142,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.revert:
         data = json.loads(Path(args.revert).read_text(encoding="utf-8"))
-        ids = data["ids"]
-        conn.executemany(
-            "UPDATE stories SET geo = NULL WHERE id = ?", [(i,) for i in ids]
+        applied = data.get("applied") or [{"id": i, "geo": None} for i in data["ids"]]
+        # Narrow the revert the same way the apply was narrowed: only blank a
+        # row that still holds exactly the value this snapshot wrote. A later
+        # run may have re-derived a real geo for it, and blanking that would
+        # destroy good data rather than undo us.
+        cur = conn.executemany(
+            "UPDATE stories SET geo = NULL WHERE id = ? AND geo = ?",
+            [(row["id"], row["geo"]) for row in applied],
         )
         conn.commit()
-        print(f"reverted {len(ids)} stories to geo=NULL")
+        print(f"reverted {cur.rowcount} of {len(applied)} stories to geo=NULL")
+        print("(rows whose geo has since changed were left alone)")
         return 0
 
     updates, stats = _plan(conn, args.days)

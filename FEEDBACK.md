@@ -140,6 +140,24 @@ way. `ranker_provider=anthropic`, model `claude-sonnet-4-5`, key present — the
 account itself is the blocker, only an org admin can resolve it (billing or
 appeal at console.anthropic.com).
 
+### 16. The candidate ceiling is applied before the filters, not after  ·  priority: LOW  ·  blocked on #12
+`candidate_pool_size` (120) is a `LIMIT` in the SQL
+(`storage.list_stories`), and both the topicality gate and the blocked-domain
+re-check run *after* it. So the effective candidate count is quietly below the
+ceiling — 71 of 120 on 3 Sept 2026, with 49 dropped as non-healthcare.
+
+**Deliberately not fixed yet, and the reason is #12.** The obvious fix is to
+raise the limit, but every extra candidate lands in the ranking prompt, and
+that call already took **331.8s against a 120s timeout, clearing the posting
+deadline by 7 seconds**. Trading a small recall gain for a higher chance of a
+*late* digest is the wrong trade while #12 is open.
+
+The 2026-09-03 change that lets each channel select from the whole ranked pool
+(rather than the geo-blind cut) makes a bigger pool more valuable than it was,
+so this is worth revisiting — but **after** #12, not before. Filtering in SQL
+instead of raising the limit would sidestep the trade entirely if the
+topicality lexicon can be expressed there.
+
 ### 15. A partial ranker response is visible but not repaired  ·  priority: MEDIUM
 The 2026-09-03 release treats thin decision coverage (<60% of candidates) as a
 degraded run, so `used_fallback` flips and the Slack notice fires. That makes

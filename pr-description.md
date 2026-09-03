@@ -206,6 +206,48 @@ failure *visible*, which is the part that mattered, and Perplexity shows no
 truncation (5,693–7,651 completion tokens across 22 runs). Recorded as
 FEEDBACK #15.
 
+## Review round 3
+
+Both blockers reproduced and fixed. Five of six suggestions fixed; one deferred
+with a reason.
+
+**Blocker: `filter_by_geo` re-selected from an already-capped, geo-blind cut.**
+Reproduced at 120 candidates on a 70/20/10 split: the US channel got **6 items
+and 1 of 8 bucket sections while 24 eligible US stories sat unused**. `_select`
+discarded the full per-bucket lists, so no downstream filter could reach them.
+`RankingResult` now carries `ranked_by_bucket` — every ranked candidate,
+grouped and ordered — and each channel makes its own selection from that. Same
+simulation after the fix: **21 items and 8/8 sections for both channels.**
+The review was right that the re-selection alone couldn't fix this and that the
+fix had to happen before the cap.
+
+**Blocker: a zero-decision response was reported healthy.** The `bool(decisions)`
+guard exempted the worst case. Confirmed: `{"stories": []}` and a response whose
+`story_id`s match nothing both parse cleanly, so `parse_fallback` stays False,
+and both shipped 21 wholly un-ranked stories with no Slack notice. Guard removed;
+coverage 0 now counts as partial.
+
+Also fixed: `--revert` on the backfill now matches `AND geo = ?` so it can only
+undo its own writes, never blank a geo a later run re-derived; the
+`unknown_geography` audit fires once per distinct value instead of once per feed
+item and is wrapped so a logs-dir failure can't abort feed parsing; and the
+`filter_by_geo` tests are now built from a **real** `rank_stories` result rather
+than hand-made fixtures — the review correctly identified that the old fixtures
+"describe a world without the per-bucket cap", which is exactly why the first
+blocker survived a green suite. Coverage is now tested at 0/N as well as 1/N
+and N/N.
+
+**Deferred, with reason: the candidate ceiling applied before the filters**
+(`candidate_pool_size` is a SQL `LIMIT`, so topicality and blocklist drops leave
+the effective count below it — 71 of 120 on 3 Sept). The fix is to raise the
+limit, but every extra candidate enters the ranking prompt, and that call
+already took **331.8s against a 120s timeout and cleared the posting deadline by
+7 seconds** (FEEDBACK #12). Raising it now trades a small recall gain for a
+higher chance of a *late* digest, which is the worse failure. Recorded as
+FEEDBACK #16, explicitly blocked on #12. Note this PR makes a bigger pool more
+valuable than before, since each channel now selects from the whole ranked set —
+so it is worth doing, after the latency work.
+
 ## Deploy notes
 
 No env, schema, dependency or infra changes.

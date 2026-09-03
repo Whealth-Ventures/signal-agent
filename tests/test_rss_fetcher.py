@@ -379,3 +379,29 @@ class LiveSmokeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnknownGeographyLoggingTest(unittest.TestCase):
+    """A typo'd Geography cell must be visible, but must not spam the log once
+    per feed item, and must never abort feed parsing."""
+
+    def setUp(self) -> None:
+        rf._WARNED_GEOS.clear()
+
+    def test_logged_once_per_distinct_value(self) -> None:
+        with mock.patch.object(rf, "_log_record") as log:
+            for _ in range(5):
+                self.assertEqual(rf._norm_signal_geo("APAC"), "Global")
+            self.assertEqual(rf._norm_signal_geo("EMEA"), "Global")
+        events = [c.args[0]["value"] for c in log.call_args_list]
+        self.assertEqual(events, ["APAC", "EMEA"])
+
+    def test_known_values_never_log(self) -> None:
+        with mock.patch.object(rf, "_log_record") as log:
+            for v in ("India", "US", "Global", "global", ""):
+                rf._norm_signal_geo(v)
+        log.assert_not_called()
+
+    def test_log_failure_does_not_break_parsing(self) -> None:
+        with mock.patch.object(rf, "_log_record", side_effect=OSError("no disk")):
+            self.assertEqual(rf._norm_signal_geo("APAC"), "Global")

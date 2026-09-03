@@ -261,7 +261,7 @@ class SelectionTest(unittest.TestCase):
                    for i in range(3)]
         grouped = ranker._group_for_prompt(stories)
         decisions = {s.id: ("A", "x") for s in stories}
-        top, by_priority = ranker._select(
+        top, by_priority, _all = ranker._select(
             grouped, decisions, per_bucket_max=2, top_summary_size=0,
         )
         self.assertEqual(top, [])
@@ -274,7 +274,7 @@ class SelectionTest(unittest.TestCase):
         ]
         grouped = ranker._group_for_prompt(stories)
         decisions = {stories[0].id: ("S", "x"), stories[1].id: ("C", "drop")}
-        _, by_priority = ranker._select(
+        _, by_priority, _all = ranker._select(
             grouped, decisions, per_bucket_max=2, top_summary_size=0,
         )
         ids = {r.story.id for r in by_priority.get("venture_ipo", [])}
@@ -289,7 +289,7 @@ class SelectionTest(unittest.TestCase):
         ]
         grouped = ranker._group_for_prompt(stories)
         decisions = {stories[0].id: ("S", "x"), stories[1].id: ("A", "y")}
-        top, by_priority = ranker._select(
+        top, by_priority, _all = ranker._select(
             grouped, decisions, per_bucket_max=2, top_summary_size=1,
         )
         self.assertEqual(len(top), 1)
@@ -303,7 +303,7 @@ class SelectionTest(unittest.TestCase):
         stories = [_mk_story("s1", priority_bucket="venture_ipo")]
         grouped = ranker._group_for_prompt(stories)
         decisions = {stories[0].id: ("S", "x")}
-        top, by_priority = ranker._select(
+        top, by_priority, _all = ranker._select(
             grouped, decisions, per_bucket_max=2, top_summary_size=1,
         )
         self.assertEqual(len(top), 1)
@@ -316,7 +316,7 @@ class SelectionTest(unittest.TestCase):
         stories = [_mk_story("s1", priority_bucket=None)]
         grouped = ranker._group_for_prompt(stories)
         decisions = {stories[0].id: ("S", "x")}
-        top, by_priority = ranker._select(
+        top, by_priority, _all = ranker._select(
             grouped, decisions, per_bucket_max=2, top_summary_size=5,
         )
         self.assertEqual(top, [])
@@ -331,7 +331,7 @@ class SelectionTest(unittest.TestCase):
         ]
         grouped = ranker._group_for_prompt(stories)
         decisions = {s.id: ("A", "x") for s in stories}
-        _, by_priority = ranker._select(
+        _, by_priority, _all = ranker._select(
             grouped, decisions, per_bucket_max=2, top_summary_size=0,
         )
         self.assertEqual(len(by_priority["venture_ipo"]), 2)
@@ -739,6 +739,72 @@ class FullPathTest(_OrchestratorBase):
         )
         by_id = {r.story.id: r for r in result.flat}
         self.assertEqual(by_id[e.id].story.geo, "India")
+
+    def test_zero_decisions_counts_as_a_degraded_run(self) -> None:
+        """The worst case, and the one that slipped through: `{"stories": []}`
+        parses cleanly, so parse_fallback stays False. It used to ship a wholly
+        un-ranked digest — every story Tier A on its inherited geo and bucket —
+        reported as a normal run with no Slack notice."""
+        self._seed()
+        for label, text in (
+            ("empty list", json.dumps({"stories": []})),
+            ("ids match nothing", json.dumps({"stories": [
+                {"story_id": "not_a_real_id", "tier": "A", "one_liner": "x"},
+            ]})),
+        ):
+            with self.subTest(label):
+                result = ranker.rank_stories(
+                    conn=self.conn, client=FakePerplexityClient(text),
+                )
+                self.assertTrue(result.used_fallback)
+                self.assertTrue(result.flat)   # still ships, just flagged
+
+    def test_each_channel_selects_from_the_whole_pool(self) -> None:
+        """filter_by_geo must re-select from every ranked candidate, not from
+        the geo-blind per-bucket cut.
+
+        Built from a REAL rank_stories result rather than a hand-made one: the
+        earlier fixtures described a world without the per-bucket cap, which is
+        why this survived a green suite. With a 70/20 India/US split the US
+        channel got 6 items and 1 of 8 sections while 24 eligible US stories
+        sat unused.
+        """
+        buckets = [b.key for b in config.PRIORITY_BUCKETS]
+        stories = []
+        for i in range(120):
+            geo = "India" if i % 10 < 7 else ("US" if i % 10 < 9 else "Global")
+            st = _mk_story(
+                f"pool{i}", score=0.9 - i * 0.001, geo=geo,
+                priority_bucket=buckets[i % 8],
+                published_at=_FIXED_TS - timedelta(minutes=i),
+            )
+            stories.append(st)
+            storage.upsert_story(st, conn=self.conn)
+        self.conn.commit()
+        text = json.dumps({"stories": [
+            {"story_id": s.id, "tier": "A", "one_liner": f"line {i}",
+             "bucket": s.priority_bucket, "geo": s.geo}
+            for i, s in enumerate(stories)
+        ]})
+        result = ranker.rank_stories(
+            conn=self.conn, client=FakePerplexityClient(text),
+        )
+        self.assertFalse(result.used_fallback)
+        self.assertTrue(result.ranked_by_bucket, "full lists must be carried")
+
+        for label, allowed in (
+            ("india", {"India", "Global"}), ("us", {"US", "Global"}),
+        ):
+            with self.subTest(label):
+                out = ranker.filter_by_geo(result, allowed)
+                # Every section present, and every story actually belongs here.
+                self.assertEqual(len(out.by_priority), len(config.PRIORITY_BUCKETS))
+                for rs in out.flat:
+                    self.assertIn(rs.story.geo, allowed)
+                # No story appears in both the highlights and a body.
+                top_ids = {r.story.id for r in out.top_summary}
+                body_ids = {r.story.id for v in out.by_priority.values() for r in v}
+                self.assertEqual(top_ids & body_ids, set())
 
     def test_thin_coverage_counts_as_a_degraded_run(self) -> None:
         """A response deciding 1 of 7 stories is the shape max-token
