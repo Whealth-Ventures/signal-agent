@@ -214,6 +214,9 @@ async def _discover_with_body_async(
     return None, "failed", None
 
 
+_WARNED_GEOS: set[str] = set()
+
+
 def _norm_signal_geo(geography: str) -> str:
     """Publication `Geography` cell → the story-geo vocabulary.
 
@@ -227,6 +230,22 @@ def _norm_signal_geo(geography: str) -> str:
         return "India"
     if g == "us":
         return "US"
+    if g and g != "global" and g not in _WARNED_GEOS:
+        # Not fatal, but this layer decides geo whenever the ranker is silent,
+        # so a typo'd cell should be visible rather than silently "Global".
+        # Once per distinct value, not once per feed item — one bad cell would
+        # otherwise write a line for every story that publication produces.
+        # Guarded, so a logs-dir failure can't abort feed parsing.
+        _WARNED_GEOS.add(g)
+        try:
+            _log_record({
+                "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "event": "unknown_geography",
+                "value": geography,
+                "coerced_to": "Global",
+            })
+        except Exception:
+            pass
     return "Global"
 
 

@@ -165,6 +165,26 @@ class TrackACoverageTest(unittest.TestCase):
         expected = {b.key for b in config.PRIORITY_BUCKETS if b.geos}
         self.assertSetEqual(seen_keys, expected)
 
+    def test_display_only_bucket_does_not_steal_track_b_coverage(self) -> None:
+        """A display-only bucket emits no Track A plans, so its sub_buckets are
+        covered by nothing. If they still counted as "priority subs", a
+        placeholder that happened to match a Master Keywords sub-bucket name
+        would delete that sub-bucket from BOTH tracks, silently."""
+        real_sub = next(iter(qp._priority_sub_bucket_names()))
+        display_only = config.PriorityBucket(
+            key="other_healthcare",
+            display="Other healthcare news",
+            sub_buckets=(real_sub,),      # worst case: an exact collision
+            geos=(),
+        )
+        before = qp._priority_sub_bucket_names()
+        with mock.patch.object(
+            config, "PRIORITY_BUCKETS",
+            tuple(config.PRIORITY_BUCKETS) + (display_only,),
+        ):
+            after = qp._priority_sub_bucket_names()
+        self.assertEqual(before, after)
+
     def test_display_only_bucket_emits_no_plans(self) -> None:
         """A geos-less bucket must cost zero query plans — that is what makes
         an 'Other healthcare news' catch-all free to add."""

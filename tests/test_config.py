@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import config  # noqa: E402
+import tunables  # noqa: E402
 
 
 class ConfigPathsTest(unittest.TestCase):
@@ -152,6 +153,43 @@ class ConfigEnvTest(unittest.TestCase):
         # The .env in the repo is the source of truth for this run; if it's
         # missing keys, this should fail and tell us which.
         config.check_env()
+
+
+class BlankSettingCellTest(unittest.TestCase):
+    """A row present with an EMPTY value cell must behave as absent.
+
+    openpyxl gives None for a blank cell, and clearing a cell is how an
+    operator turns a setting off. Before this, blanking `default_bucket` or
+    `blocked_domains` raised inside `import config` and took down every entry
+    point — digest, sector and admin alike.
+    """
+
+    def _t(self, settings: dict) -> tunables.Tunables:
+        return tunables.Tunables(
+            settings=settings, boosters={}, priority_buckets=(), source_tiers=(),
+        )
+
+    def test_blank_value_falls_back_to_the_default(self) -> None:
+        t = self._t({"default_bucket": None})
+        self.assertEqual(t.get("default_bucket", ""), "")
+        self.assertEqual(t.get_str("default_bucket", "fallback"), "fallback")
+        self.assertEqual(t.get_int("some_number", 7), 7)
+
+    def test_blank_value_with_no_default_still_raises_clearly(self) -> None:
+        t = self._t({"default_bucket": None})
+        with self.assertRaises(RuntimeError) as ctx:
+            t.get("default_bucket")
+        self.assertIn("blank", str(ctx.exception))
+
+    def test_present_value_is_unaffected(self) -> None:
+        t = self._t({"default_bucket": "other_healthcare", "n": 3})
+        self.assertEqual(t.get_str("default_bucket", ""), "other_healthcare")
+        self.assertEqual(t.get_int("n", 99), 3)
+
+    def test_config_module_level_values_are_the_right_shape(self) -> None:
+        # Whatever the sheet says, these must never be None.
+        self.assertIsInstance(config.DEFAULT_BUCKET, str)
+        self.assertIsInstance(config.BLOCKED_DOMAINS, tuple)
 
 
 if __name__ == "__main__":
