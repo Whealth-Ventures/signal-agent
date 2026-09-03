@@ -140,6 +140,22 @@ way. `ranker_provider=anthropic`, model `claude-sonnet-4-5`, key present — the
 account itself is the blocker, only an org admin can resolve it (billing or
 appeal at console.anthropic.com).
 
+### 15. A partial ranker response is visible but not repaired  ·  priority: MEDIUM
+The 2026-09-03 release treats thin decision coverage (<60% of candidates) as a
+degraded run, so `used_fallback` flips and the Slack notice fires. That makes
+the failure *visible*, which was the urgent half. It does **not** repair it: the
+undecided stories still fall back to the inherited bucket and geo, both proxies
+for where we found the story rather than what it says.
+
+The trigger is max-token truncation (#11). Perplexity currently shows no sign
+of it — 5,693 to 7,651 completion tokens across 22 runs, well inside its
+limit — so this is latent rather than live, and becomes live the moment
+`ranker_provider` goes back to `anthropic`.
+
+**Fix directions:** split the ranking into two calls when the candidate count
+is high, or retry once with a smaller candidate set when coverage comes back
+thin. Either is real work; the threshold buys time.
+
 ### 12. The digest nearly posted late — the Perplexity ranking call took 331s  ·  priority: MEDIUM
 **Problem (3 Sept 2026 India run).** `sonar-reasoning-pro` ranking took
 **331.8s** against a nominal `HTTP_TIMEOUT_RANK_S` of 120s, so it retried at

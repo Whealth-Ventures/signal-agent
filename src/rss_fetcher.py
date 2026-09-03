@@ -227,6 +227,15 @@ def _norm_signal_geo(geography: str) -> str:
         return "India"
     if g == "us":
         return "US"
+    if g and g != "global":
+        # Not fatal, but this layer decides geo whenever the ranker is silent,
+        # so a typo'd cell should be visible rather than silently "Global".
+        _log_record({
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "event": "unknown_geography",
+            "value": geography,
+            "coerced_to": "Global",
+        })
     return "Global"
 
 

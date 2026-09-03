@@ -148,7 +148,12 @@ RANKER_PROVIDER = _t.get_str("ranker_provider")
 # Track-A one. Empty (the default) falls back to the FIRST priority bucket,
 # which is how an opinion piece ended up filed under "Venture & IPO" on
 # 2 Sept 2026. Point this at a display-only catch-all instead.
-DEFAULT_BUCKET = _t.get_str("default_bucket", "")
+#
+# `get(...) or ""` rather than `get_str(..., "")`: a row that EXISTS with a
+# blank value cell stores None, which `get` returns instead of the default, and
+# `get_str` then raises — crashing `import config` and so every entry point.
+# Clearing the cell is the natural way to turn this off, so it must be legal.
+DEFAULT_BUCKET = str(_t.get("default_bucket", "") or "").strip()
 
 # Hosts whose URLs are never allowed into the signal pool, semicolon-separated
 # in tuning.xlsx. Matched on the registrable host and any subdomain.
@@ -160,9 +165,10 @@ DEFAULT_BUCKET = _t.get_str("default_bucket", "")
 # article's own date is lost. 10 such stories shipped between 22 Jul and
 # 3 Sept 2026 — including "Even Healthcare Series B", which was actually
 # reported on 23 July and resurfaced on 2 September via a Facebook repost.
+# `get(...) or ""` for the same blank-cell reason as DEFAULT_BUCKET above.
 BLOCKED_DOMAINS: tuple[str, ...] = tuple(
     h.strip().lower().lstrip(".")
-    for h in _t.get_str("blocked_domains", "").split(";")
+    for h in str(_t.get("blocked_domains", "") or "").split(";")
     if h.strip()
 )
 ANTHROPIC_MODEL_RANK = _t.get_str("anthropic_model_rank")

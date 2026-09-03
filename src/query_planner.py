@@ -507,8 +507,17 @@ def _build_ai_plans(
 # --- Track B: rotated coverage of non-priority sub-buckets -------------
 
 def _priority_sub_bucket_names() -> set[str]:
+    """Sub-buckets already covered by a Track A plan, so Track B can skip them.
+
+    Display-only buckets (no geos) are excluded: they emit no Track A plans, so
+    their sub_buckets are not covered by anything. Including them would let a
+    placeholder that happens to match a Master Keywords sub-bucket name delete
+    that sub-bucket's coverage from BOTH tracks, silently.
+    """
     out: set[str] = set()
     for b in config.PRIORITY_BUCKETS:
+        if not b.geos:
+            continue
         out.update(b.sub_buckets)
     return out
 

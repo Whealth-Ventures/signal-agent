@@ -66,13 +66,20 @@ class Tunables:
     def get(self, name: str, default: Any = _MISSING) -> Any:
         """Look up a Settings-sheet value. If `default` is supplied it's returned
         when the row is absent (lets new knobs ship before the xlsx is updated);
-        otherwise a missing row raises with a clear pointer at the xlsx."""
-        if name not in self.settings:
+        otherwise a missing row raises with a clear pointer at the xlsx.
+
+        A row that EXISTS with a blank value cell counts as absent. `openpyxl`
+        hands us None for an empty cell, and clearing a cell is the natural way
+        an operator turns a setting off — so without this, blanking one row
+        raised at import time and took down every entry point.
+        """
+        if name not in self.settings or self.settings[name] is None:
             if default is not _MISSING:
                 return default
             raise RuntimeError(
                 f"Tuning setting '{name}' not found in inputs/tuning.xlsx "
-                f"'Settings' sheet. Add a row with name='{name}'."
+                f"'Settings' sheet (or its value cell is blank). Add a row "
+                f"with name='{name}' and a value."
             )
         return self.settings[name]
 

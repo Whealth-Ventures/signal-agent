@@ -165,6 +165,47 @@ Two `test_config` cases fail locally for want of a `.env` (`OPENAI_API_KEY`,
 `PERPLEXITY_API_KEY`, `SLACK_WEBHOOK_URL`). Pre-existing and environmental,
 confirmed against a clean tree; CI supplies them.
 
+## Review round 2 (PR #16)
+
+Both blockers reproduced and fixed, plus every suggestion except one.
+
+**Blocker: blank Settings cell crashed `import config`.** Fixed at the root
+rather than at the two call sites: `Tunables.get` now treats a row whose value
+cell is blank as absent ([src/tunables.py:66](src/tunables.py#L66)), so every
+current and future tunable is covered. Clearing a cell is how an operator turns
+a setting off, and both deploy notes tell them to add these rows.
+
+**Blocker: the `u:` identity key discarded the query string.** Reproduced —
+three unrelated `pharmabiz.com/NewsDetails.aspx?aid=…` articles collapsed to
+one. Worse than reported: the `s:` key collided too, because `NewsDetails.aspx`
+is 16 chars and passed the length guard. Now the `u:` key keeps the query minus
+tracking params (an article id often lives only there), and the `s:` key
+requires a hyphen as well as 12+ chars, so it fires on a real slug and not on a
+script name. Four regression tests.
+
+**`filter_by_geo` now re-runs selection instead of filtering it.** The review
+was right that item 1 invalidates the old docstring, and my own before/after
+render showed the symptom without my spotting the cause: two US highlights
+dropped and "Today's biggest stories" fell to a single bullet. Promoted stories
+are merged back into their buckets, geo-filtered, then top-summary and bodies
+are chosen again, so a dropped highlight is refilled.
+
+Also fixed: per-item audit for every duplicate drop (id, url, title, matched
+key, and the survivor it matched); the `geo` field spec moved out of the bucket
+legend where it read as a ninth bucket; thin decision coverage (<60%) now
+counts as a degraded run so the Slack notice fires on a truncated response;
+`_group_for_prompt` reordered score-primary so truncation costs the weakest
+candidates rather than the oldest; blocked domains gain a jsonl audit and are
+re-checked against the candidate pool, since the save-time filter is
+forward-only; geo-less buckets excluded from `_priority_sub_bucket_names`; and
+an unknown `Geography` cell is logged rather than silently coerced to Global.
+
+**Not adopted:** nothing outright, but the deeper fix for partial responses
+(retry or split the call) is deferred — the 60% coverage threshold makes the
+failure *visible*, which is the part that mattered, and Perplexity shows no
+truncation (5,693–7,651 completion tokens across 22 runs). Recorded as
+FEEDBACK #15.
+
 ## Deploy notes
 
 No env, schema, dependency or infra changes.
@@ -174,7 +215,11 @@ first must NOT be made until this is deployed, since the currently deployed code
 rejects a bucket with empty `geos`:
 
 1. `Priority Buckets` → add row 10: key `other_healthcare`, display
-   `Other healthcare news`, `sub_buckets` any placeholder, **`geos` blank**.
+   `Other healthcare news`, `sub_buckets` `(catch-all)`, **`geos` blank**.
+   `sub_buckets` cannot be empty (the loader requires it), but the value is
+   inert: geo-less buckets are now excluded from `_priority_sub_bucket_names`,
+   so even a placeholder that collides with a real Master Keywords sub-bucket
+   name can't strip that sub-bucket's Track B coverage.
 2. `Settings` → add `default_bucket` = `other_healthcare`.
 3. `Settings` → add `blocked_domains` =
    `facebook.com; fb.com; fb.watch; instagram.com; x.com; twitter.com; linkedin.com; reddit.com; youtube.com; youtu.be`

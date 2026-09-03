@@ -228,6 +228,21 @@ def _story_from_row(row: sqlite3.Row) -> Story:
 
 # --- Signals ------------------------------------------------------------
 
+def _log_blocked(dropped: list[tuple[str, str]]) -> None:
+    """Append the dropped (source, url) pairs to data/logs/blocked_<date>.jsonl."""
+    try:
+        config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        path = config.LOGS_DIR / f"blocked_{_utcnow().strftime('%Y-%m-%d')}.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            for source, url in dropped:
+                f.write(json.dumps({
+                    "ts": _iso(_utcnow()), "source": source, "url": url,
+                }) + "\n")
+    except Exception:
+        # Never let an audit write break a fetch.
+        pass
+
+
 def is_blocked_url(url: str) -> bool:
     """Is this URL on the `blocked_domains` list from tuning.xlsx?
 
@@ -261,10 +276,10 @@ def save_signals(
     fetched_at = fetched_at or _utcnow()
     fetched_iso = _iso(fetched_at)
     rows = []
-    blocked = 0
+    blocked_urls: list[tuple[str, str]] = []
     for s in signals:
         if is_blocked_url(s.url):
-            blocked += 1
+            blocked_urls.append((s.source, s.url))
             continue
         sid = signal_id(s.source, s.url)
         rows.append((
@@ -273,8 +288,11 @@ def save_signals(
             json.dumps(s.raw, default=str) if s.raw else None,
             fetched_iso,
         ))
-    if blocked:
-        print(f"      dropped {blocked} signal(s) on blocked domains")
+    if blocked_urls:
+        # An audit line, not just a console count: a typo in `blocked_domains`
+        # would otherwise silence a legitimate source with nothing to show it.
+        _log_blocked(blocked_urls)
+        print(f"      dropped {len(blocked_urls)} signal(s) on blocked domains")
     if not rows:
         return 0
     with _maybe_own(conn) as c:

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import config
 import storage
@@ -56,6 +56,10 @@ from perplexity_client import (
 ONE_LINER_MAX_CHARS = config.ONE_LINER_MAX_CHARS
 SUMMARY_MAX_CHARS_IN_PROMPT = config.RANKER_SUMMARY_MAX_CHARS
 MIN_CANDIDATE_SCORE = config.MIN_CANDIDATE_SCORE
+
+# Below this share of candidates carrying an LLM decision, the run counts as
+# degraded — see the `partial` check in rank_stories.
+MIN_DECISION_COVERAGE = 0.6
 
 Tier = Literal["S", "A", "B", "C"]
 _VALID_TIERS: tuple[Tier, ...] = ("S", "A", "B", "C")
@@ -151,11 +155,13 @@ def _group_for_prompt(stories: list[Story]) -> dict[str, list[Story]]:
     for st in stories:
         key = st.priority_bucket if st.priority_bucket in out else OTHER_KEY
         out[key].append(st)
-    # Within each group, most recent first. Relevance is no longer a ranking
-    # signal (see #5 / rank_stories) — it survives only as a last-resort
-    # deterministic tiebreak when two stories share a publish time.
+    # Within each group, highest relevance first, recency as the tiebreak —
+    # same order the digest itself uses (see _ordered_within_category). This
+    # ordering decides which stories the model reaches first, so under a
+    # truncated response it is the strongest candidates that get a tier,
+    # bucket and geo rather than merely the newest.
     for k in out:
-        out[k].sort(key=lambda s: (-s.published_at.timestamp(), -s.relevance_score))
+        out[k].sort(key=lambda s: (-s.relevance_score, -s.published_at.timestamp()))
     return out
 
 
@@ -178,10 +184,6 @@ def build_prompt(grouped: dict[str, list[Story]]) -> str:
         "action, the outcome. Punchy bullet style, Axios PM / Morning Brew. "
         "No commentary, no \"this matters because\", no vague abstractions. "
         "Do NOT prefix a geo tag like [IND]/[US] — that is added automatically.",
-        "  - `bucket`: EXACTLY one of these keys — the single best fit for the "
-        f"story: {bucket_keys}. Every story must get a bucket; if it doesn't "
-        "obviously fit one, choose the CLOSEST. Buckets:",
-        _bucket_legend(),
         "  - `geo`: EXACTLY \"India\", \"US\" or \"Global\" — where the NEWS "
         "happened, judged from the story itself. This is NOT the nationality of "
         "the publication that reported it: an Indian outlet covering a US "
@@ -191,6 +193,10 @@ def build_prompt(grouped: dict[str, list[Story]]) -> str:
         "worldwide product launch, cross-border research. The `geo=` value shown "
         "against each candidate below is a weak hint from where we found it; "
         "correct it when the story says otherwise.",
+        "  - `bucket`: EXACTLY one of these keys — the single best fit for the "
+        f"story: {bucket_keys}. Every story must get a bucket; if it doesn't "
+        "obviously fit one, choose the CLOSEST. Buckets:",
+        _bucket_legend(),
         "",
         "Examples of one_liner quality:",
         "  BAD  (vague, no specifics): "
@@ -395,7 +401,32 @@ def _select(
             rs_by_key[b.key] = [
                 RankedStory(story=s, tier=t, one_liner=ol) for s, t, ol in ordered
             ]
+    return _split_top_and_bodies(
+        rs_by_key, per_bucket_max=per_bucket_max,
+        top_summary_size=top_summary_size,
+    )
 
+
+def _rank_within_bucket(r: RankedStory) -> tuple[int, float, float]:
+    """Same ordering as _ordered_within_category, for already-ranked stories."""
+    return (
+        _TIER_RANK[r.tier],
+        -r.story.relevance_score,
+        -r.story.published_at.timestamp(),
+    )
+
+
+def _split_top_and_bodies(
+    rs_by_key: dict[str, list[RankedStory]],
+    *,
+    per_bucket_max: int,
+    top_summary_size: int,
+) -> tuple[list[RankedStory], dict[str, list[RankedStory]]]:
+    """Steps 2 and 3 of the rule above, over already-ranked stories.
+
+    Split out so `filter_by_geo` can re-run the same selection on a geo-scoped
+    set instead of filtering an already-made one.
+    """
     top = _top_summary(rs_by_key, [], top_summary_size)
     top_ids = {r.story.id for r in top}
 
@@ -501,6 +532,29 @@ def _build_ranker_client(
 
 _PUNCT_RE = re.compile(r"[^a-z0-9]+")
 
+# Query parameters that identify a campaign, not an article. Everything else is
+# assumed to be load-bearing: on plenty of trade publishers the article id
+# lives ONLY in the query (pharmabiz.com/NewsDetails.aspx?aid=…), so dropping
+# the whole query string would collapse every article on the site into one.
+_TRACKING_PARAMS = frozenset({
+    "cid", "fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref", "referrer",
+    "source", "spm", "yclid",
+})
+
+
+def _norm_query(raw: str) -> str:
+    """Query string minus tracking noise, sorted for stability."""
+    if not raw:
+        return ""
+    kept = [
+        (k, v) for k, v in parse_qsl(raw, keep_blank_values=True)
+        if k.lower() not in _TRACKING_PARAMS
+        and not k.lower().startswith("utm_")
+    ]
+    if not kept:
+        return ""
+    return "?" + "&".join(f"{k.lower()}={v}" for k, v in sorted(kept))
+
 
 def _identity_keys(story: Story) -> list[str]:
     """Every key by which this story counts as "the same news" as another.
@@ -511,10 +565,14 @@ def _identity_keys(story: Story) -> list[str]:
     the same digest section. Three keys, any of which is a match:
 
       t:<title>     normalised title (case, punctuation and spacing removed)
-      u:<url>       normalised URL (scheme, www, query, fragment, trailing /)
+      u:<url>       host + path + query, minus tracking params. The query is
+                    KEPT because some publishers put the article id there and
+                    nowhere else; dropping it collapsed three unrelated
+                    pharmabiz.com articles into one.
       s:<host>/<slug>  host + last path segment, which survives the differing
-                    middle segments above. Only used for segments of 12+ chars
-                    so it can't collide on /feed, /news or /2026.
+                    middle segments above. Requires 12+ chars AND a hyphen, so
+                    it fires on a real slug and not on /feed, /news, /2026 or
+                    a script name like /NewsDetails.aspx.
     """
     keys: list[str] = []
     title = _PUNCT_RE.sub(" ", (story.canonical_title or "").lower()).strip()
@@ -525,10 +583,12 @@ def _identity_keys(story: Story) -> list[str]:
     host = (p.hostname or "").lower().removeprefix("www.")
     path = (p.path or "").rstrip("/")
     if host:
-        keys.append(f"u:{host}{path.lower()}")
+        keys.append(f"u:{host}{path.lower()}{_norm_query(p.query)}")
         segments = [seg for seg in path.split("/") if seg]
-        if segments and len(segments[-1]) >= 12:
-            keys.append(f"s:{host}/{segments[-1].lower()}")
+        if segments:
+            last = segments[-1].lower()
+            if len(last) >= 12 and "-" in last:
+                keys.append(f"s:{host}/{last}")
     return keys
 
 
@@ -541,16 +601,35 @@ def collapse_duplicates(stories: list[Story]) -> tuple[list[Story], int]:
     (on 3 Sept 2026 it tiered both, and AIG Hospitals and Luma Fertility each
     shipped twice, costing 4 of 15 slots).
 
+    Every drop is logged with the story it matched and the key that matched it,
+    so a wrong collapse is findable after the fact instead of being a count.
+
     Returns (survivors in their original order, dropped_count).
     """
     best_first = sorted(stories, key=lambda s: -s.relevance_score)
-    seen: set[str] = set()
+    seen: dict[str, Story] = {}
     keep: set[str] = set()
     for st in best_first:
         keys = _identity_keys(st)
-        if any(k in seen for k in keys):
+        hit = next((k for k in keys if k in seen), None)
+        if hit is not None:
+            kept = seen[hit]
+            _log({
+                "step": "duplicate_dropped",
+                "matched_on": hit.split(":", 1)[0],
+                "key": hit,
+                "dropped": {
+                    "id": st.id, "score": round(st.relevance_score, 4),
+                    "title": st.canonical_title, "url": st.canonical_url,
+                },
+                "kept": {
+                    "id": kept.id, "score": round(kept.relevance_score, 4),
+                    "title": kept.canonical_title, "url": kept.canonical_url,
+                },
+            })
             continue
-        seen.update(keys)
+        for k in keys:
+            seen[k] = st
         keep.add(st.id)
     survivors = [st for st in stories if st.id in keep]
     return survivors, len(stories) - len(survivors)
@@ -626,6 +705,19 @@ def rank_stories(
     if dropped_non_healthcare:
         _log({"step": "topicality_gate", "dropped_non_healthcare": dropped_non_healthcare})
 
+    # The save-time blocklist is forward-only: stories ingested before a host
+    # was blocked stay in the 30-day pool and remain eligible. Re-check here so
+    # adding a host takes effect on the next run, not in a month.
+    still_blocked = [s for s in candidates if storage.is_blocked_url(s.canonical_url)]
+    if still_blocked:
+        _log({
+            "step": "blocked_domain_candidates_dropped",
+            "count": len(still_blocked),
+            "urls": [s.canonical_url for s in still_blocked[:20]],
+        })
+        blocked_ids = {s.id for s in still_blocked}
+        candidates = [s for s in candidates if s.id not in blocked_ids]
+
     # Same news, told twice (or under two URLs) must never occupy two slots.
     candidates, dropped_duplicates = collapse_duplicates(candidates)
     if dropped_duplicates:
@@ -664,7 +756,20 @@ def rank_stories(
     decisions, llm_buckets, llm_geos, parse_fallback = parse_ranked(
         response_text, stories_by_id,
     )
-    used_fallback = bool(call_error) or parse_fallback
+    # A response that decided only a handful of stories is a degraded run, not
+    # a healthy one: it is the shape max-token truncation takes (FEEDBACK #11),
+    # and the undecided remainder silently falls back to the inherited geo and
+    # bucket. Treat thin coverage as fallback so the Slack notice fires.
+    coverage = len(decisions) / len(candidates) if candidates else 1.0
+    partial = bool(decisions) and coverage < MIN_DECISION_COVERAGE
+    if partial:
+        _log({
+            "step": "partial_response",
+            "decided": len(decisions),
+            "candidates": len(candidates),
+            "coverage": round(coverage, 3),
+        })
+    used_fallback = bool(call_error) or parse_fallback or partial
 
     # Force every candidate into one of the 8 buckets (no 'Other' section). The
     # LLM picks the best fit; Track-A stories fall back to their own bucket; the
@@ -750,26 +855,62 @@ def _empty_result(start: float) -> RankingResult:
     )
 
 
-def filter_by_geo(r: RankingResult, allowed: set[str]) -> RankingResult:
+def filter_by_geo(
+    r: RankingResult,
+    allowed: set[str],
+    *,
+    per_bucket_max: int = config.PER_BUCKET_MAX,
+    top_summary_size: int = config.TOP_SUMMARY_SIZE,
+) -> RankingResult:
     """Return a copy of `r` keeping only stories whose geo is in `allowed`.
 
     Used to route one ranking into two geo channels. `allowed` is e.g.
-    {"India", "Global"} for the India channel. A story with geo=None (RSS /
-    unknown) is treated as Global and kept for BOTH channels, matching the
-    console's `_geo_tag` default — so unclassified items are never dropped.
-    Empty buckets are pruned; top_summary is filtered (not recomputed) — the
-    two runs are already geo-scoped at fetch time, so this is mostly a safety
-    net against cross-geo RSS bleed. ponytail: filter, don't re-rank per geo.
+    {"India", "Global"} for the India channel. A story with geo=None (unknown)
+    is treated as Global and kept for BOTH channels, matching the console's
+    `_geo_tag` default — so unclassified items are never dropped.
+
+    Selection is **re-run**, not filtered. `_select` removes a promoted story
+    from its bucket body, so simply dropping a highlight left a hole nothing
+    could fill: on the 3 Sept data, filtering two US stories out of the top-5
+    reduced "Today's biggest stories" to a single bullet. Now the promoted
+    stories are merged back into their buckets, the geo filter is applied to
+    the whole set, and the top-summary and bodies are chosen again from what
+    survives — so a dropped highlight is replaced by the next-best story that
+    does belong in this channel.
+
+    This mattered less when geo was a weak fetch-time proxy and most RSS
+    stories were None (kept everywhere). Now that the ranker assigns a specific
+    geo per story, this filter is the primary router and drops real volume.
     """
     def keep(rs: RankedStory) -> bool:
         return rs.story.geo is None or rs.story.geo in allowed
 
-    by_priority = {k: [x for x in v if keep(x)] for k, v in r.by_priority.items()}
-    by_priority = {k: v for k, v in by_priority.items() if v}
+    # Re-merge the promoted highlights back into the buckets they came from.
+    merged: dict[str, list[RankedStory]] = {
+        k: list(v) for k, v in r.by_priority.items()
+    }
+    default_key = _default_bucket_key()
+    for rs in r.top_summary:
+        key = rs.story.priority_bucket or default_key
+        merged.setdefault(key, []).append(rs)
+
+    scoped: dict[str, list[RankedStory]] = {}
+    for key, items in merged.items():
+        kept = [x for x in items if keep(x)]
+        if kept:
+            scoped[key] = sorted(kept, key=_rank_within_bucket)
+
+    top, by_priority = _split_top_and_bodies(
+        scoped, per_bucket_max=per_bucket_max, top_summary_size=top_summary_size,
+    )
+    flat: list[RankedStory] = list(top)
+    for b in config.PRIORITY_BUCKETS:
+        flat.extend(by_priority.get(b.key, []))
+
     return replace(
         r,
-        top_summary=[x for x in r.top_summary if keep(x)],
+        top_summary=top,
         by_priority=by_priority,
         other=[x for x in r.other if keep(x)],
-        flat=tuple(x for x in r.flat if keep(x)),
+        flat=tuple(flat),
     )

@@ -438,6 +438,59 @@ class CollapseDuplicatesTest(unittest.TestCase):
         self.assertEqual(dropped, 0)
         self.assertEqual([s.id for s in kept], [a.id, b.id, c.id])
 
+    def test_query_string_articles_stay_distinct(self) -> None:
+        """Regression: some publishers carry the article id ONLY in the query.
+        Discarding it collapsed three unrelated pharmabiz.com articles into
+        one, silently dropping two from the candidate pool."""
+        a = self._story(
+            "https://pharmabiz.com/NewsDetails.aspx?aid=101",
+            "Cipla launches new inhaler", 0.7,
+        )
+        b = self._story(
+            "https://pharmabiz.com/NewsDetails.aspx?aid=202",
+            "Sun Pharma gets USFDA nod", 0.6,
+        )
+        c = self._story(
+            "https://pharmabiz.com/NewsDetails.aspx?aid=303",
+            "Lupin recalls batch", 0.5,
+        )
+        kept, dropped = ranker.collapse_duplicates([a, b, c])
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(kept), 3)
+
+    def test_same_query_article_still_collapses(self) -> None:
+        a = self._story(
+            "https://pharmabiz.com/NewsDetails.aspx?aid=101",
+            "Cipla launches new inhaler", 0.7,
+        )
+        b = self._story(
+            "https://pharmabiz.com/NewsDetails.aspx?aid=101&utm_source=x",
+            "Cipla launches inhaler (syndicated)", 0.4,
+        )
+        kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 1)
+        self.assertEqual(kept[0].id, a.id)
+
+    def test_tracking_params_do_not_defeat_the_url_key(self) -> None:
+        a = self._story("https://a.example/article-one", "T one", 0.5)
+        b = self._story(
+            "https://a.example/article-one?utm_campaign=z&cid=abc", "T two", 0.4,
+        )
+        _kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 1)
+
+    def test_script_name_last_segment_does_not_collide(self) -> None:
+        """`NewsDetails.aspx` is 16 chars, so the length guard alone passed it.
+        A real slug has a hyphen; a script name doesn't."""
+        a = self._story(
+            "https://x.example/NewsDetails.aspx?aid=1", "Story one", 0.5,
+        )
+        b = self._story(
+            "https://x.example/NewsDetails.aspx?aid=2", "Story two", 0.4,
+        )
+        _kept, dropped = ranker.collapse_duplicates([a, b])
+        self.assertEqual(dropped, 0)
+
     def test_short_last_segments_do_not_collide(self) -> None:
         """/feed and /news must not make two articles look like one."""
         a = self._story("https://a.example/health/feed", "First article", 0.5)
@@ -483,6 +536,63 @@ class DefaultBucketTest(unittest.TestCase):
                 ranker._default_bucket_key(),
             )
         self.assertEqual(eff, target)
+
+
+class FilterByGeoTest(unittest.TestCase):
+    """Selection must be re-run, not filtered: `_select` strips a promoted
+    story from its bucket body, so dropping a highlight used to leave a hole
+    nothing could fill. On the 3 Sept data that cut the highlights to one."""
+
+    @staticmethod
+    def _rs(slug: str, *, geo: str, bucket: str, score: float, tier="A"):
+        return ranker.RankedStory(
+            story=_mk_story(slug, score=score, geo=geo, priority_bucket=bucket),
+            tier=tier, one_liner=f"line {slug}",
+        )
+
+    def test_dropped_highlight_slot_is_refilled(self) -> None:
+        us1 = self._rs("us1", geo="US", bucket="venture_ipo", score=0.9)
+        us2 = self._rs("us2", geo="US", bucket="venture_ipo", score=0.85)
+        ind = self._rs("ind", geo="India", bucket="venture_ipo", score=0.4)
+        # As _select would leave it: the two US stories promoted, India in body.
+        r = ranker.RankingResult(
+            top_summary=[us1, us2], by_priority={"venture_ipo": [ind]},
+            other=[], candidates_count=3, used_fallback=False,
+            cost_usd=0.0, elapsed_seconds=0.0, flat=(us1, us2, ind),
+        )
+        out = ranker.filter_by_geo(r, {"India", "Global"})
+        # The India story is promoted into the vacated highlight slot rather
+        # than the highlights going empty.
+        self.assertEqual([x.story.id for x in out.top_summary], [ind.story.id])
+        self.assertEqual(out.by_priority, {})
+        self.assertEqual([x.story.id for x in out.flat], [ind.story.id])
+
+    def test_unknown_geo_still_kept_by_both_channels(self) -> None:
+        unk = self._rs("unk", geo=None, bucket="venture_ipo", score=0.5)
+        r = ranker.RankingResult(
+            top_summary=[unk], by_priority={}, other=[], candidates_count=1,
+            used_fallback=False, cost_usd=0.0, elapsed_seconds=0.0, flat=(unk,),
+        )
+        for allowed in ({"India", "Global"}, {"US", "Global"}):
+            out = ranker.filter_by_geo(r, allowed)
+            self.assertEqual(len(out.flat), 1)
+
+    def test_no_duplication_between_top_and_bodies(self) -> None:
+        items = [
+            self._rs(f"s{i}", geo="India", bucket="venture_ipo", score=0.9 - i / 100)
+            for i in range(6)
+        ]
+        r = ranker.RankingResult(
+            top_summary=items[:2], by_priority={"venture_ipo": items[2:]},
+            other=[], candidates_count=6, used_fallback=False,
+            cost_usd=0.0, elapsed_seconds=0.0, flat=tuple(items),
+        )
+        out = ranker.filter_by_geo(r, {"India", "Global"})
+        top_ids = {x.story.id for x in out.top_summary}
+        body_ids = {x.story.id for v in out.by_priority.values() for x in v}
+        self.assertEqual(top_ids & body_ids, set())
+        ids = [x.story.id for x in out.flat]
+        self.assertEqual(len(ids), len(set(ids)))
 
 
 class OrderWithinCategoryTest(unittest.TestCase):
@@ -629,6 +739,55 @@ class FullPathTest(_OrchestratorBase):
         )
         by_id = {r.story.id: r for r in result.flat}
         self.assertEqual(by_id[e.id].story.geo, "India")
+
+    def test_thin_coverage_counts_as_a_degraded_run(self) -> None:
+        """A response deciding 1 of 7 stories is the shape max-token
+        truncation takes (FEEDBACK #11). It used to read as healthy, so no
+        Slack notice fired and the undecided remainder silently fell back to
+        the inherited geo and bucket."""
+        stories = self._seed()
+        text = json.dumps({"stories": [
+            {"story_id": stories[0].id, "tier": "S", "one_liner": "only one",
+             "bucket": "fda_regulatory", "geo": "US"},
+        ]})
+        result = ranker.rank_stories(
+            conn=self.conn, client=FakePerplexityClient(text),
+        )
+        self.assertTrue(result.used_fallback)
+
+    def test_full_coverage_is_not_flagged(self) -> None:
+        stories = self._seed()
+        text = json.dumps({"stories": [
+            {"story_id": s.id, "tier": "A", "one_liner": "x"} for s in stories
+        ]})
+        result = ranker.rank_stories(
+            conn=self.conn, client=FakePerplexityClient(text),
+        )
+        self.assertFalse(result.used_fallback)
+
+    def test_blocked_domain_already_in_the_pool_is_dropped(self) -> None:
+        """The save-time filter is forward-only, so adding a host must take
+        effect on the next run rather than in 30 days."""
+        self._seed()
+        bad = Story(
+            id=story_id("https://www.facebook.com/x/posts/ai-daily-reporter"),
+            canonical_url="https://www.facebook.com/x/posts/ai-daily-reporter",
+            canonical_title="Hospital deal roundup from a Facebook repost",
+            canonical_summary="Healthcare funding news.",
+            published_at=_FIXED_TS,
+            relevance_score=0.99,          # would otherwise top the digest
+            geo="India",
+        )
+        storage.upsert_story(bad, conn=self.conn)
+        self.conn.commit()
+        text = json.dumps({"stories": [
+            {"story_id": bad.id, "tier": "S", "one_liner": "x"},
+        ]})
+        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)):
+            result = ranker.rank_stories(
+                conn=self.conn, client=FakePerplexityClient(text),
+            )
+        self.assertNotIn(bad.id, {r.story.id for r in result.flat})
 
     def test_llm_response_used(self) -> None:
         stories = self._seed()
