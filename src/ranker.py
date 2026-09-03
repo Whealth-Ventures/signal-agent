@@ -37,10 +37,11 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl, urlparse
 
+import numpy as np
+
 import config
 import storage
 from models import Story
-from scorer import cluster_signals
 from topicality import is_healthcare
 from perplexity_client import (
     ChatResponse,
@@ -667,17 +668,24 @@ def collapse_near_duplicates(
     Observed 3 Sept 2026: MediBuddy's appointment of Shalabh Shrivastava was
     reported by Entrackr (2 Sept), BioSpectrum (3 Sept 02:22) and Express
     Healthcare (3 Sept 08:45), producing three separate stories. Two of them
-    took two of the five headline slots in the same digest.
+    took two of the five headline slots in the same digest. `scorer` already
+    clusters within one scoring run but never re-clusters against earlier days,
+    and those three arrived in three different runs.
 
-    `scorer.cluster_signals` already clusters within a scoring run, but each of
-    those arrived in a different run and the scorer does not re-cluster against
-    earlier days. Running the same connected-components pass over the CANDIDATE
-    POOL fixes that regardless of arrival day: pairwise cosine at 0.85 gave
-    0.8924 (Entrackr↔BioSpectrum) and 0.8831 (Entrackr↔Express), and the
-    remaining 0.8453 pair is pulled in transitively by the chain.
+    **Greedy leader selection, deliberately not single-linkage.** Highest
+    relevance_score first; each leader is kept and absorbs every remaining
+    story that clears `threshold` against IT. So a dropped story is always a
+    near-duplicate of the specific story that replaced it.
 
-    Highest relevance_score in each cluster survives. Stories with no stored
-    embedding are always kept — never drop something we couldn't compare.
+    Connected components would be wrong here. Over a 30-day pool a chain of
+    near-threshold neighbours merges things that share nothing: six stories
+    each 0.86 to the next collapse to one survivor whose endpoints sit at
+    cosine **-0.89**. The real case needs no transitivity anyway — both
+    MediBuddy pairs (0.8924 and 0.8831) are measured against Entrackr, which
+    is also the score winner at 0.6196.
+
+    Stories with no stored embedding are always kept — never drop something we
+    couldn't compare.
     """
     if len(stories) < 2:
         return stories, 0
@@ -686,25 +694,40 @@ def collapse_near_duplicates(
     if len(have) < 2:
         return stories, 0
 
-    clusters = cluster_signals([embeddings[s.id] for s in have], threshold=threshold)
+    # Strongest first, so the leader of each group is the story that survives.
+    order = sorted(have, key=lambda s: (-s.relevance_score, s.id))
+    vecs = np.asarray([embeddings[s.id] for s in order], dtype=np.float32)
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    vecs = vecs / norms
+
+    n = len(order)
+    alive = [True] * n
     keep: set[str] = {s.id for s in stories if s.id not in embeddings}
-    for idx_group in clusters:
-        group = [have[i] for i in idx_group]
-        winner = max(group, key=lambda s: s.relevance_score)
-        keep.add(winner.id)
-        for loser in group:
-            if loser.id == winner.id:
+    for i in range(n):
+        if not alive[i]:
+            continue
+        keep.add(order[i].id)
+        sims = vecs @ vecs[i]
+        for j in range(i + 1, n):
+            if not alive[j] or float(sims[j]) < threshold:
                 continue
+            alive[j] = False
             _log({
                 "step": "near_duplicate_dropped",
                 "threshold": threshold,
+                "similarity": round(float(sims[j]), 4),
                 "dropped": {
-                    "id": loser.id, "score": round(loser.relevance_score, 4),
-                    "title": loser.canonical_title, "url": loser.canonical_url,
+                    "id": order[j].id,
+                    "score": round(order[j].relevance_score, 4),
+                    "title": order[j].canonical_title,
+                    "url": order[j].canonical_url,
                 },
                 "kept": {
-                    "id": winner.id, "score": round(winner.relevance_score, 4),
-                    "title": winner.canonical_title, "url": winner.canonical_url,
+                    "id": order[i].id,
+                    "score": round(order[i].relevance_score, 4),
+                    "title": order[i].canonical_title,
+                    "url": order[i].canonical_url,
                 },
             })
     survivors = [s for s in stories if s.id in keep]
@@ -797,16 +820,33 @@ def rank_stories(
     # Same news, told twice, must never occupy two slots. Two passes: exact
     # identity (one article, several URLs), then embedding similarity (two
     # publications, same event — different titles, so keys can't see it).
-    candidates, dropped_duplicates = collapse_duplicates(candidates)
-    if dropped_duplicates:
-        _log({"step": "duplicate_collapse", "dropped_duplicates": dropped_duplicates})
+    #
+    # Both guarded. This module's contract is that the digest always ships, and
+    # `run_pipeline` is try/finally with no except, so anything raised here
+    # would kill the run rather than degrade it. A pool holding two embedding
+    # dimensions is the realistic trigger: `embedding_model` is a tuning.xlsx
+    # setting, so a SharePoint edit with no deploy mixes dimensions inside the
+    # 30-day window. Losing de-duplication is survivable; losing the digest is
+    # not.
+    try:
+        candidates, dropped_duplicates = collapse_duplicates(candidates)
+        if dropped_duplicates:
+            _log({"step": "duplicate_collapse",
+                  "dropped_duplicates": dropped_duplicates})
+    except Exception as e:
+        _log({"step": "duplicate_collapse_failed",
+              "error": f"{type(e).__name__}: {e}"})
 
-    candidates, dropped_near = collapse_near_duplicates(
-        candidates,
-        storage.load_story_embeddings([s.id for s in candidates], conn=conn),
-    )
-    if dropped_near:
-        _log({"step": "near_duplicate_collapse", "dropped": dropped_near})
+    try:
+        candidates, dropped_near = collapse_near_duplicates(
+            candidates,
+            storage.load_story_embeddings([s.id for s in candidates], conn=conn),
+        )
+        if dropped_near:
+            _log({"step": "near_duplicate_collapse", "dropped": dropped_near})
+    except Exception as e:
+        _log({"step": "near_duplicate_collapse_failed",
+              "error": f"{type(e).__name__}: {e}"})
 
     if not candidates:
         return _empty_result(start)

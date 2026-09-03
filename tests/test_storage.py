@@ -83,8 +83,14 @@ class SignalsRoundTripTest(_DBTestBase):
             url="https://www.digitalhealthnews.com/even-healthcare-series-b",
             title="Even Healthcare raises Series B",
         )
-        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)):
+        # _log_blocked patched for the same reason the ranker's audit is: an
+        # unpatched test writes a production-shaped blocked URL into
+        # data/logs/blocked_<date>.jsonl, which an operator cannot tell from a
+        # real drop.
+        with mock.patch.object(config, "BLOCKED_DOMAINS", ("facebook.com",)), \
+                mock.patch.object(storage, "_log_blocked") as log:
             n = storage.save_signals([blocked, allowed], conn=self.conn)
+        self.assertEqual(log.call_count, 1)
         self.conn.commit()
         self.assertEqual(n, 1)
         urls = {s.url for s in storage.list_unscored_signals(conn=self.conn)}

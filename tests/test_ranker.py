@@ -386,6 +386,15 @@ class TopSummaryTest(unittest.TestCase):
 class CollapseDuplicatesTest(unittest.TestCase):
     """Real pairs that each ate two slots in the 3 Sept 2026 India digest."""
 
+    def setUp(self) -> None:
+        # Silence the jsonl audit: without this the suite writes
+        # production-shaped duplicate_dropped / near_duplicate_dropped rows,
+        # naming real publisher hosts, into data/logs/ranker_<date>.jsonl —
+        # indistinguishable from a real collapse for anyone reading the log.
+        patcher = mock.patch.object(ranker, "_log")
+        self.log = patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def _story(sid_url: str, title: str, score: float) -> Story:
         return Story(
@@ -510,6 +519,16 @@ class CollapseNearDuplicatesTest(unittest.TestCase):
     differ, so only the embeddings reveal it. Observed 3 Sept 2026 — MediBuddy's
     Shalabh Shrivastava appointment ran in Entrackr, BioSpectrum and Express
     Healthcare, and two of the three took two of five headline slots."""
+
+
+    def setUp(self) -> None:
+        # Silence the jsonl audit: without this the suite writes
+        # production-shaped duplicate_dropped / near_duplicate_dropped rows,
+        # naming real publisher hosts, into data/logs/ranker_<date>.jsonl —
+        # indistinguishable from a real collapse for anyone reading the log.
+        patcher = mock.patch.object(ranker, "_log")
+        self.log = patcher.start()
+        self.addCleanup(patcher.stop)
 
     @staticmethod
     def _story(slug: str, score: float) -> Story:
@@ -831,6 +850,59 @@ class FullPathTest(_OrchestratorBase):
         )
         by_id = {r.story.id: r for r in result.flat}
         self.assertEqual(by_id[e.id].story.geo, "India")
+
+    def test_near_duplicate_pass_runs_inside_rank_stories(self) -> None:
+        """Exercises the CALL SITE, not just the function.
+
+        Every other rank_stories fixture seeds stories with no embedding, so
+        `load_story_embeddings` returns {} and the pass short-circuits — a
+        wrong argument or a raise there would pass CI green.
+        """
+        keeper = _mk_story("keeper", score=0.90, priority_bucket="venture_ipo")
+        twin = _mk_story("twin", score=0.40, priority_bucket="venture_ipo")
+        other = _mk_story("unrelated", score=0.70, priority_bucket="hospital_ma")
+        storage.upsert_story(keeper, embedding=[1.0, 0.0], conn=self.conn)
+        storage.upsert_story(twin, embedding=[1.0, 0.0], conn=self.conn)
+        storage.upsert_story(other, embedding=[0.0, 1.0], conn=self.conn)
+        self.conn.commit()
+
+        text = json.dumps({"stories": [
+            {"story_id": s.id, "tier": "A", "one_liner": "x"}
+            for s in (keeper, twin, other)
+        ]})
+        result = ranker.rank_stories(
+            conn=self.conn, client=FakePerplexityClient(text),
+        )
+        ids = {r.story.id for r in result.flat}
+        self.assertIn(keeper.id, ids)
+        self.assertIn(other.id, ids)          # orthogonal, must survive
+        self.assertNotIn(twin.id, ids)        # identical vector, lower score
+        self.assertEqual(result.candidates_count, 2)
+
+    def test_a_failing_collapse_never_kills_the_digest(self) -> None:
+        """The module's contract is that the digest always ships, and
+        run_pipeline is try/finally with no except. Mixed embedding dimensions
+        are the realistic trigger: embedding_model is a tuning.xlsx setting, so
+        a SharePoint edit with no deploy mixes them inside the 30-day window."""
+        stories = self._seed()
+        text = json.dumps({"stories": [
+            {"story_id": s.id, "tier": "A", "one_liner": "x"} for s in stories
+        ]})
+        with mock.patch.object(
+            ranker, "collapse_near_duplicates",
+            side_effect=ValueError("inhomogeneous embedding dimensions"),
+        ):
+            result = ranker.rank_stories(
+                conn=self.conn, client=FakePerplexityClient(text),
+            )
+        self.assertTrue(result.flat)          # shipped anyway
+        with mock.patch.object(
+            ranker, "collapse_duplicates", side_effect=RuntimeError("boom"),
+        ):
+            result = ranker.rank_stories(
+                conn=self.conn, client=FakePerplexityClient(text),
+            )
+        self.assertTrue(result.flat)
 
     def test_zero_decisions_counts_as_a_degraded_run(self) -> None:
         """The worst case, and the one that slipped through: `{"stories": []}`
