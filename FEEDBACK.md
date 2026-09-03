@@ -194,18 +194,6 @@ perplexity log has tokens but the estimated cost isn't reaching
 `RankingResult.cost_usd`, so the run summary understates spend. Check
 `perplexity_client`'s cost estimation for the rank models.
 
-### 14. Cross-day clustering misses near-duplicate stories  ·  priority: LOW
-The 2026-09-03 release collapses *identical* repeats (title, URL, or host+slug)
-on the candidate pool, which is what shipped twice that morning. It does **not**
-merge near-duplicates whose titles differ — e.g. "Luma Fertility plans to expand
-to 30 centres nationally" vs "Luma Fertility to expand to 30 centres nationwide;
-Sirona app…". Those are separate stories with separate embeddings, and the
-cross-day similarity check didn't link them.
-
-Only 4 duplicate-title pairs existed in a 30-day pool, so the impact is small,
-but the underlying gap is that `scorer` clusters within a scoring run and does
-not re-cluster against existing stories from previous days.
-
 ### 11. Claude ranking is capped at half the tokens it needs  ·  priority: HIGH  ·  BLOCKS reverting to `ranker_provider=anthropic`
 **Problem.** `anthropic_max_tokens_rank` is **4096**; the ranking response needs
 about **7000**. So the JSON is truncated mid-object, `_extract_json` returns

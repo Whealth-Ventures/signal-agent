@@ -505,6 +505,98 @@ class CollapseDuplicatesTest(unittest.TestCase):
         self.assertEqual(dropped, 1)
 
 
+class CollapseNearDuplicatesTest(unittest.TestCase):
+    """Two publications reporting the same event: titles, URLs and slugs all
+    differ, so only the embeddings reveal it. Observed 3 Sept 2026 — MediBuddy's
+    Shalabh Shrivastava appointment ran in Entrackr, BioSpectrum and Express
+    Healthcare, and two of the three took two of five headline slots."""
+
+    @staticmethod
+    def _story(slug: str, score: float) -> Story:
+        u = f"https://{slug}.example/article-{slug}"
+        return Story(
+            id=story_id(u), canonical_url=u,
+            canonical_title=f"MediBuddy appoints Shalabh Shrivastava ({slug})",
+            canonical_summary="", published_at=_FIXED_TS,
+            relevance_score=score,
+        )
+
+    @staticmethod
+    def _vec(*parts: float) -> list[float]:
+        return list(parts)
+
+    def test_real_medibuddy_similarities_collapse_transitively(self) -> None:
+        """Actual cosines measured on the box: Entrackr↔BioSpectrum 0.8924,
+        Entrackr↔Express 0.8831, BioSpectrum↔Express 0.8453. At a 0.85
+        threshold the last pair only merges via the chain — so all three must
+        end as one story, not two."""
+        import math
+
+        def unit_at(angle: float) -> list[float]:
+            return [math.cos(angle), math.sin(angle)]
+
+        # Angles chosen so the pairwise cosines straddle the threshold the same
+        # way the observed ones do.
+        entrackr = self._story("entrackr", 0.70)
+        biospectrum = self._story("biospectrum", 0.55)
+        express = self._story("express", 0.60)
+        a_e, a_b = 0.0, math.acos(0.8924)
+        a_x = -math.acos(0.8831)
+        embeddings = {
+            entrackr.id: unit_at(a_e),
+            biospectrum.id: unit_at(a_b),
+            express.id: unit_at(a_x),
+        }
+        # Confirm the fixture really reproduces the straddle.
+        def cos(p, q):
+            return sum(x * y for x, y in zip(embeddings[p], embeddings[q]))
+        self.assertGreater(cos(entrackr.id, biospectrum.id), 0.85)
+        self.assertGreater(cos(entrackr.id, express.id), 0.85)
+        self.assertLess(cos(biospectrum.id, express.id), 0.85)
+
+        kept, dropped = ranker.collapse_near_duplicates(
+            [entrackr, biospectrum, express], embeddings, threshold=0.85,
+        )
+        self.assertEqual(dropped, 2)
+        self.assertEqual([s.id for s in kept], [entrackr.id])  # highest score
+
+    def test_distinct_stories_are_untouched(self) -> None:
+        a, b = self._story("aaa", 0.6), self._story("bbb", 0.5)
+        embeddings = {a.id: [1.0, 0.0], b.id: [0.0, 1.0]}   # orthogonal
+        kept, dropped = ranker.collapse_near_duplicates(
+            [a, b], embeddings, threshold=0.85,
+        )
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(kept), 2)
+
+    def test_story_without_an_embedding_is_never_dropped(self) -> None:
+        a, b, c = (self._story("aaa", 0.6), self._story("bbb", 0.5),
+                   self._story("ccc", 0.9))
+        embeddings = {a.id: [1.0, 0.0], b.id: [1.0, 0.0]}    # c has none
+        kept, dropped = ranker.collapse_near_duplicates(
+            [a, b, c], embeddings, threshold=0.85,
+        )
+        self.assertEqual(dropped, 1)
+        self.assertIn(c.id, {s.id for s in kept})
+
+    def test_no_embeddings_at_all_is_a_noop(self) -> None:
+        a, b = self._story("aaa", 0.6), self._story("bbb", 0.5)
+        kept, dropped = ranker.collapse_near_duplicates([a, b], {})
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(kept), 2)
+
+    def test_original_order_preserved(self) -> None:
+        a, b, c = (self._story("aaa", 0.3), self._story("bbb", 0.9),
+                   self._story("ccc", 0.5))
+        embeddings = {s.id: v for s, v in
+                      ((a, [1.0, 0.0]), (b, [0.0, 1.0]), (c, [0.0, 1.0]))}
+        kept, _ = ranker.collapse_near_duplicates(
+            [a, b, c], embeddings, threshold=0.85,
+        )
+        # b beats c on score; a survives; order follows the input list.
+        self.assertEqual([s.id for s in kept], [a.id, b.id])
+
+
 class DefaultBucketTest(unittest.TestCase):
     """The catch-all must be a deliberate choice, not sheet row order — an
     unbucketed opinion piece filed under 'Venture & IPO' on 2 Sept 2026."""

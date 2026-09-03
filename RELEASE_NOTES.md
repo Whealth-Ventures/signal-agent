@@ -1,5 +1,27 @@
 # Signal Agent — Release Notes
 
+## The same news from two different publications no longer takes two slots (2026-09-03)
+
+The previous release stopped one article appearing twice when a publisher served
+it under several URLs. It could not stop **two outlets reporting the same event**
+from becoming two stories, because the headlines, links and slugs are all
+genuinely different — nothing on the surface says they are the same news.
+
+Found in a dry run the same day: MediBuddy's appointment of Shalabh Shrivastava
+was reported by Entrackr, BioSpectrum India and Express Healthcare across three
+different mornings. Two of the three took **two of the five headline slots** in
+one digest.
+
+Before the digest is built, every candidate story is now compared against the
+others by meaning rather than by text, and repeats are collapsed to the
+strongest one. This works no matter which day each version arrived, which is
+what the previous check couldn't do: the stories were compared only against
+others fetched in the same run.
+
+No extra cost. The comparison reuses the story descriptions the agent already
+computes for its own de-duplication.
+
+
 ## Better story choice, honest geo tags, and a visible warning when the digest is degraded (2026-09-02)
 
 Answers the 2 Sept feedback on the India digest: too much `[GLOBAL]`, a missing

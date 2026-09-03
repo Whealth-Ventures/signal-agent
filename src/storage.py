@@ -207,6 +207,35 @@ def _blob_to_embedding(blob: bytes) -> list[float]:
     return list(a)
 
 
+def load_story_embeddings(
+    ids: Iterable[str], *, conn: sqlite3.Connection | None = None,
+) -> dict[str, list[float]]:
+    """{story_id → embedding} for the ids that have one stored.
+
+    `Story` deliberately doesn't carry its embedding (it would ride along
+    through every layer for no reason), but the pre-digest duplicate check
+    needs them: two publications reporting the same news produce different
+    titles and URLs, so only the vectors reveal that it's one story.
+    """
+    ids = list(ids)
+    if not ids:
+        return {}
+    out: dict[str, list[float]] = {}
+    with _maybe_own(conn) as c:
+        # Chunked to stay well under SQLite's variable limit.
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = c.execute(
+                f"SELECT id, embedding FROM stories WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                if r["embedding"]:
+                    out[r["id"]] = _blob_to_embedding(r["embedding"])
+    return out
+
+
 def _story_from_row(row: sqlite3.Row) -> Story:
     keys = row.keys()
     pb = row["priority_bucket"] if "priority_bucket" in keys else None

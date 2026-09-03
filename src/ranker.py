@@ -40,6 +40,7 @@ from urllib.parse import parse_qsl, urlparse
 import config
 import storage
 from models import Story
+from scorer import cluster_signals
 from topicality import is_healthcare
 from perplexity_client import (
     ChatResponse,
@@ -651,6 +652,65 @@ def collapse_duplicates(stories: list[Story]) -> tuple[list[Story], int]:
     return survivors, len(stories) - len(survivors)
 
 
+def collapse_near_duplicates(
+    stories: list[Story],
+    embeddings: dict[str, list[float]],
+    *,
+    threshold: float = config.CLUSTER_SIMILARITY_THRESHOLD,
+) -> tuple[list[Story], int]:
+    """Collapse stories that are the same news told by different publications.
+
+    `collapse_duplicates` catches one article served under several URLs. It
+    cannot catch two outlets reporting the same event, because the titles, URLs
+    and slugs all differ. Only the embeddings show it.
+
+    Observed 3 Sept 2026: MediBuddy's appointment of Shalabh Shrivastava was
+    reported by Entrackr (2 Sept), BioSpectrum (3 Sept 02:22) and Express
+    Healthcare (3 Sept 08:45), producing three separate stories. Two of them
+    took two of the five headline slots in the same digest.
+
+    `scorer.cluster_signals` already clusters within a scoring run, but each of
+    those arrived in a different run and the scorer does not re-cluster against
+    earlier days. Running the same connected-components pass over the CANDIDATE
+    POOL fixes that regardless of arrival day: pairwise cosine at 0.85 gave
+    0.8924 (Entrackr↔BioSpectrum) and 0.8831 (Entrackr↔Express), and the
+    remaining 0.8453 pair is pulled in transitively by the chain.
+
+    Highest relevance_score in each cluster survives. Stories with no stored
+    embedding are always kept — never drop something we couldn't compare.
+    """
+    if len(stories) < 2:
+        return stories, 0
+
+    have = [s for s in stories if s.id in embeddings]
+    if len(have) < 2:
+        return stories, 0
+
+    clusters = cluster_signals([embeddings[s.id] for s in have], threshold=threshold)
+    keep: set[str] = {s.id for s in stories if s.id not in embeddings}
+    for idx_group in clusters:
+        group = [have[i] for i in idx_group]
+        winner = max(group, key=lambda s: s.relevance_score)
+        keep.add(winner.id)
+        for loser in group:
+            if loser.id == winner.id:
+                continue
+            _log({
+                "step": "near_duplicate_dropped",
+                "threshold": threshold,
+                "dropped": {
+                    "id": loser.id, "score": round(loser.relevance_score, 4),
+                    "title": loser.canonical_title, "url": loser.canonical_url,
+                },
+                "kept": {
+                    "id": winner.id, "score": round(winner.relevance_score, 4),
+                    "title": winner.canonical_title, "url": winner.canonical_url,
+                },
+            })
+    survivors = [s for s in stories if s.id in keep]
+    return survivors, len(stories) - len(survivors)
+
+
 def _effective_bucket(
     story: Story, llm_buckets: dict[str, str], valid: set[str], default: str,
 ) -> str:
@@ -734,10 +794,19 @@ def rank_stories(
         blocked_ids = {s.id for s in still_blocked}
         candidates = [s for s in candidates if s.id not in blocked_ids]
 
-    # Same news, told twice (or under two URLs) must never occupy two slots.
+    # Same news, told twice, must never occupy two slots. Two passes: exact
+    # identity (one article, several URLs), then embedding similarity (two
+    # publications, same event — different titles, so keys can't see it).
     candidates, dropped_duplicates = collapse_duplicates(candidates)
     if dropped_duplicates:
         _log({"step": "duplicate_collapse", "dropped_duplicates": dropped_duplicates})
+
+    candidates, dropped_near = collapse_near_duplicates(
+        candidates,
+        storage.load_story_embeddings([s.id for s in candidates], conn=conn),
+    )
+    if dropped_near:
+        _log({"step": "near_duplicate_collapse", "dropped": dropped_near})
 
     if not candidates:
         return _empty_result(start)

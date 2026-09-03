@@ -102,7 +102,32 @@ and silently falling back. See FEEDBACK #11.
 
 ---
 
-## E. Verification — Claude, after C and D
+## E. Verification — DONE 3 Sept 2026, 08:45–09:00 UTC
+
+Box on 1.5.0, `inputs/` synced (the sync needs `/etc/signal-agent.env`, which
+`run-digest.sh` sources — a bare `python src/sharepoint_sync.py` no-ops with
+"not configured"). Config then parsed `DEFAULT_BUCKET='other_healthcare'`,
+10 blocked domains and 9 buckets with `other_healthcare | geos=()`, confirming
+the display-only bucket is safe on 1.5.0.
+
+Two dry runs, `--dry-run --geo {india,us} --max-plans 0`. Nothing posted.
+
+| Fix | Evidence | Verdict |
+|---|---|---|
+| Story-derived geo | `geo_resolution: llm_supplied 63/63, changed_from_inherited 20` | ✅ every candidate, a third corrected |
+| Each channel selects from the whole pool | india 9 stories, us 11 stories / 4 sections, zero `[IND]` leakage into US | ✅ was 6 items / 1 section |
+| `other_healthcare` | `by_priority_counts` shows `other_healthcare: 2` in both runs, `default_bucket_assigned: 0` | ✅ the ranker chooses it directly |
+| Degraded-run notice | `used_fallback: false`, no notice rendered | ✅ correct negative case |
+| Headline rewrite | 9 stories, 8 excerpts, 8 rewritten, no parse failures | ✅ |
+| Ranker latency | 118.4s (india), 88.9s (us) vs 331.8s that morning | ✅ under the 120s timeout |
+| Exact-duplicate collapse | 0 drops — the 3 Sept pairs were already sent, so excluded by the dedup window | ⚪ not exercised; unit-tested only |
+| Blocklist | no `blocked_*.jsonl` — nothing blocked was in the candidate pool | ⚪ not exercised; unit-tested only |
+| **Near-duplicates** | **two MediBuddy stories took 2 of 5 headline slots** | ❌ **found a real gap → FEEDBACK #14, now fixed separately** |
+
+Note the digests were thin (9 and 11) purely because `--max-plans 0` skips the
+Perplexity sweep, leaving an RSS-only pool. Not a regression.
+
+## E-original. Verification steps — Claude, after C and D
 
 - [ ] Dry run on the box:
       `sudo -u signal /opt/signal-agent/repo/.venv/bin/python /opt/signal-agent/repo/src/main.py --dry-run --geo india --max-plans 0`
