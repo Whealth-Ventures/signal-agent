@@ -26,6 +26,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+import alerts
 import config
 import headline_rewriter
 import storage
@@ -235,7 +236,8 @@ def _tag_batch(client, system: str, rows: list[dict]) -> tuple[dict[str, dict], 
         usage = {"in": u.prompt_tokens if u else 0, "out": u.completion_tokens if u else 0}
         return tags, {**usage, "latency_ms": int((time.monotonic() - t0) * 1000)}
     except Exception as e:  # one bad batch must not cost the rest of the run
-        return {}, {"in": 0, "out": 0, "error": f"{type(e).__name__}: {e}"[:500]}
+        return {}, {"in": 0, "out": 0, "error": f"{type(e).__name__}: {e}"[:500],
+                    "problem": alerts.openai_problem(e)}
 
 
 def _fetch_bodies(urls: list[str]) -> dict[str, str]:
@@ -257,6 +259,7 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
     stats = {
         "fetched": len(todo), "bodies_ok": sum(1 for _, u in todo if bodies.get(u)),
         "to_tag": len(rows), "tagged": 0, "failed_calls": 0, "in": 0, "out": 0,
+        "openai_problem": None,
     }
     # Calls run in threads; every DB write stays on this thread.
     with ThreadPoolExecutor(TAG_WORKERS) as ex:
@@ -271,6 +274,7 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
             conn.commit()
             stats["tagged"] += saved
             stats["failed_calls"] += 1 if "error" in usage else 0
+            stats["openai_problem"] = stats["openai_problem"] or usage.get("problem")
             stats["in"] += usage["in"]
             stats["out"] += usage["out"]
             _log({"event": "tag_call", "model": config.ENRICH_MODEL,
@@ -289,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Fetch article bodies and tag stories for Q&A.")
     p.add_argument("--days", type=int, default=2,
                    help="Stories first seen in the last N days (backfill: --days 30).")
+    p.add_argument("--geo", default="both", choices=["india", "us", "both"],
+                   help="Which digest run this follows: picks the channel for an alert.")
     args = p.parse_args(argv)
     if not config.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
@@ -301,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
     print(f"enrich: {json.dumps(stats)}")
+    if stats["openai_problem"]:
+        channel = {"india": config.SLACK_CHANNEL_ID_INDIA,
+                   "us": config.SLACK_CHANNEL_ID_US}.get(args.geo, config.SLACK_CHANNEL_ID)
+        alerts.post_openai_alert(
+            stats["openai_problem"], channel_id=channel or None,
+            impact="Today's digest posted, but story labelling for the archive failed.",
+        )
     return 1 if stats["to_tag"] and not stats["tagged"] else 0
 
 

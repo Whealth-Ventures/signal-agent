@@ -11,6 +11,12 @@
 - Non-healthcare news (a stock exchange or steel IPO) is marked as such, so it never shows up as a big healthcare story.
 - Cost is about $2 a month on the existing OpenAI key.
 
+### An alert when OpenAI stops working
+
+- If OpenAI runs out of credits or rejects the key, the agent now posts an alert in that digest's channel.
+- It says what broke and how to fix it, for example "add credits at OpenAI billing".
+- Before this, the digest simply didn't arrive, and nobody was told why.
+
 The Slack bot that answers questions from this archive comes next.
 
 

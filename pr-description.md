@@ -1,4 +1,4 @@
-# [minor] PROD Release: Store article bodies and Q&A tags for every story
+# [minor] PROD Release: Story archive with Q&A labels, and Slack alerts when OpenAI fails
 
 **Phase A of the news archive: every new story gets its full article body and searchable tags in SQLite.** No ticket. The plan is in [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md).
 
@@ -11,6 +11,24 @@
 - **Labels depend on the category.** Every story gets category, magnitude (the ranker's S/A/B/C rubric), companies, geo and a two-line summary. Each category adds its own `facts` (`enricher.CATEGORY_FIELDS`). For example, deal size appears only on deal categories, and regulator plus product only on FDA & Regulatory. Deals always go in a deal category.
 - **Healthcare check first.** The model answers `healthcare: true/false`, and the digest's lexicon gate (`topicality.is_healthcare`) can veto a yes. Non-healthcare stories become `not_healthcare`, tier C, with no facts. Healthcare stories outside the 8 categories become `other_healthcare`.
 - **The prompt lives in `prompts/tagger_system.md`.** The category fields, their allowed values and the rubric are appended in code, so they can't drift from what the validator accepts.
+
+## Slack alert when OpenAI fails
+
+- **Today a dead OpenAI key means no digest, silently.** Scoring embeds with no error handling, so the run crashes before the post.
+- **New `src/alerts.py`** spots failures a retry won't fix:
+  - `insufficient_quota`: out of credits
+  - 401 or 403: key rejected
+  - `model_not_found`: model not available on the key
+
+  It walks the exception's cause chain, and a plain rate limit is ignored.
+- **It posts in the failing run's own channel**, with the fix:
+  - out of credits: the billing link, and "the next run recovers on its own"
+  - key rejected: update the secret, then redeploy
+- **Call sites:**
+  - `main.py` and `sector_main.py`: alert, then re-raise, so the journal still has the traceback. `--dry-run` never alerts.
+  - `enricher.py`: once per run, after the batches, to the channel given by the new `--geo` flag from `run-digest.sh`.
+- **At most one alert per channel per run.** A crashed digest stops `run-digest.sh`, so the enricher doesn't add a second alert.
+- **Posting is fail-soft.** An alert that can't post is logged and never masks the original error.
 
 ## Safety
 
@@ -29,7 +47,13 @@
   - every category has fields, and the prompt lists all of them
   - a non-healthcare story is tier C with no facts, whether the model or the lexicon says so
   - an unknown category becomes `other_healthcare`
-- The full suite passes locally (307 passed, 3 skipped).
+- `tests/test_alerts.py`, 10 tests:
+  - classification, including an error wrapped by another and a plain rate limit that must not alert
+  - the posted text and channel
+  - a failed post never raises
+  - each of the three call sites alerts the right channel, and a dry run doesn't
+- **The classifier was checked against real OpenAI responses:** a bad key gives 401 `invalid_api_key` → `auth`, and a missing model gives 404 `model_not_found` → `model`. Out of credits can't be triggered on demand, so it's covered by a unit test on the documented `insufficient_quota` code.
+- The full suite passes locally (317 passed, 3 skipped).
 - **Live test on 80 real prod stories** (scratch DB, prod untouched): 75 of 80 bodies fetched, all 80 tagged in 16 seconds for $0.036. The "biggest IPO stories this month" query returns only healthcare IPOs (ADARx, Oura, Iambic, RegenLab and others). All 34 non-healthcare IPOs are `not_healthcare`. The two `test_config` env checks fail only because this checkout has no `.env`.
 
 ## After merge

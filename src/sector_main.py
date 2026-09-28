@@ -19,6 +19,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import alerts
 import config
 import scorer
 import sector
@@ -228,15 +229,23 @@ def main(argv: list[str] | None = None) -> int:
             f"`python scripts/build_portfolio_xlsx.py` to bootstrap it."
         )
     post_at = compute_post_at(args.post_at, tz=config.DIGEST_TZ_INDIA)
-    sent = run(
-        max_plans=args.max_plans,
-        skip_content_indexing=args.skip_content_index,
-        skip_url_validation=args.skip_url_validation,
-        dry_run=args.dry_run,
-        test_mode=args.test,
-        post_at=post_at,
-        force=args.force,
-    )
+    try:
+        sent = run(
+            max_plans=args.max_plans,
+            skip_content_indexing=args.skip_content_index,
+            skip_url_validation=args.skip_url_validation,
+            dry_run=args.dry_run,
+            test_mode=args.test,
+            post_at=post_at,
+            force=args.force,
+        )
+    except Exception as e:
+        if not args.dry_run:
+            alerts.alert_if_openai_down(
+                e, impact="This week's sector digest could not be built.",
+                channel_id=config.SLACK_CHANNEL_ID_SECTOR or None,
+            )
+        raise
     return 0 if sent else 1
 
 

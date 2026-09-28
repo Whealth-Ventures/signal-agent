@@ -37,7 +37,7 @@ echo ">> running digest geo=$GEO (post-at ${DIGEST_POST_AT:-immediate})"
 # Article bodies + Q&A tags for the stories this run added (src/enricher.py).
 # After the post, so it can never delay a digest; before the backup, so the
 # backup carries them. Never fatal.
-.venv/bin/python src/enricher.py || echo "WARN: enrich failed"
+.venv/bin/python src/enricher.py --geo "$GEO" || echo "WARN: enrich failed"
 
 # Backup runs ONCE per day, on the India (or legacy 'both') pass — not again on
 # the later US pass. Non-fatal.
