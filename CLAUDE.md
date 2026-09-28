@@ -114,6 +114,7 @@ needs a deploy. See `docs/EDITING.md`.
 - `src/anthropic_client.py` — Claude transport for the ranking call (Perplexity-compatible `complete()`; auto-skipped when no key).
 - `src/topicality.py` — deterministic healthcare lexicon gate; now runs on every ranker path.
 - `src/headline_rewriter.py` — post-selection pass: fetches the digest winners' articles and rewrites their one-liners from the body text in one further LLM call (same vendor selection as the ranker); fail-soft, `--skip-headline-rewrite` to disable.
+- `src/enricher.py` — runs after each digest post (own process, non-fatal): fetches every new story's article body and tags it with OpenAI into `story_details`: category, the facts that category has (`enricher.CATEGORY_FIELDS`, e.g. deal size only for deal categories), magnitude, companies, geo, two-line summary, for question answering. Backfill with `--days 30`.
 - `src/slack_client.py` — Block Kit formatter + Slack poster (chat.postMessage with per-channel `channel_id`, or webhook); concurrent URL validation.
 - `src/main.py` — orchestrator (this is what the systemd timers trigger). `--geo` selects the sweep + target channel; `ranker.filter_by_geo` routes stories; `compute_post_at(spec, tz=...)` resolves 08:00 in each geo's timezone.
 

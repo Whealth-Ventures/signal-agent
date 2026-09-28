@@ -1,5 +1,19 @@
 # Signal Agent — Release Notes
 
+## Every story is now saved with its full article and searchable tags (2026-09-25)
+
+**This is the groundwork for asking Signal Agent questions, not just reading the digest.**
+
+- After each digest posts, the agent saves the full article for every new story.
+- It labels each one by category, with that category's own details: deal size and investors for a funding round, regulator and product for an approval, trial phase and outcome for a drug trial.
+- Every story also gets how big it is, the companies, India/US/Global, and a two-line summary.
+- The digest itself is unchanged. This step runs after the post and can never delay or block it.
+- Non-healthcare news (a stock exchange or steel IPO) is marked as such, so it never shows up as a big healthcare story.
+- Cost is about $2 a month on the existing OpenAI key.
+
+The Slack bot that answers questions from this archive comes next.
+
+
 ## The same news from two different publications no longer takes two slots (2026-09-03)
 
 The previous release stopped one article appearing twice when a publisher served

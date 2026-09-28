@@ -85,13 +85,16 @@ def extract_excerpt(raw_html: str, *, limit: int = EXCERPT_CHARS) -> str:
     return _WS_RE.sub(" ", text).strip()[:limit]
 
 
-async def _fetch_one(url: str, http: httpx.AsyncClient, sem: asyncio.Semaphore) -> str:
+async def _fetch_one(
+    url: str, http: httpx.AsyncClient, sem: asyncio.Semaphore,
+    limit: int = EXCERPT_CHARS,
+) -> str:
     async with sem:
         try:
             r = await http.get(url)
             if r.status_code >= 400:
                 return ""
-            return extract_excerpt(r.text)
+            return extract_excerpt(r.text, limit=limit)
         except Exception:
             # Deliberately broad: httpx.InvalidURL is NOT an httpx.HTTPError
             # (its MRO is InvalidURL → Exception), and a digest URL is only as
@@ -100,7 +103,10 @@ async def _fetch_one(url: str, http: httpx.AsyncClient, sem: asyncio.Semaphore) 
             return ""
 
 
-async def _fetch_excerpts(urls: list[str]) -> dict[str, str]:
+async def _fetch_excerpts(
+    urls: list[str], *, limit: int = EXCERPT_CHARS,
+) -> dict[str, str]:
+    """{url: excerpt}. `limit` lets src/enricher.py reuse this for whole bodies."""
     sem = asyncio.Semaphore(FETCH_CONCURRENCY)
     async with httpx.AsyncClient(
         timeout=FETCH_TIMEOUT_S,
@@ -110,7 +116,7 @@ async def _fetch_excerpts(urls: list[str]) -> dict[str, str]:
         # return_exceptions so a straggler that escapes _fetch_one's guard
         # degrades to one empty excerpt instead of cancelling its siblings.
         results = await asyncio.gather(
-            *(_fetch_one(u, http, sem) for u in urls), return_exceptions=True,
+            *(_fetch_one(u, http, sem, limit) for u in urls), return_exceptions=True,
         )
     return {
         u: (r if isinstance(r, str) else "")
