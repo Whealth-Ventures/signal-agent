@@ -16,7 +16,7 @@ Decided 25 September 2026.
 | Tagging model | OpenAI `gpt-4.1-mini`, the key already used for embeddings | Bedrock Claude isn't set up in the W Health AWS account yet. |
 | Backfill | Last 30 days (~4,900 stories) | |
 | Q&A surface | Same Slack app, same box, a separate service | Same pattern as salesforce-sage. |
-| Neon | Not used for now | Revisit when something off the box needs the data. |
+| Neon | A one-way read copy, added 28 September 2026 (`src/neon_sync.py`) | For live browsing in DBeaver. SQLite stays the source of truth. Bodies older than 12 months are dropped in Neon only, so the 0.5 GB free tier lasts about 4 years. |
 
 ## Phase A: bodies and tags (this branch, `feat/subhanu-news-archive`)
 
@@ -71,6 +71,29 @@ ORDER BY COALESCE(instr('SABC', d.magnitude), 9), json_extract(d.facts, '$.amoun
 LIMIT 10;
 ```
 
+## Browsing the archive in DBeaver (Neon copy)
+
+Neon gets a copy at the end of every run, so it matches prod whenever no run is in progress.
+
+1. **Neon console → Connect**, choosing the **direct** connection (host without `-pooler`), gives the host, database, user and password.
+2. **DBeaver → Database → New Database Connection → PostgreSQL:**
+   - Host: the Neon host. Port: `5432`. Database: from Neon. Username and password: from Neon.
+   - **SSL tab:** Use SSL, mode `require`.
+   - **General → Security:** tick **Read-only connection**. Edits wouldn't reach prod anyway, and the next sync overwrites them.
+3. **Browse:** schema `public` holds the India and US daily data, and schema `sector` holds the weekly sector data. The tables are `stories`, `signals`, `digests`, `digest_stories` and `story_details` (article bodies and labels; `facts` and `companies` are `jsonb`).
+4. **Disconnect when done.** An open connection can keep Neon awake, and the free tier has 100 CU-hours a month.
+
+The target question, in Postgres:
+
+```sql
+SELECT d.magnitude, s.canonical_title, s.canonical_url, d.summary,
+       (d.facts->>'amount_usd')::numeric AS amount_usd
+FROM story_details d JOIN stories s ON s.id = d.story_id
+WHERE d.category = 'venture_ipo' AND d.facts->>'event' IN ('ipo', 'ipo_filing')
+  AND s.published_at >= date_trunc('month', now())
+ORDER BY array_position(ARRAY['S','A','B','C'], d.magnitude), amount_usd DESC NULLS LAST;
+```
+
 ## Phase B: the Q&A bot (next)
 
 - **`src/bot.py`**, a long-running `signal-agent-bot.service`. It uses slack-bolt Socket Mode, so it needs no public URL. It answers @mentions and DMs in threads.
@@ -104,4 +127,3 @@ The same OpenAI key powers the digest's embeddings. If its credit runs out, the 
 - **Bedrock Claude in the W Health account (873448587721).** Enable Anthropic model access, and add `bedrock:InvokeModel` to the instance role in `infra/iam.tf`. It also gives the ranker a second vendor.
 - **`sector.db`.** Same enricher, pointed at the sector DB, once the daily DB works.
 - **Semantic search** over the embeddings already stored in `stories.embedding`, using numpy, which is already installed.
-- **Neon**, if a dashboard or another agent off the box needs the archive.

@@ -63,6 +63,9 @@ def _env_int(name: str) -> int:
 
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY")
+# Neon Postgres, the one-way read copy (src/neon_sync.py). The direct
+# (non-pooled) connection string. Optional: unset → the sync is skipped.
+DATABASE_URL = _env("DATABASE_URL")
 PERPLEXITY_API_KEY = _env("PERPLEXITY_API_KEY")
 # Anthropic powers the single ranking/tiering/one-liner call (see ranker.py).
 # Optional: when unset, the ranker falls back to Perplexity sonar-reasoning-pro.

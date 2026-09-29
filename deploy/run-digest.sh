@@ -39,6 +39,10 @@ echo ">> running digest geo=$GEO (post-at ${DIGEST_POST_AT:-immediate})"
 # backup carries them. Never fatal.
 .venv/bin/python src/enricher.py --geo "$GEO" || echo "WARN: enrich failed"
 
+# One-way copy into Neon for live browsing (src/neon_sync.py). Never fatal;
+# skipped when DATABASE_URL isn't set.
+.venv/bin/python src/neon_sync.py || echo "WARN: neon sync failed"
+
 # Backup runs ONCE per day, on the India (or legacy 'both') pass — not again on
 # the later US pass. Non-fatal.
 if [ "$GEO" != "us" ]; then

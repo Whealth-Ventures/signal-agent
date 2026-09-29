@@ -27,4 +27,7 @@ cd "$REPO"
 echo ">> running sector digest (post-at ${DIGEST_POST_AT:-immediate})"
 .venv/bin/python src/sector_main.py --post-at "${DIGEST_POST_AT:-}"
 
+# One-way copy into Neon for live browsing (src/neon_sync.py). Never fatal.
+.venv/bin/python src/neon_sync.py || echo "WARN: neon sync failed"
+
 echo ">> run-sector done"

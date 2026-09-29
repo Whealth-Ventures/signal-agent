@@ -115,6 +115,7 @@ needs a deploy. See `docs/EDITING.md`.
 - `src/topicality.py` — deterministic healthcare lexicon gate; now runs on every ranker path.
 - `src/headline_rewriter.py` — post-selection pass: fetches the digest winners' articles and rewrites their one-liners from the body text in one further LLM call (same vendor selection as the ranker); fail-soft, `--skip-headline-rewrite` to disable.
 - `src/enricher.py` — runs after each digest post (own process, non-fatal): fetches every new story's article body and tags it with OpenAI into `story_details`: category, the facts that category has (`enricher.CATEGORY_FIELDS`, e.g. deal size only for deal categories), magnitude, companies, geo, two-line summary, for question answering. Backfill with `--days 30`.
+- `src/neon_sync.py` — runs at the end of every digest and sector run (own process, non-fatal, skipped without `DATABASE_URL`): upserts `agent.db` → Neon schema `public` and `sector.db` → schema `sector`, minus embeddings and raw payloads, nulling bodies older than 12 months in Neon. For DBeaver / dashboards.
 - `src/alerts.py` — posts a Slack alert in the run's own channel when OpenAI fails for a reason no retry fixes (out of credits, key rejected, model unavailable). Called from `main.py`, `sector_main.py` and `enricher.py`; without it a dead key meant a silently missing digest.
 - `src/slack_client.py` — Block Kit formatter + Slack poster (chat.postMessage with per-channel `channel_id`, or webhook); concurrent URL validation.
 - `src/main.py` — orchestrator (this is what the systemd timers trigger). `--geo` selects the sweep + target channel; `ranker.filter_by_geo` routes stories; `compute_post_at(spec, tz=...)` resolves 08:00 in each geo's timezone.
@@ -126,7 +127,7 @@ needs a deploy. See `docs/EDITING.md`.
 - Idempotency + "already sent today" is PER CHANNEL (`has_sent_digest_for_date(..., slack_channel=...)`) — India shipping doesn't suppress US.
 - Validate every URL with HEAD request before it ships in the Slack post (skippable via `--skip-url-validation`).
 - Log every API call to `data/logs/` with timestamps and costs.
-- All state in SQLite at `data/db/agent.db` — no external DB.
+- All state in SQLite at `data/db/agent.db`, which stays the source of truth. Neon Postgres holds a one-way read copy for live browsing (`src/neon_sync.py`); nothing reads it back.
 
 ## Tech stack
 - Python 3.11+
@@ -135,7 +136,7 @@ needs a deploy. See `docs/EDITING.md`.
 - chromadb for vector store (local, no cloud)
 - OpenAI `text-embedding-3-small` for embeddings
 - numpy for clustering / cosine math
-- SQLite + sqlite3 stdlib (no ORM)
+- SQLite + sqlite3 stdlib (no ORM); psycopg 3 only for the one-way Neon copy
 - Slack Incoming Webhook (modern, provisioned via a Slack App — not the legacy custom integration) for delivery; the digest posts with `unfurl_links/unfurl_media=false` so links don't render as preview cards
 - anthropic SDK for the Claude ranking call (optional — `ANTHROPIC_API_KEY`; falls back to Perplexity when unset)
 - python-dotenv for config; tenacity for retries

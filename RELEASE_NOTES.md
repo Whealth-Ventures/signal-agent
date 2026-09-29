@@ -17,6 +17,13 @@
 - It says what broke and how to fix it, for example "add credits at OpenAI billing".
 - Before this, the digest simply didn't arrive, and nobody was told why.
 
+### A live copy of the database you can open in DBeaver
+
+- After every run, the agent copies its data into a Neon Postgres database.
+- Open it in DBeaver or any SQL tool, from anywhere, without logging in to the server.
+- The copy matches prod whenever no run is in progress.
+- It's free: Neon keeps article bodies for 12 months, which keeps it inside the free tier for about 4 years. The server keeps every article.
+
 The Slack bot that answers questions from this archive comes next.
 
 

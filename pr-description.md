@@ -1,4 +1,4 @@
-# [minor] PROD Release: Story archive with Q&A labels, and Slack alerts when OpenAI fails
+# [minor] PROD Release: Story archive with Q&A labels, OpenAI failure alerts, and a live Neon copy
 
 **Phase A of the news archive: every new story gets its full article body and searchable tags in SQLite.** No ticket. The plan is in [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md).
 
@@ -30,6 +30,23 @@
 - **At most one alert per channel per run.** A crashed digest stops `run-digest.sh`, so the enricher doesn't add a second alert.
 - **Posting is fail-soft.** An alert that can't post is logged and never masks the original error.
 
+## Live copy in Neon, for DBeaver
+
+- **New `src/neon_sync.py`** runs at the end of `run-digest.sh` and `run-sector.sh`. It's non-fatal, and it's skipped when `DATABASE_URL` isn't set.
+- **It's one-way.** `agent.db` goes to schema `public` and `sector.db` to schema `sector`. SQLite stays the source of truth, and nothing reads Neon back.
+- **Not copied:** `stories.embedding` and `signals.raw_json`. They're binary or raw payloads, and they make up most of the SQLite file.
+- **What each run sends:**
+  - a table that's empty in Neon gets every row
+  - `stories` and `signals` get the last 45 days, since older rows never change
+  - `digests` and `digest_stories` get every row, since they're small
+  - `story_details` gets rows newer than Neon's own newest, so a missed sync catches up on its own
+- **Unchanged rows cost no write.** The upsert has an `IS DISTINCT FROM` guard.
+- **One transaction per schema.** A failure leaves Neon exactly as it was after the last good sync.
+- **Bodies older than 12 months are nulled in Neon only.** That keeps the 0.5 GB free tier lasting about 4 years.
+- **NUL bytes are stripped on copy.** Postgres text rejects them, and the first real sync hit two scraped bodies that had them.
+- **New dependency:** `psycopg[binary]>=3.2`. `deploy.sh` installs it from `requirements.txt`.
+- **New env var:** `DATABASE_URL`, the direct (non-pooled) connection string. It needs adding to the agent secret in Secrets Manager.
+
 ## Safety
 
 - **The digest can't be affected.** Enrichment starts after `main.py` exits, and `|| echo WARN` keeps `set -e` from ending the script.
@@ -53,12 +70,24 @@
   - a failed post never raises
   - each of the three call sites alerts the right channel, and a dry run doesn't
 - **The classifier was checked against real OpenAI responses:** a bad key gives 401 `invalid_api_key` → `auth`, and a missing model gives 404 `model_not_found` → `model`. Out of credits can't be triggered on demand, so it's covered by a unit test on the documented `insufficient_quota` code.
-- The full suite passes locally (317 passed, 3 skipped).
+- `tests/test_neon_sync.py`, 6 tests:
+  - the first sync sends every row, and later syncs send only the window
+  - a late tag is still sent for an old fetch
+  - embeddings and raw payloads are never selected, and every mirrored column exists in SQLite
+  - the upsert skips unchanged rows
+  - no `DATABASE_URL` means the sync is skipped without connecting
+- **Live test of the Neon copy** on the 27 September prod backup, from a local run with prod untouched:
+  - 319 real stories were labelled ($0.15)
+  - the first sync copied 8,581 stories, 11,740 signals and 319 labelled articles, plus the sector data, in 8.2 seconds (24 MB in Neon)
+  - the second sync sent only the 45-day window and changed nothing
+  - the IPO question runs correctly in Postgres
+- The full suite passes locally (323 passed, 3 skipped).
 - **Live test on 80 real prod stories** (scratch DB, prod untouched): 75 of 80 bodies fetched, all 80 tagged in 16 seconds for $0.036. The "biggest IPO stories this month" query returns only healthcare IPOs (ADARx, Oura, Iambic, RegenLab and others). All 34 non-healthcare IPOs are `not_healthcare`. The two `test_config` env checks fail only because this checkout has no `.env`.
 
 ## After merge
 
 - The next digest run enriches the last 2 days. Check `data/logs/enrich_<date>.jsonl`.
 - The 30-day backfill is a separate command, listed in the plan doc. It costs about $2.
+- Add `DATABASE_URL` (the direct connection) to the agent secret, then redeploy. Until then the Neon sync is skipped.
 
 **Need from you:** review and merge.
