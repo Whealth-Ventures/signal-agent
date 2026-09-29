@@ -63,6 +63,9 @@ def _env_int(name: str) -> int:
 
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY")
+# Neon Postgres, the one-way read copy (src/neon_sync.py). The direct
+# (non-pooled) connection string. Optional: unset → the sync is skipped.
+DATABASE_URL = _env("DATABASE_URL")
 PERPLEXITY_API_KEY = _env("PERPLEXITY_API_KEY")
 # Anthropic powers the single ranking/tiering/one-liner call (see ranker.py).
 # Optional: when unset, the ranker falls back to Perplexity sonar-reasoning-pro.
@@ -204,6 +207,11 @@ TRACK_B_ROTATION_DAYS = _t.get_int("track_b_rotation_days")
 SECTOR_RECENCY = "week"
 SECTOR_DEDUP_WINDOW_DAYS = 30
 
+# Enricher (src/enricher.py): tags every story for question answering. A
+# constant like the sector ones above; a tuning.xlsx key when it needs
+# changing without a deploy.
+ENRICH_MODEL = "gpt-4.1-mini"
+
 # Priority buckets — re-exported so callers can still write `config.PriorityBucket`
 # and `config.PRIORITY_BUCKETS`.
 PRIORITY_BUCKETS: tuple[PriorityBucket, ...] = _t.priority_buckets
@@ -243,6 +251,11 @@ HEADLINE_SYSTEM_PROMPT = _load_prompt("headline_system")
 # impact direction and what's in/out of scope.
 SECTOR_SYSTEM_PROMPT = _load_prompt("sector_system")
 SECTOR_IMPACT_RUBRIC = _load_prompt("sector_impact_rubric")
+
+# Enricher's tagging call (src/enricher.py). The enums, categories and the
+# magnitude rubric are appended in code so the prompt can't drift from the
+# values the enricher validates against.
+TAGGER_SYSTEM_PROMPT = _load_prompt("tagger_system")
 
 
 # --- Validation ---------------------------------------------------------

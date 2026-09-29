@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import chromadb
 import httpx
 
+import alerts
 import config
 import headline_rewriter
 import ranker
@@ -812,18 +813,28 @@ def main(argv: list[str] | None = None) -> int:
     # US posts 08:00 in America/New_York; India + legacy 'both' in DIGEST_TZ.
     post_tz = config.DIGEST_TZ_US if args.geo == "us" else config.DIGEST_TZ_INDIA
     post_at = compute_post_at(args.post_at, tz=post_tz)
-    stats = run_pipeline(
-        max_plans=args.max_plans,
-        skip_rss=args.skip_rss,
-        skip_content_indexing=args.skip_content_index,
-        skip_url_validation=args.skip_url_validation,
-        skip_headline_rewrite=args.skip_headline_rewrite,
-        dry_run=args.dry_run,
-        test_mode=args.test,
-        post_at=post_at,
-        force=args.force,
-        geo=args.geo,
-    )
+    try:
+        stats = run_pipeline(
+            max_plans=args.max_plans,
+            skip_rss=args.skip_rss,
+            skip_content_indexing=args.skip_content_index,
+            skip_url_validation=args.skip_url_validation,
+            skip_headline_rewrite=args.skip_headline_rewrite,
+            dry_run=args.dry_run,
+            test_mode=args.test,
+            post_at=post_at,
+            force=args.force,
+            geo=args.geo,
+        )
+    except Exception as e:
+        # Scoring embeds via OpenAI with no fallback, so a dead key crashes the
+        # run before the post. Say so in the channel that's missing its digest.
+        if not args.dry_run:
+            alerts.alert_if_openai_down(
+                e, impact="Today's digest could not be built.",
+                channel_id=_resolve_geo(args.geo).channel_id or None,
+            )
+        raise
     print()
     print(
         f"perplexity={stats.perplexity_signals}  rss={stats.rss_signals}  "

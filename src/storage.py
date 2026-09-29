@@ -88,6 +88,27 @@ _SCHEMA_SQL = [
         PRIMARY KEY (digest_id, story_id)
     )
     """,
+    # Article body + question-answering tags, written by src/enricher.py after
+    # the digest posts. Kept out of `stories` so the digest's queries never
+    # drag bodies along. body_status: 'ok' | 'failed' (fetch returned nothing).
+    # `facts` is JSON holding the story's category-specific labels
+    # (enricher.CATEGORY_FIELDS), e.g. {"event": "ipo", "amount_usd": 2.6e7}.
+    """
+    CREATE TABLE IF NOT EXISTS story_details (
+        story_id TEXT PRIMARY KEY REFERENCES stories(id),
+        body TEXT,
+        body_status TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        category TEXT,
+        facts TEXT,
+        magnitude TEXT,
+        companies TEXT,
+        geo TEXT,
+        summary TEXT,
+        tagged_at TEXT,
+        tag_model TEXT
+    )
+    """,
 ]
 
 
@@ -457,6 +478,69 @@ def list_stories(
     with _maybe_own(conn) as c:
         rows = c.execute(sql, params).fetchall()
     return [_story_from_row(r) for r in rows]
+
+
+# --- Story details (src/enricher.py) -------------------------------------
+
+def stories_without_details(
+    *, since: datetime, conn: sqlite3.Connection | None = None,
+) -> list[tuple[str, str]]:
+    """(story_id, canonical_url) for stories first seen since `since` that have
+    no story_details row yet, oldest first."""
+    with _maybe_own(conn) as c:
+        rows = c.execute(
+            """SELECT s.id, s.canonical_url FROM stories s
+               LEFT JOIN story_details d ON d.story_id = s.id
+               WHERE d.story_id IS NULL AND s.created_at >= ?
+               ORDER BY s.created_at""",
+            (_iso(since),),
+        ).fetchall()
+    return [(r["id"], r["canonical_url"]) for r in rows]
+
+
+def save_story_body(
+    story_id_: str, body: str, *, conn: sqlite3.Connection | None = None,
+) -> None:
+    """First write wins: a failed fetch still gets a row, so it isn't retried."""
+    with _maybe_own(conn) as c:
+        c.execute(
+            """INSERT INTO story_details (story_id, body, body_status, fetched_at)
+               VALUES (?, ?, ?, ?) ON CONFLICT(story_id) DO NOTHING""",
+            (story_id_, body or None, "ok" if body else "failed", _iso(_utcnow())),
+        )
+
+
+def untagged_stories(
+    *, since: datetime, conn: sqlite3.Connection | None = None,
+) -> list[dict]:
+    """Fetched but not yet tagged: [{id, title, summary, body}], oldest first."""
+    with _maybe_own(conn) as c:
+        rows = c.execute(
+            """SELECT s.id, s.canonical_title AS title,
+                      s.canonical_summary AS summary, d.body
+               FROM story_details d JOIN stories s ON s.id = d.story_id
+               WHERE d.tagged_at IS NULL AND s.created_at >= ?
+               ORDER BY s.created_at""",
+            (_iso(since),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_story_tags(
+    story_id_: str, tags: dict, *, model: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    with _maybe_own(conn) as c:
+        c.execute(
+            """UPDATE story_details SET category = ?, facts = ?, magnitude = ?,
+                 companies = ?, geo = ?, summary = ?, tagged_at = ?, tag_model = ?
+               WHERE story_id = ?""",
+            (
+                tags["category"], json.dumps(tags["facts"], ensure_ascii=False),
+                tags["magnitude"], json.dumps(tags["companies"], ensure_ascii=False),
+                tags["geo"], tags["summary"], _iso(_utcnow()), model, story_id_,
+            ),
+        )
 
 
 # --- Digests ------------------------------------------------------------

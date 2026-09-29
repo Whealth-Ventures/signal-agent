@@ -1,129 +1,116 @@
-# [minor] Collapse near-duplicate stories from different publications
+# [minor] PROD Release: Story archive with Q&A labels, OpenAI failure alerts, and a live Neon copy
 
-Found by the 1.5.0 verification dry run, not by a test. Closes FEEDBACK #14.
+**Phase A of the news archive: every new story gets its full article body and searchable tags in SQLite.** No ticket. The plan is in [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md).
 
-## The problem
+## What changes
 
-`collapse_duplicates` (1.5.0) catches one article served under several URLs —
-BioSpectrum's `/news/16/28410/<slug>` vs `/news/101/28410/<slug>`. It matches on
-normalised title, normalised URL, or host + slug.
+- **New `src/enricher.py`**, run from `deploy/run-digest.sh` after the post and before the backup. It's its own process and never fatal.
+- **New `story_details` table** in `agent.db`, created by `init_db`. The digest's own tables and queries are untouched.
+- **Pass 1** fetches bodies with the existing `headline_rewriter._fetch_excerpts`, now with an optional `limit`. The default is unchanged.
+- **Pass 2** tags stories with OpenAI `gpt-4.1-mini`: 10 per call, 4 calls in parallel, saved per batch.
+- **Labels depend on the category.** Every story gets category, magnitude (the ranker's S/A/B/C rubric), companies, geo and a two-line summary. Each category adds its own `facts` (`enricher.CATEGORY_FIELDS`). For example, deal size appears only on deal categories, and regulator plus product only on FDA & Regulatory. Deals always go in a deal category.
+- **Healthcare check first.** The model answers `healthcare: true/false`, and, when the article body was fetched, the digest's lexicon gate (`topicality.is_healthcare`) can veto a yes. Without a body the model decides alone, because title and summary are too thin for the lexicon. Non-healthcare stories become `not_healthcare`, tier C, with no facts. Healthcare stories outside the 8 categories become `other_healthcare`.
+- **The prompt lives in `prompts/tagger_system.md`.** The category fields, their allowed values and the rubric are appended in code, so they can't drift from what the validator accepts.
 
-None of those can catch **two publications reporting the same event**, because
-all three differ legitimately.
+## Slack alert when OpenAI fails
 
-Observed in the 3 Sept India dry run. MediBuddy's appointment of Shalabh
-Shrivastava produced three separate stories:
+- **Today a dead OpenAI key means no digest, silently.** Scoring embeds with no error handling, so the run crashes before the post.
+- **New `src/alerts.py`** spots failures a retry won't fix:
+  - `insufficient_quota`: out of credits
+  - 401 or 403: key rejected
+  - `model_not_found`: model not available on the key
 
-| Publication | Fetched | Story |
-|---|---|---|
-| Entrackr | 2 Sept 11:52 | `364f723d` |
-| BioSpectrum India | 3 Sept 02:22 | `0048e23b` |
-| Express Healthcare | 3 Sept 08:45 | `35328298` |
+  It walks the exception's cause chain, and a plain rate limit is ignored.
+- **It posts in the failing run's own channel**, with the fix:
+  - out of credits: the billing link, and "the next run recovers on its own"
+  - key rejected: update the secret, then redeploy
+- **Call sites:**
+  - `main.py` and `sector_main.py`: alert, then re-raise, so the journal still has the traceback. `--dry-run` never alerts.
+  - `enricher.py`: once per run, after the batches, to the channel given by the new `--geo` flag from `run-digest.sh`.
+- **At most one alert per channel per run.** A crashed digest stops `run-digest.sh`, so the enricher doesn't add a second alert.
+- **Posting is fail-soft.** An alert that can't post is logged and never masks the original error.
 
-**Two of them took two of the five headline slots** in the same digest.
+## Live copy in Neon, for DBeaver
 
-## Why the existing clustering missed it
+- **New `src/neon_sync.py`** runs at the end of `run-digest.sh` and `run-sector.sh`. It's non-fatal, and it's skipped when `DATABASE_URL` isn't set.
+- **It's one-way.** `agent.db` goes to schema `public` and `sector.db` to schema `sector`. SQLite stays the source of truth, and nothing reads Neon back.
+- **Not copied:** `stories.embedding` and `signals.raw_json`. They're binary or raw payloads, and they make up most of the SQLite file.
+- **What each run sends:**
+  - a table that's empty in Neon gets every row
+  - `signals` get the last 45 days. They're insert-or-ignore and linked to a story once, so older rows never change
+  - `stories` get every row, every run. A re-seen story is rewritten in place with no timestamp to window on. Sending all 8,581 took 7 seconds
+  - `digests` and `digest_stories` get every row, since they're small
+  - `story_details` gets rows newer than Neon's own newest, so a missed sync catches up on its own
+- **Unchanged rows cost no write.** The upsert has an `IS DISTINCT FROM` guard.
+- **One transaction per schema.** A failure leaves Neon exactly as it was after the last good sync.
+- **Bodies older than 12 months are nulled in Neon only.** That keeps the 0.5 GB free tier lasting about 4 years.
+- **NUL bytes are stripped on copy.** Postgres text rejects them, and the first real sync hit two scraped bodies that had them.
+- **New dependency:** `psycopg[binary]>=3.2`. `deploy.sh` installs it from `requirements.txt`.
+- **New env var:** `DATABASE_URL`, the direct (non-pooled) connection string. It needs adding to the agent secret in Secrets Manager.
 
-`scorer.cluster_signals` already does order-independent connected-components
-clustering at `cluster_similarity_threshold` (0.85) — but only over the signals
-of a **single scoring run**, and it does not re-cluster against stories from
-previous days. Each of these three arrived in a different run.
+## Safety
 
-Measured pairwise cosines on the box:
+- **The digest can't be affected.** Enrichment starts after `main.py` exits, and `|| echo WARN` keeps `set -e` from ending the script.
+- **A failed fetch gets a `failed` row, so it's never retried.**
+- **A failed tag call costs only its own batch.** Those stories get tagged on the next run.
+- **Off-list tag values become `other` or null.** Ids the model invents are ignored.
+- **One new dependency:** `psycopg[binary]`, installed by `deploy.sh` from `requirements.txt`.
+- **One new optional env var:** `DATABASE_URL`. It isn't in `REQUIRED_ENV`, so without it the Neon sync is skipped.
+- No new unit file.
+- **Timeouts:** the enricher is capped at 20 minutes and the Neon sync at 5, so neither can hold up the nightly backup.
 
-```
-Entrackr    ↔ BioSpectrum   0.8924   > 0.85
-Entrackr    ↔ Express       0.8831   > 0.85
-BioSpectrum ↔ Express       0.8453   < 0.85   (caught transitively via the chain)
-```
+## Changes after review
 
-So the data was already sufficient to merge all three. Nothing was looking.
+- **Blocker fixed:** the lexicon can now overrule the model only when a body was fetched.
+  - With a failed fetch, "Ultrahuman raises $12M Series B" has no stem, so it was filed `not_healthcare` for good.
+  - Re-labelling the 41 failed-fetch stories in the prod snapshot moved 2 real healthcare stories out of `not_healthcare`, including "Seniors Places… Senior Living".
+  - The 2 left are correctly not healthcare: saw-palmetto poaching and a KKR earnings update.
+- **Untagged stories are retried for 30 days**, not 2. The alert's "the next run recovers on its own" now holds for an outage of up to a month.
+- **Neon gets every `stories` row, every run.** A first fix windowed on `published_at`. The re-review showed that isn't enough: a re-seen story keeps the article's own date, and `upsert_story` keeps `created_at`. The unchanged-row check keeps a full send free of writes. An `updated_at` watermark is the upgrade path if it ever gets slow.
+- **Junk bodies count as a failed fetch.** That's anything under 300 characters, or a PDF read as text. In 319 real fetches, every body under 300 characters was a copyright line, a geo-block or consent page, a nav menu, a PDF, or a paywall teaser. A junk body used to count as a fetched article and hand the healthcare filter nothing to go on ("Please enable JavaScript to continue." reproduced the original mislabel).
+- **Timeouts** on the enricher and the sync. There's also a comment on `main.py`'s line in `run-digest.sh` recording why it must stay unguarded: that's what guarantees one alert per channel per run.
+- **Company names are capped at 120 characters.**
+- **New tests:**
+  - a failed fetch with no healthcare word keeps the model's category
+  - an untagged story is retried after the fetch window
+  - a re-seen story is re-sent to Neon
+  - company names are capped
+  - `sync()` itself, with a fake cursor: the watermark, NUL stripping, 12-month body retention, and skipping a missing DB
 
-## The fix
+## Tests
 
-`collapse_near_duplicates` compares the **candidate pool** by embedding,
-immediately after the exact-identity collapse, using **greedy leader
-selection**: strongest `relevance_score` first, each leader absorbing every
-remaining story that clears the threshold against *it*.
+- `tests/test_enricher.py`, 4 tests:
+  - the fetch and tag window, validation fallbacks, and ignoring invented ids
+  - facts outside the story's own category are dropped (an AI story never keeps a deal size)
+  - a failed call keeps the bodies, and the next run tags them without re-fetching
+  - every category has fields, and the prompt lists all of them
+  - a non-healthcare story is tier C with no facts, whether the model or the lexicon says so
+  - an unknown category becomes `other_healthcare`
+- `tests/test_alerts.py`, 10 tests:
+  - classification, including an error wrapped by another and a plain rate limit that must not alert
+  - the posted text and channel
+  - a failed post never raises
+  - each of the three call sites alerts the right channel, and a dry run doesn't
+- **The classifier was checked against real OpenAI responses:** a bad key gives 401 `invalid_api_key` → `auth`, and a missing model gives 404 `model_not_found` → `model`. Out of credits can't be triggered on demand, so it's covered by a unit test on the documented `insufficient_quota` code.
+- `tests/test_neon_sync.py`, 6 tests:
+  - the first sync sends every row, and later syncs send only the window
+  - a late tag is still sent for an old fetch
+  - embeddings and raw payloads are never selected, and every mirrored column exists in SQLite
+  - the upsert skips unchanged rows
+  - no `DATABASE_URL` means the sync is skipped without connecting
+- **Live test of the Neon copy** on the 27 September prod backup, from a local run with prod untouched:
+  - 319 real stories were labelled ($0.15)
+  - the first sync copied 8,581 stories, 11,740 signals and 319 labelled articles, plus the sector data, in 8.2 seconds (24 MB in Neon)
+  - the second sync sent only the windows and changed nothing
+  - the IPO question runs correctly in Postgres
+- Re-review tests: a JS wall or a PDF body is stored as a failed fetch and the model's category is kept; an old story whose score changed in place is re-sent to Neon.
+- The full suite passes locally (329 passed, 3 skipped).
+- **Live test on 80 real prod stories** (scratch DB, prod untouched): 75 of 80 bodies fetched, all 80 tagged in 16 seconds for $0.036. The "biggest IPO stories this month" query returns only healthcare IPOs (ADARx, Oura, Iambic, RegenLab and others). All 34 non-healthcare IPOs are `not_healthcare`. The two `test_config` env checks fail only because this checkout has no `.env`.
 
-- **Not single-linkage**, deliberately. See review round 2 below: connected
-  components over a 30-day pool chains near-threshold neighbours into merges
-  that share nothing.
-- **Every drop is a direct near-duplicate of its keeper**, which is what makes
-  the audit trail actionable.
-- **No new API calls.** The vectors are already stored in `stories.embedding`;
-  `storage.load_story_embeddings` reads them back (chunked at 500 to stay under
-  SQLite's variable limit).
-- **Day-agnostic**, which is the whole point: it compares whatever is in the
-  pool, regardless of which run produced each story.
-- **Never drops what it can't compare** — a story with no stored embedding is
-  always kept.
-- Every drop is logged as `near_duplicate_dropped` with both stories, the
-  measured similarity and the threshold.
+## After merge
 
-`Story` deliberately still doesn't carry its embedding; it would ride through
-every layer for no reason.
+- The next digest run enriches the last 2 days. Check `data/logs/enrich_<date>.jsonl`.
+- The 30-day backfill is a separate command, listed in the plan doc. It costs about $2.
+- Add `DATABASE_URL` (the direct connection) to the agent secret, then redeploy. Until then the Neon sync is skipped.
 
-## Testing
-
-301 tests pass.
-
-- `collapse_near_duplicates`: the real MediBuddy geometry (a fixture built to
-  reproduce the 0.8924 / 0.8831 / 0.8453 straddle, asserted before the
-  collapse), orthogonal stories untouched, a story without an embedding never
-  dropped, no-embeddings-at-all is a no-op, and input order preserved.
-- `storage.load_story_embeddings`: only ids that have one, empty and unknown
-  ids, and 1,200 ids to exercise the chunking.
-
-Two `test_config` cases fail locally for want of a `.env`
-(`OPENAI_API_KEY`, `SLACK_WEBHOOK_URL`). Pre-existing and environmental; CI
-supplies them.
-
-## Review round 2
-
-**Blocker: single-linkage chaining.** Reproduced exactly — 6 stories each 0.86
-to their neighbour collapsed to one survivor with the endpoints at cosine
-**-0.89**. Replaced connected components with **greedy leader selection**:
-highest `relevance_score` first, each leader absorbing only stories that clear
-the threshold against *it*. So a dropped story is always a near-duplicate of the
-specific story that replaced it. Same counterexample now keeps 3 of 6, each drop
-directly above threshold to its keeper.
-
-The review's supporting point checks out and the design note was wrong: the real
-scores are Entrackr 0.6196, Express 0.5767, BioSpectrum 0.5306, so **Entrackr is
-both the score winner and the story the other two measure against** (0.8924 and
-0.8831). The transitive 0.8453 link the docstring leaned on was never needed for
-its own example. MediBuddy still collapses to Entrackr.
-
-**Both collapse passes are now guarded**, keeping all candidates on failure. The
-mixed-embedding-dimension trigger is real: `embedding_model` is a `tuning.xlsx`
-setting, so a SharePoint edit with no deploy mixes dimensions inside the 30-day
-window, and `run_pipeline` is `try`/`finally` with no `except`.
-
-**The `scorer` import is gone**, since greedy leader selection needs only
-numpy. `import ranker` drops from **1.08s to 0.172s**, which also removes the
-`ranker → scorer` cycle risk the review noted.
-
-**Both test gaps closed.** A `rank_stories` test now seeds embeddings and
-asserts the pass fires at the call site (the previous fixtures all
-short-circuited at `len(have) < 2`), plus a test that a raising collapse still
-ships a digest. And the collapse tests no longer write production-shaped
-`duplicate_dropped` / `near_duplicate_dropped` rows into
-`data/logs/ranker_<date>.jsonl` — `_log` is patched, as is `_log_blocked` in the
-storage test, which had the same problem.
-
-**Title/body mismatch:** corrected to `[minor]` in both, per the review — this
-adds a capability that did not exist before.
-
-## Deploy notes
-
-No env, schema, dependency, infra or `tuning.xlsx` change. Threshold defaults to
-the existing `cluster_similarity_threshold`, so it is already tunable from
-SharePoint without a deploy.
-
-The one behaviour to watch: this is a **quality-for-quantity** trade. A digest
-that previously carried two tellings of one story will now carry one, and the
-freed slot goes to the next-best story. If it ever collapses two genuinely
-distinct stories, `near_duplicate_dropped` in `data/logs/ranker_<date>.jsonl`
-names both and the threshold, and raising `cluster_similarity_threshold` is a
-sheet edit.
+**Need from you:** review and merge.
