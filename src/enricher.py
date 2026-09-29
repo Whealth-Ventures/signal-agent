@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -51,16 +52,19 @@ GEOS = ("India", "US", "Global")
 # Labels per category: a story gets only the fields its own category's news
 # has, so deal size lives in the deal categories and nowhere else. `event` is
 # the same key everywhere (one query shape) with category-specific values.
-# Kinds: tuple = allowed values, "usd" = number > 0, "list" = names, "text".
+# Kinds: tuple = allowed values, "money" = amount as written (see parse_money),
+# "list" = names, "text".
 # A bucket key missing here (tuning.xlsx renamed one) just gets no facts.
 CATEGORY_FIELDS: dict[str, dict[str, tuple[object, str]]] = {
     "venture_ipo": {
         "event": (("ipo", "ipo_filing", "funding_round", "fund_raise", "other"),
-                  "ipo = pricing, open, or listed; ipo_filing = papers filed "
-                  "(DRHP / S-1), no dates yet; fund_raise = a VC fund closing"),
+                  "ipo = the company's own IPO is pricing, open or listing (not a later "
+                  "use of IPO money such as repaying debt); ipo_filing = papers filed to list "
+                  "shares (DRHP / S-1 / F-1), never a drug or regulatory filing such as an "
+                  "ANDA or NDA; fund_raise = a VC fund closing"),
         "round": ("text", 'e.g. "Seed", "Series B"'),
-        "amount_usd": ("usd", "money raised in THIS deal, not earlier rounds"),
-        "valuation_usd": ("usd", "valuation, if stated"),
+        "amount": ("money", "money raised in THIS deal, not earlier rounds"),
+        "valuation": ("money", "valuation, if stated"),
         "investors": ("list", "lead investors first"),
         "exchange": ("text", "NSE, BSE, Nasdaq, NYSE (IPOs only)"),
     },
@@ -69,13 +73,13 @@ CATEGORY_FIELDS: dict[str, dict[str, tuple[object, str]]] = {
                    "exit", "fund_raise", "other"), "stake = minority stake"),
         "buyer": ("text", "the acquirer or investor"),
         "target": ("text", "the company bought or invested in"),
-        "amount_usd": ("usd", "deal value"),
+        "amount": ("money", "deal value"),
     },
     "hospital_ma": {
         "event": (("acquisition", "merger", "affiliation", "divestiture", "closure", "other"), ""),
         "buyer": ("text", "the acquirer"),
         "target": ("text", "the hospital or system acquired"),
-        "amount_usd": ("usd", "deal value"),
+        "amount": ("money", "deal value"),
         "facilities": ("text", 'e.g. "3 hospitals, 450 beds"'),
     },
     "mso_rollups": {
@@ -84,7 +88,7 @@ CATEGORY_FIELDS: dict[str, dict[str, tuple[object, str]]] = {
         "target": ("text", "the practice acquired"),
         "specialty": ("text", 'e.g. "dermatology"'),
         "sponsor": ("text", "the PE backer"),
-        "amount_usd": ("usd", "deal value"),
+        "amount": ("money", "deal value"),
     },
     "fda_regulatory": {
         "event": (("approval", "rejection", "clearance", "label_change",
@@ -116,6 +120,49 @@ CATEGORY_FIELDS: dict[str, dict[str, tuple[object, str]]] = {
     },
 }
 
+# Money is extracted as the article states it and converted HERE, not by the
+# model: asked to convert, gpt-4.1-mini left "₹4,800 crore" without any amount
+# and stored Electra's $350M as 350. Stored as <field>_usd (for ranking) and
+# <field>_text ("₹4,800 Cr"), so answers can show both.
+MONEY_UNITS = {"": 1, "thousand": 1e3, "lakh": 1e5, "million": 1e6, "crore": 1e7,
+               "billion": 1e9, "trillion": 1e12}
+_UNIT_ABBR = {"": "", "thousand": "K", "lakh": " L", "million": "M", "crore": " Cr",
+              "billion": "B", "trillion": "T"}
+# Units of each currency per 1 USD. ponytail: fixed approximate rates (late
+# 2026 ballpark), fine for ranking deals; refresh when one drifts past ~5%, or
+# pull a daily rate if exact figures ever matter.
+PER_USD = {"USD": 1.0, "INR": 88.0, "EUR": 0.86, "GBP": 0.75, "JPY": 148.0,
+           "CNY": 7.1, "KRW": 1390.0, "CHF": 0.80, "SGD": 1.29, "AUD": 1.52,
+           "CAD": 1.38, "HKD": 7.8, "AED": 3.67}
+_SYMBOL = {"USD": "$", "INR": "\u20b9", "EUR": "\u20ac", "GBP": "\u00a3", "JPY": "\u00a5"}
+MIN_DEAL_USD = 10_000  # below this it's a units slip, not a deal
+MAX_DEAL_USD = 1e12    # above this it's a double-scaled slip (446.3e6 "million")
+
+
+def valid_usd(v: object) -> bool:
+    return (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            and MIN_DEAL_USD <= v <= MAX_DEAL_USD)
+
+
+def parse_money(v: object) -> tuple[float, str] | None:
+    """{"value": 4800, "unit": "crore", "currency": "INR"} → (5.45e8, "₹4,800 Cr").
+    None for anything malformed, NaN, an unknown unit or currency, or a total
+    outside $10k to $1T."""
+    if not isinstance(v, dict):
+        return None
+    value, unit = v.get("value"), str(v.get("unit") or "").strip().lower()
+    cur = str(v.get("currency") or "").strip().upper()
+    if (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+            or value <= 0 or unit not in MONEY_UNITS or cur not in PER_USD):
+        return None
+    usd = value * MONEY_UNITS[unit] / PER_USD[cur]
+    if not valid_usd(usd):
+        return None
+    num = f"{value:,.2f}".rstrip("0").rstrip(".")
+    sym = _SYMBOL.get(cur)
+    return usd, (f"{sym}{num}{_UNIT_ABBR[unit]}" if sym else f"{cur} {num}{_UNIT_ABBR[unit]}")
+
+
 # USD per 1M tokens (input, output), for the audit log only. A model missing
 # here logs est_cost_usd: null rather than a wrong number.
 _PRICES = {"gpt-4.1-mini": (0.40, 1.60)}
@@ -141,7 +188,11 @@ def _categories() -> tuple[str, ...]:
 
 
 def _field_line(name: str, kind: object, note: str) -> str:
-    shape = {"usd": "number in USD", "list": "list of names", "text": "short text"}
+    shape = {
+        "money": ('{"value", "unit", "currency"} exactly as the article states it, not converted; '
+                  f'unit one of {", ".join(repr(u) for u in MONEY_UNITS)}; currency one of {", ".join(PER_USD)}'),
+        "list": "list of names", "text": "short text",
+    }
     k = " | ".join(kind) if isinstance(kind, tuple) else shape[kind]
     return f"      - {name} ({k})" + (f": {note}" if note else "")
 
@@ -164,9 +215,6 @@ def _system_prompt() -> str:
 def _clean_value(kind: object, v: object) -> object:
     if isinstance(kind, tuple):
         return v if v in kind else None
-    if kind == "usd":
-        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
-        return float(v) if ok else None
     if kind == "list":
         return [str(x).strip() for x in v if str(x).strip()][:10] if isinstance(v, list) else None
     return str(v).strip()[:120] if isinstance(v, str) and v.strip() else None
@@ -196,6 +244,11 @@ def _clean(t: dict, text: str | None = None) -> dict:
     raw = t.get("facts") if isinstance(t.get("facts"), dict) else {}
     facts = {}
     for name, (kind, _) in CATEGORY_FIELDS.get(category, {}).items():
+        if kind == "money":
+            money = parse_money(raw.get(name))
+            if money:
+                facts[f"{name}_usd"], facts[f"{name}_text"] = money
+            continue
         v = _clean_value(kind, raw.get(name))
         if v not in (None, []):
             facts[name] = v
@@ -257,10 +310,13 @@ def _fetch_bodies(urls: list[str]) -> dict[str, str]:
     return asyncio.run(headline_rewriter._fetch_excerpts(urls, limit=BODY_MAX_CHARS))
 
 
-def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
+def run(*, days: int, conn, client, fetch=_fetch_bodies, retag: bool = False) -> dict:
+    """`retag`: re-label already-labelled stories first seen in the last
+    `days`, in place, with no fetch. Old labels stay until each new one is
+    written, so no story drops out of the bot's search while it runs."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
-    todo = storage.stories_without_details(since=since, conn=conn)
+    todo = [] if retag else storage.stories_without_details(since=since, conn=conn)
     bodies = fetch([url for _, url in todo]) if todo else {}
     bodies_ok = 0
     for sid, url in todo:
@@ -271,8 +327,8 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
         storage.save_story_body(sid, body, conn=conn)
     conn.commit()
 
-    tag_since = datetime.now(timezone.utc) - timedelta(days=max(days, TAG_RETRY_DAYS))
-    rows = storage.untagged_stories(since=tag_since, conn=conn)
+    tag_since = since if retag else datetime.now(timezone.utc) - timedelta(days=max(days, TAG_RETRY_DAYS))
+    rows = storage.untagged_stories(since=tag_since, include_tagged=retag, conn=conn)
     batches = [rows[i:i + BATCH_SIZE] for i in range(0, len(rows), BATCH_SIZE)]
     system = _system_prompt()
     stats = {
@@ -314,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Stories first seen in the last N days (backfill: --days 30).")
     p.add_argument("--geo", default="both", choices=["india", "us", "both"],
                    help="Which digest run this follows: picks the channel for an alert.")
+    p.add_argument("--retag", action="store_true",
+                   help="Re-label already-labelled stories from the last --days days in place, "
+                        "no fetch (after a labelling-rule change).")
     args = p.parse_args(argv)
     if not config.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
@@ -322,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = storage.connect()
     try:
         storage.init_db(conn=conn)
-        stats = run(days=args.days, conn=conn, client=client)
+        stats = run(days=args.days, conn=conn, client=client, retag=args.retag)
     finally:
         conn.close()
     print(f"enrich: {json.dumps(stats)}")

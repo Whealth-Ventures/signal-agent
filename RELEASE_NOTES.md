@@ -1,5 +1,18 @@
 # Signal Agent — Release Notes
 
+## Ask Signal Agent questions in Slack (2026-09-29)
+
+**Mention `@signal_agent` with a question, or DM it, and it answers from the news archive in a thread.**
+
+- Example: "What are the biggest healthcare IPOs this month?" returns the top IPOs, each with a two-line summary and a link.
+- It searches the labelled archive of every story since 14 September. Follow-up questions in the same thread work.
+- Every link comes from a story it actually found, so it can't make up a source.
+- The same event reported by several outlets shows up once.
+- It says so when a question is about a period the archive doesn't cover yet.
+- Deal sizes appear in the article's own currency with US dollars alongside, for example ₹4,800 Cr (~$545M). They're compared in US dollars, so rupee and dollar deals rank fairly.
+- Cost is about 1 cent per question on the existing OpenAI key.
+
+
 ## Every story is now saved with its full article and searchable tags (2026-09-25)
 
 **This is the groundwork for asking Signal Agent questions, not just reading the digest.**

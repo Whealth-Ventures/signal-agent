@@ -511,15 +511,18 @@ def save_story_body(
 
 
 def untagged_stories(
-    *, since: datetime, conn: sqlite3.Connection | None = None,
+    *, since: datetime, include_tagged: bool = False,
+    conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
-    """Fetched but not yet tagged: [{id, title, summary, body}], oldest first."""
+    """Fetched but not yet tagged: [{id, title, summary, body}], oldest first.
+    `include_tagged` also returns labelled ones, for enricher --retag."""
+    untagged = "" if include_tagged else "d.tagged_at IS NULL AND "
     with _maybe_own(conn) as c:
         rows = c.execute(
-            """SELECT s.id, s.canonical_title AS title,
+            f"""SELECT s.id, s.canonical_title AS title,
                       s.canonical_summary AS summary, d.body
                FROM story_details d JOIN stories s ON s.id = d.story_id
-               WHERE d.tagged_at IS NULL AND s.created_at >= ?
+               WHERE {untagged}s.created_at >= ?
                ORDER BY s.created_at""",
             (_iso(since),),
         ).fetchall()

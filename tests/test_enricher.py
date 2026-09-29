@@ -49,8 +49,8 @@ class _FakeClient:
 
 GOOD = {
     "id": "a", "healthcare": True, "category": "venture_ipo", "magnitude": "S",
-    "facts": {"event": "ipo", "amount_usd": 2.6e7, "exchange": "NSE",
-              "indication": "not a venture_ipo field"},
+    "facts": {"event": "ipo", "amount": {"value": 218, "unit": "crore", "currency": "INR"},
+              "exchange": "NSE", "indication": "not a venture_ipo field"},
     "companies": ["Acme Health"], "geo": "India",
     "summary": "Acme Health opens its IPO. It seeks $26M on the NSE.",
 }
@@ -103,7 +103,9 @@ class EnricherTest(unittest.TestCase):
         )
         # Only the story's own category's fields survive.
         self.assertEqual(
-            json.loads(d["a"]["facts"]), {"event": "ipo", "amount_usd": 2.6e7, "exchange": "NSE"},
+            json.loads(d["a"]["facts"]),
+            {"event": "ipo", "amount_usd": 218e7 / enricher.PER_USD["INR"], "amount_text": "\u20b9218 Cr",
+             "exchange": "NSE"},
         )
         self.assertEqual(json.loads(d["a"]["companies"]), ["Acme Health"])
         # Off-list values fall back to safe defaults instead of failing the
@@ -168,6 +170,33 @@ class EnricherTest(unittest.TestCase):
         enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY, entry]), fetch=self._fetch)
         self.assertEqual(self._details()["old"]["category"], "venture_ipo")
         self.assertNotIn("https://ex.com/old", self.fetched[0])  # retried, not re-fetched
+
+    def test_money_is_converted_in_code_not_by_the_model(self):
+        m = enricher.parse_money
+        self.assertEqual(m({"value": 4800, "unit": "crore", "currency": "INR"}),
+                         (4.8e10 / enricher.PER_USD["INR"], "\u20b94,800 Cr"))
+        self.assertEqual(m({"value": 446.3, "unit": "million", "currency": "usd"}), (446.3e6, "$446.3M"))
+        self.assertEqual(m({"value": 50, "unit": "Million", "currency": "SGD"})[1], "SGD 50M")
+        # A units slip ($350M as 350), unknown unit or currency, or junk → no amount.
+        for bad in ({"value": 350, "unit": "", "currency": "USD"}, {"value": 5, "unit": "gazillion", "currency": "USD"},
+                    {"value": 5, "unit": "million", "currency": "XYZ"}, {"value": True, "unit": "million", "currency": "USD"},
+                    350, None):
+            self.assertIsNone(m(bad), bad)
+        # NaN (json.loads accepts it) and a double-scaled slip ($446 trillion) too.
+        self.assertIsNone(m({"value": float("nan"), "unit": "million", "currency": "USD"}))
+        self.assertIsNone(m({"value": 446.3e6, "unit": "million", "currency": "USD"}))
+        t = enricher._clean({"healthcare": True, "category": "venture_ipo",
+                             "facts": {"event": "ipo", "amount": {"value": 350, "unit": "", "currency": "USD"}}}, None)
+        self.assertEqual(t["facts"], {"event": "ipo"})
+
+    def test_retag_relabels_in_place_without_fetching(self):
+        enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY]), fetch=self._fetch)
+        moved = {**GOOD, "category": "pe_strategics", "facts": {"event": "acquisition"}}
+        stats = enricher.run(days=2, conn=self.conn, client=_FakeClient([moved, MESSY]),
+                             fetch=self._fetch, retag=True)
+        self.assertEqual(len(self.fetched), 1)  # the retag pass fetched nothing
+        self.assertEqual((stats["to_tag"], stats["tagged"]), (2, 2))
+        self.assertEqual(self._details()["a"]["category"], "pe_strategics")
 
     def test_company_names_are_capped(self):
         t = enricher._clean({"healthcare": True, "companies": ["x" * 500]}, None)
