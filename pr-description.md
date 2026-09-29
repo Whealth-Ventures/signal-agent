@@ -1,4 +1,4 @@
-# [minor] PROD Release: Slack Q&A bot that answers from the news archive
+# [major] PROD Release: Slack Q&A bot that answers from the news archive
 
 **Phase B of the news archive: `@signal_agent <question>` or a DM gets an answer in a thread, searched from the labelled archive.** No ticket. The setup was done on 29 September 2026 ([docs/2026-09-29-qa-bot-setup.md](docs/2026-09-29-qa-bot-setup.md)), and the plan is in [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md).
 
