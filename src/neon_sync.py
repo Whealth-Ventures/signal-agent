@@ -13,10 +13,11 @@ payloads, unreadable in a SQL client, and most of the SQLite file's size.
 
 What each run sends, per table:
   - empty in Neon (first sync, new table): every row
-  - stories, signals: rows first seen (or, for stories, re-published) in the
-    last RESEND_DAYS; nothing is deleted, and a re-seen story's upsert
-    refreshes published_at, so any row that changes falls in the window
-  - digests, digest_stories: every row (small)
+  - signals: rows fetched in the last RESEND_DAYS. They're insert-or-ignore
+    and their story link is set once, when they're scored, so older rows
+    never change
+  - stories, digests, digest_stories: every row. A re-seen story's upsert
+    changes it in place with no timestamp to window on
   - story_details: rows fetched or tagged after Neon's newest, so a missed
     sync catches up on its own
 The upsert skips rows that haven't changed, so a re-sent row costs no write.
@@ -51,9 +52,11 @@ _TABLES: dict[str, tuple[tuple[str, ...], list[tuple[str, str]], tuple[str, ...]
         ("canonical_summary", "text"), ("published_at", "timestamptz"),
         ("relevance_score", "double precision"), ("created_at", "timestamptz"),
         ("priority_bucket", "text"), ("geo", "text"), ("bucket", "text"),
-        # created_at never changes on re-upsert, but published_at does: a URL
-        # re-seen after the window refreshes it, so it's re-sent.
-    ], ("created_at", "published_at")),
+        # Always sent in full: upsert_story rewrites score / geo / bucket of a
+        # re-seen story but has no updated-at, so no window can see the change.
+        # ponytail: ~5 MB a run now, ~40 MB after a year; add an updated_at
+        # column and watermark it like story_details if the sync gets slow.
+    ], ()),
     "signals": (("id",), [
         ("id", "text"), ("source", "text"), ("source_type", "text"), ("title", "text"),
         ("url", "text"), ("published_at", "timestamptz"), ("summary", "text"),

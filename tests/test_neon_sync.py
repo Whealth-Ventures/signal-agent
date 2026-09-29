@@ -51,13 +51,17 @@ class SourceQueryTest(unittest.TestCase):
         self.assertEqual(self._ids("story_details", full=True, watermark=None), ["new", "old"])
 
     def test_later_syncs_send_only_the_window(self):
-        self.assertEqual(self._ids("stories", full=False, watermark=None), ["new"])
         wm = iso(NOW - timedelta(days=2))
         self.assertEqual(self._ids("story_details", full=False, watermark=wm), ["new"])
+        sql, params = neon_sync._source_query("signals", full=False, watermark=None, now=NOW)
+        self.assertIn("fetched_at >= :since", sql)
+        self.assertEqual(params["since"], iso(NOW - timedelta(days=neon_sync.RESEND_DAYS)))
 
-    def test_a_story_re_seen_after_the_window_is_re_sent(self):
-        # upsert_story keeps created_at but refreshes published_at.
-        self.conn.execute("UPDATE stories SET published_at = ? WHERE id = 'old'", (iso(NOW),))
+    def test_an_old_story_changed_in_place_is_always_re_sent(self):
+        # A 90-day-old story re-seen today: upsert_story rewrites its score but
+        # keeps created_at AND the article's own published_at, so no date
+        # window would catch it. Stories are sent in full.
+        self.conn.execute("UPDATE stories SET relevance_score = 0.91 WHERE id = 'old'")
         self.assertEqual(self._ids("stories", full=False, watermark=None), ["new", "old"])
 
     def test_a_late_tag_is_sent_even_for_an_old_fetch(self):

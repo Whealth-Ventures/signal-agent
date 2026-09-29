@@ -37,7 +37,8 @@
 - **Not copied:** `stories.embedding` and `signals.raw_json`. They're binary or raw payloads, and they make up most of the SQLite file.
 - **What each run sends:**
   - a table that's empty in Neon gets every row
-  - `stories` and `signals` get the last 45 days, since older rows never change
+  - `signals` get the last 45 days. They're insert-or-ignore and linked to a story once, so older rows never change
+  - `stories` get every row, every run. A re-seen story is rewritten in place with no timestamp to window on. Sending all 8,581 took 7 seconds
   - `digests` and `digest_stories` get every row, since they're small
   - `story_details` gets rows newer than Neon's own newest, so a missed sync catches up on its own
 - **Unchanged rows cost no write.** The upsert has an `IS DISTINCT FROM` guard.
@@ -65,7 +66,8 @@
   - Re-labelling the 41 failed-fetch stories in the prod snapshot moved 2 real healthcare stories out of `not_healthcare`, including "Seniors Places… Senior Living".
   - The 2 left are correctly not healthcare: saw-palmetto poaching and a KKR earnings update.
 - **Untagged stories are retried for 30 days**, not 2. The alert's "the next run recovers on its own" now holds for an outage of up to a month.
-- **Neon's `stories` window also checks `published_at`.** `upsert_story` refreshes it for a re-seen URL but keeps `created_at`, so updates to old stories reach Neon.
+- **Neon gets every `stories` row, every run.** A first fix windowed on `published_at`. The re-review showed that isn't enough: a re-seen story keeps the article's own date, and `upsert_story` keeps `created_at`. The unchanged-row check keeps a full send free of writes. An `updated_at` watermark is the upgrade path if it ever gets slow.
+- **Junk bodies count as a failed fetch.** That's anything under 300 characters, or a PDF read as text. In 319 real fetches, every body under 300 characters was a copyright line, a geo-block or consent page, a nav menu, a PDF, or a paywall teaser. A junk body used to count as a fetched article and hand the healthcare filter nothing to go on ("Please enable JavaScript to continue." reproduced the original mislabel).
 - **Timeouts** on the enricher and the sync. There's also a comment on `main.py`'s line in `run-digest.sh` recording why it must stay unguarded: that's what guarantees one alert per channel per run.
 - **Company names are capped at 120 characters.**
 - **New tests:**
@@ -99,9 +101,10 @@
 - **Live test of the Neon copy** on the 27 September prod backup, from a local run with prod untouched:
   - 319 real stories were labelled ($0.15)
   - the first sync copied 8,581 stories, 11,740 signals and 319 labelled articles, plus the sector data, in 8.2 seconds (24 MB in Neon)
-  - the second sync sent only the 45-day window and changed nothing
+  - the second sync sent only the windows and changed nothing
   - the IPO question runs correctly in Postgres
-- The full suite passes locally (328 passed, 3 skipped).
+- Re-review tests: a JS wall or a PDF body is stored as a failed fetch and the model's category is kept; an old story whose score changed in place is re-sent to Neon.
+- The full suite passes locally (329 passed, 3 skipped).
 - **Live test on 80 real prod stories** (scratch DB, prod untouched): 75 of 80 bodies fetched, all 80 tagged in 16 seconds for $0.036. The "biggest IPO stories this month" query returns only healthcare IPOs (ADARx, Oura, Iambic, RegenLab and others). All 34 non-healthcare IPOs are `not_healthcare`. The two `test_config` env checks fail only because this checkout has no `.env`.
 
 ## After merge

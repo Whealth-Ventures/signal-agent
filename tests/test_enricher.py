@@ -84,7 +84,7 @@ class EnricherTest(unittest.TestCase):
 
     def _fetch(self, urls):
         self.fetched.append(sorted(urls))
-        return {"https://ex.com/a": "Full body of a."}
+        return {"https://ex.com/a": "Full body of a hospital story. " * 12}
 
     def _details(self) -> dict[str, dict]:
         rows = self.conn.execute("SELECT * FROM story_details").fetchall()
@@ -142,6 +142,23 @@ class EnricherTest(unittest.TestCase):
         enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY, entry]), fetch=self._fetch)
         u = self._details()["u"]
         self.assertEqual((u["body_status"], u["category"], u["magnitude"]), ("failed", "venture_ipo", "A"))
+
+    def test_junk_bodies_count_as_a_failed_fetch(self):
+        # A JS wall or a PDF read as text is "fetched" but says nothing: stored
+        # as failed, so the lexicon can't veto on it and the model decides.
+        storage.upsert_story(Story(
+            id="u", canonical_url="https://ex.com/u", canonical_title="Ultrahuman raises $12M Series B",
+            canonical_summary="", published_at=_TS, relevance_score=0.5,
+        ), conn=self.conn)
+        self.conn.commit()
+        junk = {"https://ex.com/u": "Please enable JavaScript to continue.",
+                "https://ex.com/a": "%PDF-1.7 " + "x" * 400}
+        entry = {"id": "u", "healthcare": True, "category": "venture_ipo", "magnitude": "A", "facts": {}}
+        enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY, entry]),
+                     fetch=lambda urls: junk)
+        d = self._details()
+        self.assertEqual((d["u"]["body_status"], d["u"]["category"]), ("failed", "venture_ipo"))
+        self.assertEqual((d["a"]["body_status"], d["a"]["body"]), ("failed", None))
 
     def test_an_untagged_story_is_retried_after_the_fetch_window(self):
         # Fetched 10 days ago, never tagged (say, a long OpenAI outage).

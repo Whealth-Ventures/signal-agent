@@ -33,6 +33,11 @@ import storage
 import topicality
 
 BODY_MAX_CHARS = 20_000      # stored per story, ~3,500 words
+# Shorter than this is page chrome, not an article: in 319 real fetches every
+# body under 300 chars was a copyright line, a geo-block or consent page, a
+# nav menu, a PDF read as text, or a paywall teaser. Stored as a failed fetch,
+# so the model judges healthcare alone rather than the lexicon judging junk.
+MIN_BODY_CHARS = 300
 TAG_EXCERPT_CHARS = 4_000    # of the body, sent to the tagger
 BATCH_SIZE = 10
 TAG_WORKERS = 4
@@ -257,8 +262,13 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
 
     todo = storage.stories_without_details(since=since, conn=conn)
     bodies = fetch([url for _, url in todo]) if todo else {}
+    bodies_ok = 0
     for sid, url in todo:
-        storage.save_story_body(sid, bodies.get(url, ""), conn=conn)
+        body = bodies.get(url, "")
+        if len(body) < MIN_BODY_CHARS or body.startswith("%PDF"):
+            body = ""
+        bodies_ok += bool(body)
+        storage.save_story_body(sid, body, conn=conn)
     conn.commit()
 
     tag_since = datetime.now(timezone.utc) - timedelta(days=max(days, TAG_RETRY_DAYS))
@@ -266,7 +276,7 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
     batches = [rows[i:i + BATCH_SIZE] for i in range(0, len(rows), BATCH_SIZE)]
     system = _system_prompt()
     stats = {
-        "fetched": len(todo), "bodies_ok": sum(1 for _, u in todo if bodies.get(u)),
+        "fetched": len(todo), "bodies_ok": bodies_ok,
         "to_tag": len(rows), "tagged": 0, "failed_calls": 0, "in": 0, "out": 0,
         "openai_problem": None,
     }
