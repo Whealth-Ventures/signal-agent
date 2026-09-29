@@ -2,6 +2,10 @@
 Description=signal-agent Q&A bot (Slack Socket Mode, answers from the news archive)
 After=network-online.target
 Wants=network-online.target
+# A crash loop (bad env, Slack unreachable at boot) stops after 5 tries in 10
+# minutes instead of restarting forever; `systemctl status` then shows failed.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple

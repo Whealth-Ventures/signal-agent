@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -135,20 +136,27 @@ PER_USD = {"USD": 1.0, "INR": 88.0, "EUR": 0.86, "GBP": 0.75, "JPY": 148.0,
            "CAD": 1.38, "HKD": 7.8, "AED": 3.67}
 _SYMBOL = {"USD": "$", "INR": "\u20b9", "EUR": "\u20ac", "GBP": "\u00a3", "JPY": "\u00a5"}
 MIN_DEAL_USD = 10_000  # below this it's a units slip, not a deal
+MAX_DEAL_USD = 1e12    # above this it's a double-scaled slip (446.3e6 "million")
+
+
+def valid_usd(v: object) -> bool:
+    return (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            and MIN_DEAL_USD <= v <= MAX_DEAL_USD)
 
 
 def parse_money(v: object) -> tuple[float, str] | None:
     """{"value": 4800, "unit": "crore", "currency": "INR"} → (5.45e8, "₹4,800 Cr").
-    None for anything malformed, an unknown unit or currency, or under $10k."""
+    None for anything malformed, NaN, an unknown unit or currency, or a total
+    outside $10k to $1T."""
     if not isinstance(v, dict):
         return None
     value, unit = v.get("value"), str(v.get("unit") or "").strip().lower()
     cur = str(v.get("currency") or "").strip().upper()
-    if (not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0
-            or unit not in MONEY_UNITS or cur not in PER_USD):
+    if (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+            or value <= 0 or unit not in MONEY_UNITS or cur not in PER_USD):
         return None
     usd = value * MONEY_UNITS[unit] / PER_USD[cur]
-    if usd < MIN_DEAL_USD:
+    if not valid_usd(usd):
         return None
     num = f"{value:,.2f}".rstrip("0").rstrip(".")
     sym = _SYMBOL.get(cur)
@@ -302,10 +310,13 @@ def _fetch_bodies(urls: list[str]) -> dict[str, str]:
     return asyncio.run(headline_rewriter._fetch_excerpts(urls, limit=BODY_MAX_CHARS))
 
 
-def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
+def run(*, days: int, conn, client, fetch=_fetch_bodies, retag: bool = False) -> dict:
+    """`retag`: re-label already-labelled stories first seen in the last
+    `days`, in place, with no fetch. Old labels stay until each new one is
+    written, so no story drops out of the bot's search while it runs."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
-    todo = storage.stories_without_details(since=since, conn=conn)
+    todo = [] if retag else storage.stories_without_details(since=since, conn=conn)
     bodies = fetch([url for _, url in todo]) if todo else {}
     bodies_ok = 0
     for sid, url in todo:
@@ -316,8 +327,8 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
         storage.save_story_body(sid, body, conn=conn)
     conn.commit()
 
-    tag_since = datetime.now(timezone.utc) - timedelta(days=max(days, TAG_RETRY_DAYS))
-    rows = storage.untagged_stories(since=tag_since, conn=conn)
+    tag_since = since if retag else datetime.now(timezone.utc) - timedelta(days=max(days, TAG_RETRY_DAYS))
+    rows = storage.untagged_stories(since=tag_since, include_tagged=retag, conn=conn)
     batches = [rows[i:i + BATCH_SIZE] for i in range(0, len(rows), BATCH_SIZE)]
     system = _system_prompt()
     stats = {
@@ -359,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Stories first seen in the last N days (backfill: --days 30).")
     p.add_argument("--geo", default="both", choices=["india", "us", "both"],
                    help="Which digest run this follows: picks the channel for an alert.")
+    p.add_argument("--retag", action="store_true",
+                   help="Re-label already-labelled stories from the last --days days in place, "
+                        "no fetch (after a labelling-rule change).")
     args = p.parse_args(argv)
     if not config.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
@@ -367,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = storage.connect()
     try:
         storage.init_db(conn=conn)
-        stats = run(days=args.days, conn=conn, client=client)
+        stats = run(days=args.days, conn=conn, client=client, retag=args.retag)
     finally:
         conn.close()
     print(f"enrich: {json.dumps(stats)}")

@@ -182,9 +182,21 @@ class EnricherTest(unittest.TestCase):
                     {"value": 5, "unit": "million", "currency": "XYZ"}, {"value": True, "unit": "million", "currency": "USD"},
                     350, None):
             self.assertIsNone(m(bad), bad)
+        # NaN (json.loads accepts it) and a double-scaled slip ($446 trillion) too.
+        self.assertIsNone(m({"value": float("nan"), "unit": "million", "currency": "USD"}))
+        self.assertIsNone(m({"value": 446.3e6, "unit": "million", "currency": "USD"}))
         t = enricher._clean({"healthcare": True, "category": "venture_ipo",
                              "facts": {"event": "ipo", "amount": {"value": 350, "unit": "", "currency": "USD"}}}, None)
         self.assertEqual(t["facts"], {"event": "ipo"})
+
+    def test_retag_relabels_in_place_without_fetching(self):
+        enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY]), fetch=self._fetch)
+        moved = {**GOOD, "category": "pe_strategics", "facts": {"event": "acquisition"}}
+        stats = enricher.run(days=2, conn=self.conn, client=_FakeClient([moved, MESSY]),
+                             fetch=self._fetch, retag=True)
+        self.assertEqual(len(self.fetched), 1)  # the retag pass fetched nothing
+        self.assertEqual((stats["to_tag"], stats["tagged"]), (2, 2))
+        self.assertEqual(self._details()["a"]["category"], "pe_strategics")
 
     def test_company_names_are_capped(self):
         t = enricher._clean({"healthcare": True, "companies": ["x" * 500]}, None)

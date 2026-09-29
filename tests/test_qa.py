@@ -36,6 +36,17 @@ STORIES = [
 ]
 
 
+def _add(conn, sid, title, pub, cat, facts, comps, emb, mag="S"):
+    storage.upsert_story(Story(
+        id=sid, canonical_url=f"https://ex.com/{sid}", canonical_title=title, canonical_summary="",
+        relevance_score=0.5, published_at=datetime.fromisoformat(pub).replace(tzinfo=timezone.utc),
+    ), embedding=emb, conn=conn)
+    storage.save_story_body(sid, "x" * 400, conn=conn)
+    storage.save_story_tags(sid, {"category": cat, "facts": facts, "magnitude": mag, "companies": comps,
+                                  "geo": "US", "summary": "s"}, model="test", conn=conn)
+    conn.commit()
+
+
 class _Archive(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -88,37 +99,6 @@ class SearchTest(_Archive):
         # A wrong enum is ignored, not fatal.
         self.assertEqual(len(self.ids(category="crypto", geo="Mars", limit=25)), 5)
 
-    def test_same_event_from_two_outlets_is_one_result(self):
-        conn = storage.connect(config.DB_PATH)
-        storage.upsert_story(Story(
-            id="adarx2", canonical_url="https://ex.com/adarx2", canonical_title="ADARx prices upsized IPO",
-            canonical_summary="", relevance_score=0.5,
-            published_at=datetime(2026, 9, 26, tzinfo=timezone.utc)), conn=conn)
-        storage.save_story_body("adarx2", "x" * 400, conn=conn)
-        storage.save_story_tags("adarx2", {"category": "venture_ipo", "facts": {"event": "ipo", "amount_usd": 4.46e8},
-                                           "magnitude": "S", "companies": ["ADARx"], "geo": "US", "summary": "s"},
-                                model="test", conn=conn)
-        conn.commit(); conn.close()
-        got = qa.search_stories(self.conn, events=["ipo"])
-        self.assertEqual([s["id"] for s in got], ["adarx", "old"])
-        self.assertEqual(got[0]["more_links"], ["https://ex.com/adarx2"])
-
-    def test_ipo_filing_and_ipo_by_one_company_merge_and_tiny_amounts_are_dropped(self):
-        conn = storage.connect(config.DB_PATH)
-        storage.upsert_story(Story(
-            id="adarx_f", canonical_url="https://ex.com/adarx_f", canonical_title="ADARx files S-1",
-            canonical_summary="", relevance_score=0.5,
-            published_at=datetime(2026, 9, 10, tzinfo=timezone.utc)), conn=conn)
-        storage.save_story_body("adarx_f", "x" * 400, conn=conn)
-        storage.save_story_tags("adarx_f", {"category": "venture_ipo", "facts": {"event": "ipo_filing", "amount_usd": 350},
-                                            "magnitude": "S", "companies": ["ADARx"], "geo": "US", "summary": "s"},
-                                model="test", conn=conn)
-        conn.commit(); conn.close()
-        got = qa.search_stories(self.conn, events=["ipo", "ipo_filing"])
-        self.assertEqual([s["id"] for s in got], ["adarx", "eclat", "old"])
-        self.assertEqual(got[0]["more_links"], ["https://ex.com/adarx_f"])
-        self.assertIsNone(qa.get_story(self.conn, "adarx_f")["amount_usd"])  # 350 is a units slip
-
     def test_amount_shows_the_article_figure_with_usd(self):
         self.assertEqual(qa.money_display({"amount_usd": 5.4545e8, "amount_text": "\u20b94,800 Cr"}),
                          "\u20b94,800 Cr (~$545M)")
@@ -127,10 +107,53 @@ class SearchTest(_Archive):
         self.assertIsNone(qa.money_display({"amount_usd": 350}))
         self.assertEqual(qa.money_display({"valuation_usd": 1.2e10, "valuation_text": "$12B"}, "valuation"), "$12B")
 
+    def test_dates_are_parsed_and_bad_ones_ignored(self):
+        self.assertNotIn("old", self.ids(published_after="2026/09/15", category="venture_ipo"))
+        self.assertIn("eclat", self.ids(published_after="2026/09/15", category="venture_ipo"))
+        self.assertIn("old", self.ids(published_after="15 September 2026", category="venture_ipo"))
+
+    def test_get_story_never_hands_over_raw_money(self):
+        conn = storage.connect(config.DB_PATH)
+        _add(conn, "slip", "Slip IPO", "2026-09-20", "venture_ipo", {"event": "ipo", "amount_usd": 350}, ["Slip"], None)
+        conn.close()
+        s = qa.get_story(self.conn, "slip")
+        self.assertEqual((s["amount_usd"], s["amount"], s["facts"]), (None, None, {"event": "ipo"}))
+
     def test_get_story_has_article_text(self):
         s = qa.get_story(self.conn, "fda")
         self.assertEqual((s["facts"]["product"], s["article_text"][:7]), ("lirafugratinib", "Body of"))
         self.assertIsNone(qa.get_story(self.conn, "nope"))
+
+
+class MergeTest(_Archive):
+    """One event told by several outlets merges; different news never does,
+    even when it shares a company's first word, a company, or a label."""
+    A, NEAR_A, A_ISH = [1, 0, 0, 0], [0.9, 0.3, 0, 0], [0.8, 0.6, 0, 0]  # cos to A: 0.95, 0.8
+
+    def setUp(self) -> None:
+        super().setUp()
+        conn = storage.connect(config.DB_PATH)
+        ipo = lambda usd: {"event": "ipo", "amount_usd": usd}
+        _add(conn, "z1", "Zenyx IPO debut", "2026-09-25", "venture_ipo", ipo(5e8), ["Zenyx Pharmaceuticals"], self.A)
+        _add(conn, "z2", "Zenyx upsized IPO", "2026-09-26", "venture_ipo", ipo(4e8), ["Zenyx"], self.NEAR_A)
+        _add(conn, "zf", "Zenyx files S-1", "2026-09-18", "venture_ipo", {"event": "ipo_filing"}, ["Zenyx"], self.A_ISH)
+        _add(conn, "zlate", "Zenyx follow-on", "2026-10-20", "venture_ipo", ipo(1e8), ["Zenyx"], self.NEAR_A)
+        _add(conn, "ga", "General Atlantic takes stake", "2026-09-20", "pe_strategics",
+             {"event": "stake"}, ["General Atlantic"], [0, 0, 1, 0])
+        _add(conn, "gc", "General Catalyst takes stake", "2026-09-21", "pe_strategics",
+             {"event": "stake"}, ["General Catalyst"], [0, 0, 0, 1])
+        _add(conn, "l1", "Lilly drug approved", "2026-09-20", "fda_regulatory", {"event": "approval"}, ["Eli Lilly"], [0, 1, 0, 0])
+        _add(conn, "l2", "Lilly drug recalled", "2026-09-21", "fda_regulatory", {"event": "recall"}, ["Eli Lilly"], [0, 0.95, 0.3, 0])
+        conn.close()
+
+    def test_one_event_from_several_outlets_merges_filing_included(self):
+        got = qa.search_stories(self.conn, query="Zenyx")
+        self.assertEqual([s["id"] for s in got], ["z1", "zlate"])  # zlate: 25 days later, its own event
+        self.assertEqual(got[0]["more_links"], ["https://ex.com/z2", "https://ex.com/zf"])
+
+    def test_different_news_never_merges(self):
+        self.assertEqual(sorted(self.ids(query="General")), ["ga", "gc"])  # shared first word
+        self.assertEqual(sorted(self.ids(query="Lilly")), ["l1", "l2"])    # same company, other event
 
 
 def _call(name: str, args: dict, cid: str = "c1"):
@@ -179,6 +202,25 @@ class AnswerTest(_Archive):
         history = [{"role": "assistant", "content": "Eclat, see <https://bb.example/eclat|Bloomberg>."}]
         text, _ = qa.answer("and in India?", history, client=fake)
         self.assertIn("[Bloomberg](https://bb.example/eclat)", text)
+
+    def test_invented_links_in_every_form_are_unlinked(self):
+        text = ("A <https://bad.example/1|Fake> B <https://bad.example/2> C (https://bad.example/3) "
+                "D <https://ex.com/adarx|Real> E [ok](https://ex.com/adarx).")
+        out = qa.keep_known_links(text, {"https://ex.com/adarx"})
+        self.assertNotIn("bad.example", out)
+        self.assertIn("Fake", out)
+        self.assertIn("<https://ex.com/adarx|Real>", out)
+        self.assertIn("[ok](https://ex.com/adarx)", out)
+
+    def test_urls_people_post_in_the_thread_are_not_citable(self):
+        fake = _FakeOpenAI("See [this](https://evil.example/x).")
+        history = [{"role": "user", "content": "look at https://evil.example/x"}]
+        text, _ = qa.answer("and?", history, client=fake)
+        self.assertNotIn("evil.example", text)
+
+    def test_usd_rounds_up_into_the_next_unit(self):
+        self.assertEqual((qa._usd_short(999.6e6), qa._usd_short(999.6e3), qa._usd_short(3.35e9)),
+                         ("$1B", "$1M", "$3.35B"))
 
     def test_em_dashes_are_replaced(self):
         self.assertEqual(qa._house_style("archive\u2014the earliest"), "archive, the earliest")
@@ -247,6 +289,12 @@ class BotTest(unittest.TestCase):
         client = self._client()
         bot.handle(client, "UBOT", {"channel": "C1", "ts": "1.0", "text": "<@UBOT>"}, answer=None)
         self.assertEqual(client.chat_postMessage.call_args.kwargs["text"], bot.HELP)
+
+    def test_rejected_token_exits_clean_instead_of_restart_looping(self):
+        with mock.patch.object(config, "SLACK_APP_TOKEN", "xapp-test"), \
+             mock.patch.object(config, "SLACK_BOT_TOKEN", "xoxb-test"), \
+             mock.patch("slack_bolt.App", side_effect=RuntimeError("The server responded with: invalid_auth")):
+            self.assertEqual(bot.main(), 0)
 
     def test_unconfigured_bot_exits_clean(self):
         with mock.patch.object(config, "SLACK_APP_TOKEN", ""):

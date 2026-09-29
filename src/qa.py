@@ -18,13 +18,15 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 from openai import OpenAI
 
 import config
 import enricher
+import storage
 
 MAX_ROUNDS = 5
 SEARCH_LIMIT_MAX = 25
@@ -35,7 +37,14 @@ _PRICES = {"gpt-4.1": (2.00, 8.00)}
 # A filing and the IPO it leads to are one story arc for merging: Slack
 # testing showed Electra's "sets terms" and "prices" stories as two items.
 _EVENT_FAMILY = {"ipo_filing": "ipo"}
-MIN_DEAL_USD = enricher.MIN_DEAL_USD
+# Merging one event told by several outlets. Measured on prod on 29 Sept 2026
+# (the digest's text-embedding-3-small vectors): real duplicates scored 0.65 to
+# 0.89 (ADARx across outlets 0.84 and 0.89, Electra's filing vs pricing 0.73),
+# while different news reached 0.72 ("Lilly obesity access" vs "Lilly
+# pipeline"). No threshold alone separates those, so similarity must agree
+# with the labels (same category and event family) and the dates.
+MERGE_SIMILARITY = 0.70
+MERGE_WINDOW_DAYS = 10
 
 _SEARCH_ARGS = {
     "query", "category", "events", "geo", "company", "published_after",
@@ -90,10 +99,12 @@ def _connect() -> sqlite3.Connection:
 
 
 def _usd_short(usd: float) -> str:
-    """3 significant figures: $3.35B, $446M, $24.8M."""
-    for size, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if usd >= size:
-            return f"${usd / size:.3g}{suffix}"
+    """3 significant figures: $3.35B, $446M, $24.8M. Rounds up into the next
+    unit ($999.6M is $1B), where .3g alone would print $1e+03M."""
+    for size, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        v = float(f"{usd / size:.3g}")
+        if v >= 1:
+            return f"${v:g}{suffix}"
     return f"${usd:,.0f}"
 
 
@@ -101,7 +112,7 @@ def money_display(facts: dict, field: str = "amount") -> str | None:
     """"₹4,800 Cr (~$545M)": the article's own figure, plus USD for comparison.
     Labels made before the money change only have <field>_usd: "~$446M"."""
     usd, text = facts.get(f"{field}_usd"), facts.get(f"{field}_text")
-    if not isinstance(usd, (int, float)) or usd < MIN_DEAL_USD:
+    if not enricher.valid_usd(usd):
         return None
     if not text:
         return f"~{_usd_short(usd)}"
@@ -117,7 +128,7 @@ def _row(r: sqlite3.Row) -> dict:
         "id": r["id"], "title": r["title"], "url": r["url"],
         "published": (r["published_at"] or "")[:10], "category": r["category"],
         "event": facts.get("event"), "magnitude": r["magnitude"], "geo": r["geo"],
-        "amount_usd": amount if isinstance(amount, (int, float)) and amount >= MIN_DEAL_USD else None,
+        "amount_usd": amount if enricher.valid_usd(amount) else None,
         "amount": money_display(facts), "valuation": money_display(facts, "valuation"),
         "companies": json.loads(r["companies"] or "[]"),
         "summary": r["summary"] or r["canonical_summary"] or "",
@@ -162,12 +173,14 @@ def search_stories(
     if company:
         where.append("(d.companies LIKE ? OR s.canonical_title LIKE ?)")
         params += [f"%{company}%"] * 2
-    if published_after:
+    # Parsed, not compared as raw strings: "2026/09/15" would silently match
+    # nothing and "15 September 2026" would silently filter nothing.
+    if (after := _iso_date(published_after)):
         where.append("s.published_at >= ?")
-        params.append(published_after)
-    if published_before:
+        params.append(after)
+    if (before := _iso_date(published_before)):
         where.append("s.published_at < ?")
-        params.append(published_before)
+        params.append(before)
     if min_magnitude in enricher.MAGNITUDES:
         where.append("instr('SABC', d.magnitude) BETWEEN 1 AND ?")
         params.append("SABC".index(min_magnitude) + 1)
@@ -177,21 +190,52 @@ def search_stories(
         params += [f"%{term}%"] * 4
     order = ("s.published_at DESC" if sort == "recent" else
              "COALESCE(instr('SABC', d.magnitude), 9), "
-             f"CASE WHEN json_extract(d.facts, '$.amount_usd') >= {MIN_DEAL_USD} "
+             "CASE WHEN json_extract(d.facts, '$.amount_usd') BETWEEN "
+             f"{enricher.MIN_DEAL_USD} AND {enricher.MAX_DEAL_USD} "
              "THEN json_extract(d.facts, '$.amount_usd') END DESC, s.published_at DESC")
     limit = max(1, min(int(limit or 15), SEARCH_LIMIT_MAX))
     # Over-fetch so merging duplicates still leaves `limit` distinct events.
     sql = f"{_SELECT} WHERE {' AND '.join(where)} ORDER BY {order} LIMIT {limit * 4}"
-    merged: dict[str, dict] = {}
-    for r in map(_row, conn.execute(sql, params)):
-        lead = (r["companies"][0].lower().split() or [""])[0] if r["companies"] else ""
-        event = _EVENT_FAMILY.get(r["event"], r["event"])
-        key = f"{lead}|{r['category']}|{event}" if lead else r["id"]
-        if key in merged:
-            merged[key]["more_links"].append(r["url"])
-        elif len(merged) < limit:
-            merged[key] = {**r, "more_links": []}
-    return list(merged.values())
+    return _merge_same_event(conn, [_row(r) for r in conn.execute(sql, params)], limit)
+
+
+def _iso_date(v: object) -> str | None:
+    try:
+        return date.fromisoformat(str(v).strip().replace("/", "-")[:10]).isoformat() if v else None
+    except ValueError:
+        return None
+
+
+def _merge_same_event(conn: sqlite3.Connection, rows: list[dict], limit: int) -> list[dict]:
+    """Greedy leader selection, as in ranker.collapse_near_duplicates: rows
+    come most important first, each becomes a leader unless it matches an
+    existing leader, and a match joins that leader's more_links. A story with
+    no stored embedding is never merged."""
+    vecs = {}
+    for sid, v in storage.load_story_embeddings([r["id"] for r in rows], conn=conn).items():
+        a = np.asarray(v, dtype=np.float32)
+        if (n := float(np.linalg.norm(a))):
+            vecs[sid] = a / n
+
+    def same_event(a: dict, b: dict) -> bool:
+        if a["category"] != b["category"] or a["id"] not in vecs or b["id"] not in vecs:
+            return False
+        if _EVENT_FAMILY.get(a["event"], a["event"]) != _EVENT_FAMILY.get(b["event"], b["event"]):
+            return False
+        try:
+            gap = abs((date.fromisoformat(a["published"]) - date.fromisoformat(b["published"])).days)
+        except ValueError:
+            return False
+        return gap <= MERGE_WINDOW_DAYS and float(vecs[a["id"]] @ vecs[b["id"]]) >= MERGE_SIMILARITY
+
+    leaders: list[dict] = []
+    for r in rows:
+        lead = next((ld for ld in leaders if same_event(ld, r)), None)
+        if lead:
+            lead["more_links"].append(r["url"])
+        elif len(leaders) < limit:
+            leaders.append({**r, "more_links": []})
+    return leaders
 
 
 def get_story(conn: sqlite3.Connection, story_id: str) -> dict | None:
@@ -200,7 +244,10 @@ def get_story(conn: sqlite3.Connection, story_id: str) -> dict | None:
     if r is None:
         return None
     out = _row(r)
-    out["facts"] = json.loads(r["facts"] or "{}")
+    # Money only as the cleaned top-level fields: a raw facts copy would hand
+    # the model a stored units slip such as amount_usd 350.
+    out["facts"] = {k: v for k, v in json.loads(r["facts"] or "{}").items()
+                    if not k.endswith(("_usd", "_text"))}
     out["article_text"] = (r["body"] or "")[:BODY_CHARS_FOR_MODEL] or "(article could not be fetched)"
     return out
 
@@ -250,19 +297,26 @@ def _system_prompt(n: int, since: str) -> str:
 
 _ANY_URL = re.compile(r"https?://[^\s|>)\]]+")
 _MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
-_BARE_URL = re.compile(r"(?<![(<|])https?://[^\s)>\]]+")
+_SLACK_LINK = re.compile(r"<(https?://[^|>\s]+)(?:\|([^>]*))?>")
 
 
 def keep_known_links(text: str, allowed: set[str]) -> str:
-    """Unlink any URL no tool returned: keep a markdown link's text, drop a
-    bare URL. The model copies URLs from tool results, so a miss is invented."""
-    text = _MD_LINK.sub(lambda m: m.group(0) if m.group(2) in allowed else m.group(1), text)
+    """Unlink every URL no tool returned, whatever its form: [text](url),
+    <url|text> (the Slack form the bot's own history is in), <url>, (url) or
+    bare. Link text survives; the URL doesn't. The model copies URLs from
+    tool results, so a miss is invented."""
+    def ok(url: str) -> bool:
+        return url.rstrip(".,;:!?") in allowed
 
-    def bare(m: re.Match) -> str:
+    text = _MD_LINK.sub(lambda m: m.group(0) if ok(m.group(2)) else m.group(1), text)
+    text = _SLACK_LINK.sub(lambda m: m.group(0) if ok(m.group(1)) else (m.group(2) or ""), text)
+
+    def bare(m: re.Match) -> str:  # anything left, in any wrapping
         url = m.group(0)
         core = url.rstrip(".,;:!?")
         return url if core in allowed else url[len(core):]
-    return _BARE_URL.sub(bare, text)
+    text = _ANY_URL.sub(bare, text)
+    return re.sub(r"\(\s*\)|<\s*>", "", text)
 
 
 _CLOSING_OFFER = re.compile(
@@ -281,9 +335,10 @@ def answer(question: str, history: list[dict] | None = None, *, client=None) -> 
     caller can tell the user; tool errors are handled inside the loop."""
     client = client or OpenAI(api_key=config.OPENAI_API_KEY, max_retries=3, timeout=90)
     usage = {"rounds": 0, "tool_calls": 0, "in": 0, "out": 0}
-    # Links already in the thread came from earlier searches, so a follow-up
-    # may reuse them.
-    seen = {u.rstrip(".,;:!?") for m in (history or []) for u in _ANY_URL.findall(m.get("content") or "")}
+    # Links in the bot's own earlier answers came from earlier searches, so a
+    # follow-up may reuse them. Not links people posted: those aren't vetted.
+    seen = {u.rstrip(".,;:!?") for m in (history or []) if m.get("role") == "assistant"
+            for u in _ANY_URL.findall(m.get("content") or "")}
     conn = _connect()
     try:
         n, since = _coverage(conn)

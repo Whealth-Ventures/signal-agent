@@ -142,6 +142,16 @@ def handle(client, bot_user_id: str, event: dict, *, answer=qa.answer) -> None:
           "answer_chars": len(text), "error": error, **usage})
 
 
+_AUTH_ERRORS = ("invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired")
+
+
+def _is_auth_error(e: Exception) -> bool:
+    """Slack said the token itself is bad, which a restart can't fix."""
+    resp = getattr(e, "response", None)
+    code = resp.get("error") if hasattr(resp, "get") else None
+    return code in _AUTH_ERRORS or any(c in str(e) for c in _AUTH_ERRORS)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not (config.SLACK_APP_TOKEN and config.SLACK_BOT_TOKEN):
@@ -152,8 +162,14 @@ def main() -> int:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-    app = App(token=config.SLACK_BOT_TOKEN)
-    bot_user_id = app.client.auth_test()["user_id"]
+    try:
+        app = App(token=config.SLACK_BOT_TOKEN)
+        bot_user_id = app.client.auth_test()["user_id"]
+    except Exception as e:
+        if _is_auth_error(e):  # a bad token won't fix itself: don't restart-loop
+            log.error("Slack rejected SLACK_BOT_TOKEN (%s): Q&A bot not started", e)
+            return 0
+        raise
     seen = _Seen()
 
     def spawn(event: dict) -> None:
@@ -176,7 +192,13 @@ def main() -> int:
             spawn(event)
 
     log.info("Signal Agent Q&A bot starting (user %s), archive %s", bot_user_id, config.DB_PATH)
-    SocketModeHandler(app, config.SLACK_APP_TOKEN).start()
+    try:
+        SocketModeHandler(app, config.SLACK_APP_TOKEN).start()
+    except Exception as e:
+        if _is_auth_error(e):
+            log.error("Slack rejected SLACK_APP_TOKEN (%s): Q&A bot not started", e)
+            return 0
+        raise
     return 0
 
 

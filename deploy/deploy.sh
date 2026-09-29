@@ -81,8 +81,11 @@ systemctl enable --now signal-agent-sector.timer
 systemctl restart signal-admin.service
 # Q&A bot: long-running, restarted on every deploy to pick up new code and env.
 # Without SLACK_APP_TOKEN it exits 0 and stays down (Restart=on-failure).
+# Never fails the deploy: reset-failed clears a hit start limit first, and a
+# bot that won't restart only warns, since the digest doesn't depend on it.
 systemctl enable signal-agent-bot.service
-systemctl restart signal-agent-bot.service
+systemctl reset-failed signal-agent-bot.service 2>/dev/null || true
+systemctl restart signal-agent-bot.service || echo "WARN: signal-agent-bot restart failed"
 
 echo ">> deploy OK"
 systemctl --no-pager status signal-admin.service | head -5 || true

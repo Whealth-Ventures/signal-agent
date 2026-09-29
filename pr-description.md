@@ -33,7 +33,7 @@
 | Problem seen live | Fix |
 |---|---|
 | The IPO answer missed Electra, Eclat and others (it searched `ipo` only), then said "no other IPOs" | `events` takes a list; the prompt maps IPO questions to `["ipo", "ipo_filing"]` and forbids "no other X" without a broad search |
-| ADARx and AbbVie's tavapadon listed twice, despite being told to merge | The search merges duplicates itself: same first word of the lead company, same category, same event → one result with `more_links` |
+| ADARx and AbbVie's tavapadon listed twice, despite being told to merge | The search merges duplicates itself, by greedy leader selection as in the digest's `collapse_near_duplicates`: same category, same event family, published within 10 days, **and** story-embedding cosine ≥ 0.70 → one result with `more_links` |
 | A follow-up ("which are Indian?") answered from the thread and said "none", but Eclat is Indian | `tool_choice="required"` on round 1, so every question searches |
 | A follow-up lost its link | Links already in the thread's history are trusted |
 | "Hospital deals in July" didn't say the archive starts 14 September | `archive_covers_from` is on every search result |
@@ -47,6 +47,19 @@
 - **Every URL in an answer must have come from a tool result, or from the thread's history.** Anything else is unlinked (`keep_known_links`).
 - **Each question is logged to `data/logs/qa_<date>.jsonl`:** question, the searches with their filters, tokens, cost, latency and any error.
 - **An OpenAI failure gets a plain message in the thread.** Out of credits says so specifically, and never a traceback.
+
+## Changes after review
+
+- 🔴 **Invented links in any form are unlinked.** That covers `[text](url)`, `<url|text>` (the Slack form the bot's own history is in), `<url>`, `(url)` and bare URLs. A final pass checks every URL left in the text. **Only the bot's own earlier answers seed the allowed set.** Links people post in the thread aren't citable.
+- 🔴 **Merging is decided by embeddings, gated by the labels and dates.** The old key (first word of the lead company) merged General Atlantic with General Catalyst, and two unrelated Lilly approvals.
+  - Measured on prod: real duplicates score 0.65 to 0.89 (ADARx across outlets 0.84 and 0.89, Electra's filing and pricing 0.73). Different news reaches 0.72, but in a different category.
+  - So a merge needs the same category **and** event family, within 10 days, **and** cosine ≥ 0.70. A story with no stored embedding is never merged.
+  - Checked on real embeddings: ADARx and Electra each appear once.
+- **Money bounds:** NaN is rejected, and so is any total over $1 trillion (a double-scaled slip). `get_story` returns only the cleaned money fields, never the raw `amount_usd 350`.
+- **`$999.6M` displays as `$1B`,** not `$1e+03M`.
+- **Date filters are parsed, not string-compared.** `2026/09/15` works, and anything unparseable is ignored, as the docstring promised.
+- **A rejected Slack token exits cleanly** instead of restart-looping. The unit also has a start limit (5 tries in 10 minutes), and `deploy.sh` clears it and only warns if the bot won't restart. The bot can never fail a deploy.
+- **New `enricher.py --retag`:** it re-labels already-labelled stories in place, with no fetch. Old labels stay until each new one is written, so nothing drops out of the bot's search. There's no 30-day retry window to fall out of.
 
 ## Safety
 
@@ -71,7 +84,15 @@
   - about 1 cent a question
 - **Tested in Slack on 29 September** in `#signal-agent-bot-test` and a DM: 6 questions, about 4 seconds and 1 to 2 cents each, no errors. The four fixes in the table's last rows came from that session.
 - `parse_money` and `money_display`: rupees, dollars, other currencies, units slips, unknown units or currencies, and labels from before the change.
-- The full suite passes locally (350 passed, 3 skipped). The two `test_config` env checks fail only because this checkout has no `.env`.
+- **Review tests:**
+  - invented links in all five forms
+  - links people post aren't citable
+  - one event from several outlets merges, including a filing, while different companies sharing a first word, one company's different events, and a same-event story 25 days later stay apart
+  - NaN and $1T+ amounts rejected, and `get_story` never returns raw money
+  - `$999.6M` shows as `$1B`, and dates are parsed
+  - a rejected token exits cleanly
+  - `--retag` re-labels in place without fetching
+- The full suite passes locally (357 passed, 3 skipped). The two `test_config` env checks fail only because this checkout has no `.env`.
 
 ## Before merge
 
@@ -80,6 +101,14 @@
 
 ## After merge
 
-- **Re-label the archive with the new rules**, one time: about 2,560 stories, roughly $1.20. It resets `tagged_at` on prod, and the enricher's 30-day retry re-labels everything. That applies the money format, the `ipo` and `ipo_filing` definitions, and the $10,000 floor to every existing story. It needs a go-ahead, since it writes to the prod DB.
+- **Re-label the archive with the new rules**, one time: about 2,560 stories, roughly $1.20. It applies the money format, the `ipo` and `ipo_filing` definitions, and the amount bounds. It needs a go-ahead, since it writes to the prod DB:
+
+  ```bash
+  sudo systemd-run --unit=signal-enrich-retag --collect --uid=signal --gid=signal \
+    -p EnvironmentFile=/opt/signal-agent/shared/agent.env -p WorkingDirectory=/opt/signal-agent/repo \
+    /bin/bash -c '.venv/bin/python src/enricher.py --retag --days 30 --geo india; .venv/bin/python src/neon_sync.py'
+  ```
+
+  `--retag` re-labels in place, so the bot keeps answering throughout. `--days` must reach back to 14 September, so use `--days 45` if this runs after 14 October.
 
 **Need from you:** review and merge.
