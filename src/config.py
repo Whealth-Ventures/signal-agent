@@ -76,6 +76,9 @@ SLACK_WEBHOOK_URL = _env("SLACK_WEBHOOK_URL")
 # is set we post via the Web API; when unset we fall back to SLACK_WEBHOOK_URL
 # (same message body).
 SLACK_BOT_TOKEN = _env("SLACK_BOT_TOKEN")
+# App-level Socket Mode token (xapp-…) for the Q&A bot, src/bot.py. Optional:
+# unset → the bot doesn't start; the digests never use it.
+SLACK_APP_TOKEN = _env("SLACK_APP_TOKEN")
 SLACK_CHANNEL_ID = _env("SLACK_CHANNEL_ID")
 SLACK_CHANNEL_LABEL = _env("SLACK_CHANNEL_LABEL") or "(slack)"
 
@@ -211,6 +214,8 @@ SECTOR_DEDUP_WINDOW_DAYS = 30
 # constant like the sector ones above; a tuning.xlsx key when it needs
 # changing without a deploy.
 ENRICH_MODEL = "gpt-4.1-mini"
+# Q&A bot (src/qa.py): answers questions from the archive with tool calls.
+QA_MODEL = "gpt-4.1"
 
 # Priority buckets — re-exported so callers can still write `config.PriorityBucket`
 # and `config.PRIORITY_BUCKETS`.
@@ -256,6 +261,10 @@ SECTOR_IMPACT_RUBRIC = _load_prompt("sector_impact_rubric")
 # magnitude rubric are appended in code so the prompt can't drift from the
 # values the enricher validates against.
 TAGGER_SYSTEM_PROMPT = _load_prompt("tagger_system")
+
+# Q&A bot's system prompt (src/qa.py). Today's date, the archive's coverage
+# and the per-category event values are appended in code.
+QA_SYSTEM_PROMPT = _load_prompt("qa_system")
 
 
 # --- Validation ---------------------------------------------------------

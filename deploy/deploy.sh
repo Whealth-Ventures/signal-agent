@@ -65,6 +65,7 @@ install -m 644 "$REPO/deploy/signal-agent-us.service" /etc/systemd/system/signal
 install -m 644 "$REPO/deploy/signal-agent-us.timer"   /etc/systemd/system/signal-agent-us.timer
 install -m 644 "$REPO/deploy/signal-agent-sector.service" /etc/systemd/system/signal-agent-sector.service
 install -m 644 "$REPO/deploy/signal-agent-sector.timer"   /etc/systemd/system/signal-agent-sector.timer
+install -m 644 "$REPO/deploy/signal-agent-bot.service"   /etc/systemd/system/signal-agent-bot.service
 # Keep the schedules in sync with the Terraform-provided config. The US calendar
 # defaults to 11:50 UTC (see signal-agent-us.timer) when the env var is unset on
 # boxes provisioned before the two-channel split.
@@ -78,6 +79,10 @@ systemctl enable --now signal-agent.timer
 systemctl enable --now signal-agent-us.timer
 systemctl enable --now signal-agent-sector.timer
 systemctl restart signal-admin.service
+# Q&A bot: long-running, restarted on every deploy to pick up new code and env.
+# Without SLACK_APP_TOKEN it exits 0 and stays down (Restart=on-failure).
+systemctl enable signal-agent-bot.service
+systemctl restart signal-agent-bot.service
 
 echo ">> deploy OK"
 systemctl --no-pager status signal-admin.service | head -5 || true

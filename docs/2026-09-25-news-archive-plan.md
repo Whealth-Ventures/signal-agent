@@ -40,6 +40,7 @@ Decided 25 September 2026.
   | Other healthcare (fits none of the 8) | none |
   | Not healthcare | none (always tier C) |
 
+- **Money is copied as written and converted in code.** The labeller returns `{value, unit, currency}`, and `enricher.parse_money` converts it with fixed rates, storing `<field>_usd` for ranking and `<field>_text` (for example "₹4,800 Cr") for display. Changed on 29 September, after the model's own conversions lost rupee amounts and slipped units.
 - **Deals always go in a deal category**, even when the company is an AI or drug company. So an AI scribe's funding round is Venture & IPO, and money fields only ever sit on deal stories.
 - **Validation.** Off-list values fall back to `other` or null instead of failing the story. Any ids the model invents are ignored.
 - **Audit trail.** `data/logs/enrich_<date>.jsonl` gets one line per call (tokens, latency, error) and a `run_done` line with the estimated cost.
@@ -94,7 +95,9 @@ WHERE d.category = 'venture_ipo' AND d.facts->>'event' IN ('ipo', 'ipo_filing')
 ORDER BY array_position(ARRAY['S','A','B','C'], d.magnitude), amount_usd DESC NULLS LAST;
 ```
 
-## Phase B: the Q&A bot (next)
+## Phase B: the Q&A bot (built 29 September 2026, `feat/subhanu-qa-bot`)
+
+Setup steps are in [2026-09-29-qa-bot-setup.md](2026-09-29-qa-bot-setup.md).
 
 - **`src/bot.py`**, a long-running `signal-agent-bot.service`. It uses slack-bolt Socket Mode, so it needs no public URL. It answers @mentions and DMs in threads.
 - **The model gets fixed search tools and never writes SQL.**

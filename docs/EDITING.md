@@ -27,6 +27,7 @@ Five files (well, three files and two folders) control everything about what the
 | Which stories qualify as Tier S/A/B/C | `prompts/magnitude_rubric.md` | **Admin UI → Prompts** · or any text editor + commit |
 | Sector Agent tone / what counts as "material impact" (Tier + direction) | `prompts/sector_system.md`, `prompts/sector_impact_rubric.md` | **Admin UI → Prompts** · or any text editor + commit |
 | How stories are tagged for Q&A (event type, deal size, companies, summary) | `prompts/tagger_system.md` | Any text editor + commit |
+| How the Slack Q&A bot answers (search rules, answer style) | `prompts/qa_system.md` | Any text editor + commit |
 
 After any edit:
 - SharePoint edits need nothing further — the next scheduled run pulls them.

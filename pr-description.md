@@ -1,116 +1,85 @@
-# [minor] PROD Release: Story archive with Q&A labels, OpenAI failure alerts, and a live Neon copy
+# [minor] PROD Release: Slack Q&A bot that answers from the news archive
 
-**Phase A of the news archive: every new story gets its full article body and searchable tags in SQLite.** No ticket. The plan is in [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md).
+**Phase B of the news archive: `@signal_agent <question>` or a DM gets an answer in a thread, searched from the labelled archive.** No ticket. The setup was done on 29 September 2026 ([docs/2026-09-29-qa-bot-setup.md](docs/2026-09-29-qa-bot-setup.md)), and the plan is in [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md).
 
 ## What changes
 
-- **New `src/enricher.py`**, run from `deploy/run-digest.sh` after the post and before the backup. It's its own process and never fatal.
-- **New `story_details` table** in `agent.db`, created by `init_db`. The digest's own tables and queries are untouched.
-- **Pass 1** fetches bodies with the existing `headline_rewriter._fetch_excerpts`, now with an optional `limit`. The default is unchanged.
-- **Pass 2** tags stories with OpenAI `gpt-4.1-mini`: 10 per call, 4 calls in parallel, saved per batch.
-- **Labels depend on the category.** Every story gets category, magnitude (the ranker's S/A/B/C rubric), companies, geo and a two-line summary. Each category adds its own `facts` (`enricher.CATEGORY_FIELDS`). For example, deal size appears only on deal categories, and regulator plus product only on FDA & Regulatory. Deals always go in a deal category.
-- **Healthcare check first.** The model answers `healthcare: true/false`, and, when the article body was fetched, the digest's lexicon gate (`topicality.is_healthcare`) can veto a yes. Without a body the model decides alone, because title and summary are too thin for the lexicon. Non-healthcare stories become `not_healthcare`, tier C, with no facts. Healthcare stories outside the 8 categories become `other_healthcare`.
-- **The prompt lives in `prompts/tagger_system.md`.** The category fields, their allowed values and the rubric are appended in code, so they can't drift from what the validator accepts.
+- **New `src/qa.py`**, the brain, with no Slack code:
+  - Two fixed tools over `agent.db`, opened read-only. The model never writes SQL.
+  - `search_stories` filters by category, events, geo, company, dates and minimum magnitude, plus 1 to 3 keywords matched against title, summaries and body. It sorts by importance (magnitude, then deal size) or by recency.
+  - `get_story` returns one story's labels and up to 6,000 characters of the article.
+  - Tool loop on OpenAI `gpt-4.1` (`config.QA_MODEL`), up to 5 rounds.
+- **New `src/bot.py`**, the Slack side, adapted from salesforce-sage:
+  - Socket Mode, handling `app_mention` and DMs.
+  - Event-id dedupe, with the thread's history passed in as chat turns.
+  - A placeholder message that the answer replaces, then markdown converted to Slack mrkdwn, split into 3,800-character chunks.
+- **New `deploy/signal-agent-bot.service`.** `deploy.sh` installs it, enables it, and restarts it on every deploy.
+  - It exits 0 without `SLACK_APP_TOKEN`, and `Restart=on-failure` means an unconfigured box just idles.
+- **New prompt `prompts/qa_system.md`.** The date, the archive's coverage and each category's event values are added in code.
+- **Config:** `SLACK_APP_TOKEN` (optional), `QA_MODEL`, `QA_SYSTEM_PROMPT`.
+- **Dependency:** `slack-bolt>=1.21`.
+- **Enricher label tweaks, from Slack testing:** `ipo_filing` means filings to list shares only, and an `amount_usd` under $10,000 is rejected. These apply to new labels; existing ones are handled at read time.
 
-## Slack alert when OpenAI fails
+## Money in the article's own currency, compared in USD
 
-- **Today a dead OpenAI key means no digest, silently.** Scoring embeds with no error handling, so the run crashes before the post.
-- **New `src/alerts.py`** spots failures a retry won't fix:
-  - `insufficient_quota`: out of credits
-  - 401 or 403: key rejected
-  - `model_not_found`: model not available on the key
+- **The labeller now copies an amount exactly as written**, as `{value, unit, currency}`. For example, "₹4,800 crore" becomes `{4800, crore, INR}`. It doesn't convert anything.
+- **`enricher.parse_money` does the conversion in code.** It uses a units table (lakh, crore, million, billion…) and a fixed rates table (`PER_USD`, 13 currencies, approximate). It stores `amount_usd` for ranking and `amount_text` for display. Valuations work the same way.
+- **Answers show both:** `₹4,800 Cr (~$545M)`, `€1.5B (~$1.74B)`. Dollars appear in one form (`$3.35B`, not `$3,350M`).
+- **Why this changed:** when the model did the conversion, it left AGS Health's "₹4,800 crore" with no amount and stored Electra's $350M as `350`. Re-labelling 289 deal stories locally with the new format gave 80 dollar amounts, 33 rupee, 5 euro, 1 yuan and 1 yen, and Electra's $350M is right.
+- **Labels made before this change** only have `amount_usd`. They display as `~$446M`.
 
-  It walks the exception's cause chain, and a plain rate limit is ignored.
-- **It posts in the failing run's own channel**, with the fix:
-  - out of credits: the billing link, and "the next run recovers on its own"
-  - key rejected: update the secret, then redeploy
-- **Call sites:**
-  - `main.py` and `sector_main.py`: alert, then re-raise, so the journal still has the traceback. `--dry-run` never alerts.
-  - `enricher.py`: once per run, after the batches, to the channel given by the new `--geo` flag from `run-digest.sh`.
-- **At most one alert per channel per run.** A crashed digest stops `run-digest.sh`, so the enricher doesn't add a second alert.
-- **Posting is fail-soft.** An alert that can't post is logged and never masks the original error.
+## Guarantees, each added after a live test showed it was needed
 
-## Live copy in Neon, for DBeaver
+| Problem seen live | Fix |
+|---|---|
+| The IPO answer missed Electra, Eclat and others (it searched `ipo` only), then said "no other IPOs" | `events` takes a list; the prompt maps IPO questions to `["ipo", "ipo_filing"]` and forbids "no other X" without a broad search |
+| ADARx and AbbVie's tavapadon listed twice, despite being told to merge | The search merges duplicates itself: same first word of the lead company, same category, same event → one result with `more_links` |
+| A follow-up ("which are Indian?") answered from the thread and said "none", but Eclat is Indian | `tool_choice="required"` on round 1, so every question searches |
+| A follow-up lost its link | Links already in the thread's history are trusted |
+| "Hospital deals in July" didn't say the archive starts 14 September | `archive_covers_from` is on every search result |
+| An em-dash and ISO dates in answers | Em-dashes replaced in code; the prompt asks for "14 September" dates |
+| **Slack test:** Electra listed twice, once as "sets terms" and once as "prices" | An IPO filing and the IPO itself merge as one event (`_EVENT_FAMILY`) |
+| **Slack test:** Electra's $350M stored as `350` | Amounts under $10,000 are units slips: dropped when read, and rejected by the enricher from now on |
+| **Slack test:** "Which are Indian?" listed a Morepen drug (ANDA) filing | The prompt says never pad with loosely related results; the enricher's `ipo_filing` now excludes drug and regulatory filings |
+| **Slack test:** answers ended with "Let me know if…" despite the prompt | A closing offer on the last line is stripped in code |
+| **Re-label test:** Manipal's debt repayment "using IPO proceeds" ranked as the #1 IPO | `ipo` now means the company's own IPO pricing, opening or listing, not a later use of IPO money; re-labelled, it's `other_healthcare` |
 
-- **New `src/neon_sync.py`** runs at the end of `run-digest.sh` and `run-sector.sh`. It's non-fatal, and it's skipped when `DATABASE_URL` isn't set.
-- **It's one-way.** `agent.db` goes to schema `public` and `sector.db` to schema `sector`. SQLite stays the source of truth, and nothing reads Neon back.
-- **Not copied:** `stories.embedding` and `signals.raw_json`. They're binary or raw payloads, and they make up most of the SQLite file.
-- **What each run sends:**
-  - a table that's empty in Neon gets every row
-  - `signals` get the last 45 days. They're insert-or-ignore and linked to a story once, so older rows never change
-  - `stories` get every row, every run. A re-seen story is rewritten in place with no timestamp to window on. Sending all 8,581 took 7 seconds
-  - `digests` and `digest_stories` get every row, since they're small
-  - `story_details` gets rows newer than Neon's own newest, so a missed sync catches up on its own
-- **Unchanged rows cost no write.** The upsert has an `IS DISTINCT FROM` guard.
-- **One transaction per schema.** A failure leaves Neon exactly as it was after the last good sync.
-- **Bodies older than 12 months are nulled in Neon only.** That keeps the 0.5 GB free tier lasting about 4 years.
-- **NUL bytes are stripped on copy.** Postgres text rejects them, and the first real sync hit two scraped bodies that had them.
-- **New dependency:** `psycopg[binary]>=3.2`. `deploy.sh` installs it from `requirements.txt`.
-- **New env var:** `DATABASE_URL`, the direct (non-pooled) connection string. It needs adding to the agent secret in Secrets Manager.
+- **Every URL in an answer must have come from a tool result, or from the thread's history.** Anything else is unlinked (`keep_known_links`).
+- **Each question is logged to `data/logs/qa_<date>.jsonl`:** question, the searches with their filters, tokens, cost, latency and any error.
+- **An OpenAI failure gets a plain message in the thread.** Out of credits says so specifically, and never a traceback.
 
 ## Safety
 
-- **The digest can't be affected.** Enrichment starts after `main.py` exits, and `|| echo WARN` keeps `set -e` from ending the script.
-- **A failed fetch gets a `failed` row, so it's never retried.**
-- **A failed tag call costs only its own batch.** Those stories get tagged on the next run.
-- **Off-list tag values become `other` or null.** Ids the model invents are ignored.
-- **One new dependency:** `psycopg[binary]`, installed by `deploy.sh` from `requirements.txt`.
-- **One new optional env var:** `DATABASE_URL`. It isn't in `REQUIRED_ENV`, so without it the Neon sync is skipped.
-- No new unit file.
-- **Timeouts:** the enricher is capped at 20 minutes and the Neon sync at 5, so neither can hold up the nightly backup.
-
-## Changes after review
-
-- **Blocker fixed:** the lexicon can now overrule the model only when a body was fetched.
-  - With a failed fetch, "Ultrahuman raises $12M Series B" has no stem, so it was filed `not_healthcare` for good.
-  - Re-labelling the 41 failed-fetch stories in the prod snapshot moved 2 real healthcare stories out of `not_healthcare`, including "Seniors Places… Senior Living".
-  - The 2 left are correctly not healthcare: saw-palmetto poaching and a KKR earnings update.
-- **Untagged stories are retried for 30 days**, not 2. The alert's "the next run recovers on its own" now holds for an outage of up to a month.
-- **Neon gets every `stories` row, every run.** A first fix windowed on `published_at`. The re-review showed that isn't enough: a re-seen story keeps the article's own date, and `upsert_story` keeps `created_at`. The unchanged-row check keeps a full send free of writes. An `updated_at` watermark is the upgrade path if it ever gets slow.
-- **Junk bodies count as a failed fetch.** That's anything under 300 characters, or a PDF read as text. In 319 real fetches, every body under 300 characters was a copyright line, a geo-block or consent page, a nav menu, a PDF, or a paywall teaser. A junk body used to count as a fetched article and hand the healthcare filter nothing to go on ("Please enable JavaScript to continue." reproduced the original mislabel).
-- **Timeouts** on the enricher and the sync. There's also a comment on `main.py`'s line in `run-digest.sh` recording why it must stay unguarded: that's what guarantees one alert per channel per run.
-- **Company names are capped at 120 characters.**
-- **New tests:**
-  - a failed fetch with no healthcare word keeps the model's category
-  - an untagged story is retried after the fetch window
-  - a re-seen story is re-sent to Neon
-  - company names are capped
-  - `sync()` itself, with a fake cursor: the watermark, NUL stripping, 12-month body retention, and skipping a missing DB
+- **The digest is untouched.** The bot is its own process and only reads `agent.db`, in `mode=ro`.
+- **The digest path gains one import-time change:** `config.py` loads `prompts/qa_system.md`, which ships in this PR.
+- **Slack app changes are done:** Socket Mode, the two events, the four scopes, and the reinstall. The bot token is unchanged (same fingerprint on the box). The three leftover events from the removed feedback loop were deleted.
 
 ## Tests
 
-- `tests/test_enricher.py`, 4 tests:
-  - the fetch and tag window, validation fallbacks, and ignoring invented ids
-  - facts outside the story's own category are dropped (an AI story never keeps a deal size)
-  - a failed call keeps the bodies, and the next run tags them without re-fetching
-  - every category has fields, and the prompt lists all of them
-  - a non-healthcare story is tier C with no facts, whether the model or the lexicon says so
-  - an unknown category becomes `other_healthcare`
-- `tests/test_alerts.py`, 10 tests:
-  - classification, including an error wrapped by another and a plain rate limit that must not alert
-  - the posted text and channel
-  - a failed post never raises
-  - each of the three call sites alerts the right channel, and a dry run doesn't
-- **The classifier was checked against real OpenAI responses:** a bad key gives 401 `invalid_api_key` → `auth`, and a missing model gives 404 `model_not_found` → `model`. Out of credits can't be triggered on demand, so it's covered by a unit test on the documented `insufficient_quota` code.
-- `tests/test_neon_sync.py`, 6 tests:
-  - the first sync sends every row, and later syncs send only the window
-  - a late tag is still sent for an old fetch
-  - embeddings and raw payloads are never selected, and every mirrored column exists in SQLite
-  - the upsert skips unchanged rows
-  - no `DATABASE_URL` means the sync is skipped without connecting
-- **Live test of the Neon copy** on the 27 September prod backup, from a local run with prod untouched:
-  - 319 real stories were labelled ($0.15)
-  - the first sync copied 8,581 stories, 11,740 signals and 319 labelled articles, plus the sector data, in 8.2 seconds (24 MB in Neon)
-  - the second sync sent only the windows and changed nothing
-  - the IPO question runs correctly in Postgres
-- Re-review tests: a JS wall or a PDF body is stored as a failed fetch and the model's category is kept; an old story whose score changed in place is re-sent to Neon.
-- The full suite passes locally (329 passed, 3 skipped).
-- **Live test on 80 real prod stories** (scratch DB, prod untouched): 75 of 80 bodies fetched, all 80 tagged in 16 seconds for $0.036. The "biggest IPO stories this month" query returns only healthcare IPOs (ADARx, Oura, Iambic, RegenLab and others). All 34 non-healthcare IPOs are `not_healthcare`. The two `test_config` env checks fail only because this checkout has no `.env`.
+- `tests/test_qa.py`, 19 tests, plus one enricher test for the $10,000 amount floor:
+  - search filters and ordering, duplicate merging, non-healthcare only when asked, bad values ignored
+  - the tool loop with a fake OpenAI client
+  - invented links unlinked, and thread links reused
+  - round 1 forced to search, and coverage stamped on results
+  - em-dashes replaced
+  - Slack handling: history as chat turns, the placeholder replaced, the billing message, help on an empty mention, and a clean exit when unconfigured
+- **Live, on a local copy of the prod archive (rebuilt from Neon, 2,565 labelled stories), with real OpenAI:**
+  - biggest IPOs this month → ADARx $535M, Electra $325M, Eclat $300M, and a $150M SPAC
+  - the follow-up "which are Indian?" searched again → Eclat
+  - FDA approvals in the last two weeks → 5 items, duplicates merged
+  - July hospital deals → says the archive starts 14 September
+  - about 1 cent a question
+- **Tested in Slack on 29 September** in `#signal-agent-bot-test` and a DM: 6 questions, about 4 seconds and 1 to 2 cents each, no errors. The four fixes in the table's last rows came from that session.
+- `parse_money` and `money_display`: rupees, dollars, other currencies, units slips, unknown units or currencies, and labels from before the change.
+- The full suite passes locally (350 passed, 3 skipped). The two `test_config` env checks fail only because this checkout has no `.env`.
+
+## Before merge
+
+- **`SLACK_APP_TOKEN` must be in `signal-agent/prod/agent-env`, with no quote marks.** The deploy writes it into the box's env file.
+- **Stop any local copy of the bot before the deploy.** Two Socket Mode connections split the messages between them.
 
 ## After merge
 
-- The next digest run enriches the last 2 days. Check `data/logs/enrich_<date>.jsonl`.
-- The 30-day backfill is a separate command, listed in the plan doc. It costs about $2.
-- Add `DATABASE_URL` (the direct connection) to the agent secret, then redeploy. Until then the Neon sync is skipped.
+- **Re-label the archive with the new rules**, one time: about 2,560 stories, roughly $1.20. It resets `tagged_at` on prod, and the enricher's 30-day retry re-labels everything. That applies the money format, the `ipo` and `ipo_filing` definitions, and the $10,000 floor to every existing story. It needs a go-ahead, since it writes to the prod DB.
 
 **Need from you:** review and merge.

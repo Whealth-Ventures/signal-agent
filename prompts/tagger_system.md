@@ -33,9 +33,10 @@ Return ONLY a JSON object: `{"stories": [...]}`, one entry per input story, with
 - `healthcare`: true or false, per step 1.
 - `category`: one category key from the list below.
 - `facts`: an object with that category's fields listed below. Omit a field,
-  or use null, when the story doesn't state it. Never guess numbers. Convert
-  money to US dollars at approximate current rates (1 crore = 10 million,
-  so ₹22,600 crore is about $2.6 billion). `other_healthcare` and
+  or use null, when the story doesn't state it. Never guess numbers. Give
+  money exactly as the article states it and do NOT convert it: "₹4,800 crore"
+  is {"value": 4800, "unit": "crore", "currency": "INR"}, "$446.3 million" is
+  {"value": 446.3, "unit": "million", "currency": "USD"}. `other_healthcare` and
   `not_healthcare` get `{}`.
 - `magnitude`: `S`, `A`, `B` or `C`, per the magnitude rubric below.
 - `companies`: the companies or organisations the story is about, most
