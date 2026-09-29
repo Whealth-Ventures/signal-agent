@@ -13,8 +13,9 @@ payloads, unreadable in a SQL client, and most of the SQLite file's size.
 
 What each run sends, per table:
   - empty in Neon (first sync, new table): every row
-  - stories, signals: rows first seen in the last RESEND_DAYS; older rows
-    never change (no deletes, and re-seen stories fall in the window)
+  - stories, signals: rows first seen (or, for stories, re-published) in the
+    last RESEND_DAYS; nothing is deleted, and a re-seen story's upsert
+    refreshes published_at, so any row that changes falls in the window
   - digests, digest_stories: every row (small)
   - story_details: rows fetched or tagged after Neon's newest, so a missed
     sync catches up on its own
@@ -43,34 +44,36 @@ import storage
 RESEND_DAYS = 45
 BODY_RETENTION_DAYS = 365
 
-# table → (primary key, [(column, postgres type)], column that dates a row)
-_TABLES: dict[str, tuple[tuple[str, ...], list[tuple[str, str]], str | None]] = {
+# table → (primary key, [(column, postgres type)], columns that date a row)
+_TABLES: dict[str, tuple[tuple[str, ...], list[tuple[str, str]], tuple[str, ...]]] = {
     "stories": (("id",), [
         ("id", "text"), ("canonical_url", "text"), ("canonical_title", "text"),
         ("canonical_summary", "text"), ("published_at", "timestamptz"),
         ("relevance_score", "double precision"), ("created_at", "timestamptz"),
         ("priority_bucket", "text"), ("geo", "text"), ("bucket", "text"),
-    ], "created_at"),
+        # created_at never changes on re-upsert, but published_at does: a URL
+        # re-seen after the window refreshes it, so it's re-sent.
+    ], ("created_at", "published_at")),
     "signals": (("id",), [
         ("id", "text"), ("source", "text"), ("source_type", "text"), ("title", "text"),
         ("url", "text"), ("published_at", "timestamptz"), ("summary", "text"),
         ("fetched_at", "timestamptz"), ("story_id", "text"),
-    ], "fetched_at"),
+    ], ("fetched_at",)),
     "digests": (("id",), [
         ("id", "text"), ("digest_date", "date"), ("created_at", "timestamptz"),
         ("sent_at", "timestamptz"), ("status", "text"), ("recipients", "text"),
         ("error", "text"), ("slack_ts", "text"), ("slack_channel", "text"),
-    ], None),
+    ], ()),
     "digest_stories": (("digest_id", "story_id"), [
         ("digest_id", "text"), ("story_id", "text"), ("rank", "integer"),
         ("reasoning", "text"), ("domain", "text"),
-    ], None),
+    ], ()),
     "story_details": (("story_id",), [
         ("story_id", "text"), ("body", "text"), ("body_status", "text"),
         ("fetched_at", "timestamptz"), ("category", "text"), ("facts", "jsonb"),
         ("magnitude", "text"), ("companies", "jsonb"), ("geo", "text"),
         ("summary", "text"), ("tagged_at", "timestamptz"), ("tag_model", "text"),
-    ], None),  # windowed by Neon's own watermark instead, see _source_query
+    ], ()),  # windowed by Neon's own watermark instead, see _source_query
 }
 
 
@@ -98,7 +101,7 @@ def _source_query(
         sql += " WHERE fetched_at > :wm OR tagged_at > :wm"
         params["wm"] = watermark
     elif dated_by:
-        sql += f" WHERE {dated_by} >= :since"
+        sql += " WHERE " + " OR ".join(f"{c} >= :since" for c in dated_by)
         params["since"] = storage._iso(now - timedelta(days=RESEND_DAYS))
     return sql, params
 

@@ -6,9 +6,9 @@ nothing here can delay or block a digest. Two passes over agent.db:
   1. fetch: every story first seen in the window with no story_details row
      gets its article body (headline_rewriter's fetcher, larger cap). A failed
      fetch still gets a row (body_status='failed'), so it's never retried.
-  2. tag: every fetched-but-untagged story goes to OpenAI in batches of
-     BATCH_SIZE. Each batch is saved as it lands, so a failed call costs only
-     that batch, and the next run picks it up.
+  2. tag: every fetched-but-untagged story from the last TAG_RETRY_DAYS goes
+     to OpenAI in batches of BATCH_SIZE. Each batch is saved as it lands, so a
+     failed call costs only that batch, and a later run picks it up.
 
 Backfill: python src/enricher.py --days 30
 Audit trail: data/logs/enrich_<date>.jsonl — one line per tag call + a summary.
@@ -36,6 +36,9 @@ BODY_MAX_CHARS = 20_000      # stored per story, ~3,500 words
 TAG_EXCERPT_CHARS = 4_000    # of the body, sent to the tagger
 BATCH_SIZE = 10
 TAG_WORKERS = 4
+# Untagged stories are retried for this long, not just the fetch window, so a
+# multi-day OpenAI outage heals on its own (what the billing alert promises).
+TAG_RETRY_DAYS = 30
 
 MAGNITUDES = ("S", "A", "B", "C")
 GEOS = ("India", "US", "Global")
@@ -164,20 +167,22 @@ def _clean_value(kind: object, v: object) -> object:
     return str(v).strip()[:120] if isinstance(v, str) and v.strip() else None
 
 
-def _clean(t: dict, text: str = "") -> dict:
+def _clean(t: dict, text: str | None = None) -> dict:
     """One LLM tag entry → validated values. Anything off-list becomes a safe
     default rather than failing the story; facts outside the story's own
     category's fields are dropped.
 
-    Healthcare needs both the model's yes AND the digest's own lexicon gate
-    (topicality.py) on the story text: in the first live run the model filed
-    26 non-healthcare IPOs (NSE, steel, fintech) under venture_ipo, and the
-    lexicon caught 25 of them. A non-healthcare story is tier C, so "biggest"
-    questions never surface it."""
+    Healthcare needs the model's yes AND, when there is a fetched body, the
+    digest's own lexicon gate (topicality.py) on title + summary + body: in the
+    first live run the model filed 26 non-healthcare IPOs (NSE, steel, fintech)
+    under venture_ipo, and the lexicon caught 25 of them. `text` is None when
+    the fetch failed: title + summary alone is too thin for the lexicon
+    ("Ultrahuman raises $12M Series B" has no stem), so the model decides.
+    A non-healthcare story is tier C, so "biggest" questions never surface it."""
     def pick(v, allowed):
         return v if v in allowed else None
 
-    healthcare = t.get("healthcare") is True and topicality.is_healthcare(text)
+    healthcare = t.get("healthcare") is True and (text is None or topicality.is_healthcare(text))
     category = pick(t.get("category"), _categories()) or OTHER_HEALTHCARE
     if not healthcare:
         category = NOT_HEALTHCARE
@@ -195,7 +200,7 @@ def _clean(t: dict, text: str = "") -> dict:
         "facts": facts,
         "magnitude": "C" if category == NOT_HEALTHCARE else pick(t.get("magnitude"), MAGNITUDES),
         "companies": [
-            str(c).strip() for c in (comps if isinstance(comps, list) else [])
+            str(c).strip()[:120] for c in (comps if isinstance(comps, list) else [])
             if str(c).strip()
         ][:5],
         "geo": pick(t.get("geo"), GEOS),
@@ -226,7 +231,10 @@ def _tag_batch(client, system: str, rows: list[dict]) -> tuple[dict[str, dict], 
         )
         parsed = json.loads(resp.choices[0].message.content or "{}")
         entries = parsed.get("stories") if isinstance(parsed, dict) else None
-        texts = {it["id"]: f'{it["title"]} {it["summary"]} {it["body"]}' for it in items}
+        texts = {
+            it["id"]: f'{it["title"]} {it["summary"]} {it["body"]}' if it["body"] else None
+            for it in items
+        }
         tags = {
             str(e.get("id")): _clean(e, texts.get(str(e.get("id")), ""))
             for e in (entries if isinstance(entries, list) else [])
@@ -253,7 +261,8 @@ def run(*, days: int, conn, client, fetch=_fetch_bodies) -> dict:
         storage.save_story_body(sid, bodies.get(url, ""), conn=conn)
     conn.commit()
 
-    rows = storage.untagged_stories(since=since, conn=conn)
+    tag_since = datetime.now(timezone.utc) - timedelta(days=max(days, TAG_RETRY_DAYS))
+    rows = storage.untagged_stories(since=tag_since, conn=conn)
     batches = [rows[i:i + BATCH_SIZE] for i in range(0, len(rows), BATCH_SIZE)]
     system = _system_prompt()
     stats = {

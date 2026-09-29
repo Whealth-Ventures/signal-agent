@@ -5,8 +5,10 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +55,11 @@ class SourceQueryTest(unittest.TestCase):
         wm = iso(NOW - timedelta(days=2))
         self.assertEqual(self._ids("story_details", full=False, watermark=wm), ["new"])
 
+    def test_a_story_re_seen_after_the_window_is_re_sent(self):
+        # upsert_story keeps created_at but refreshes published_at.
+        self.conn.execute("UPDATE stories SET published_at = ? WHERE id = 'old'", (iso(NOW),))
+        self.assertEqual(self._ids("stories", full=False, watermark=None), ["new", "old"])
+
     def test_a_late_tag_is_sent_even_for_an_old_fetch(self):
         self.conn.execute("UPDATE story_details SET tagged_at = ? WHERE story_id = 'old'", (iso(NOW),))
         wm = iso(NOW - timedelta(days=2))
@@ -65,6 +72,55 @@ class SourceQueryTest(unittest.TestCase):
         for table, (_, cs, _) in neon_sync._TABLES.items():
             sqlite_cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             self.assertLessEqual({c for c, _ in cs}, sqlite_cols, table)
+
+
+class _FakeCursor:
+    """Just enough of a psycopg cursor for sync(): Neon's tables are non-empty
+    and its newest story_details row is `newest`; COPY rows are captured."""
+    def __init__(self, newest):
+        self.newest, self.copied, self.executed, self._last = newest, {}, [], ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        self._last = sql
+        return self
+
+    def fetchone(self):
+        if "NOT EXISTS" in self._last:
+            return (False,)
+        return (self.newest,)
+
+    @contextmanager
+    def copy(self, sql):
+        rows = self.copied.setdefault(sql.split()[1].removeprefix("_stage_"), [])
+        yield SimpleNamespace(write_row=rows.append)
+
+
+class SyncTest(unittest.TestCase):
+    setUp = SourceQueryTest.setUp  # same fixture, without re-running its tests
+
+    def test_watermark_nul_strip_and_body_retention(self):
+        self.conn.execute("UPDATE story_details SET body = 'a' || char(0) || 'b' WHERE story_id = 'new'")
+        self.conn.commit()
+        cur = _FakeCursor(newest=NOW - timedelta(days=2))
+        pg = SimpleNamespace(transaction=nullcontext, cursor=lambda: cur)
+        with mock.patch.object(config, "DB_PATH", Path(self.tmp.name) / "t.db"), \
+             mock.patch.object(config, "SECTOR_DB_PATH", Path(self.tmp.name) / "missing.db"):
+            sent = neon_sync.sync(pg, now=NOW)
+
+        # Watermark: only the story_details row newer than Neon's newest is sent.
+        self.assertEqual(sent["public.story_details"], 1)
+        body = cur.copied["story_details"][0][1]
+        self.assertEqual(body, "ab")  # NUL stripped on the way into COPY
+        retention = [p for s, p in cur.executed if s.startswith("UPDATE public.story_details")]
+        self.assertEqual(retention, [(NOW - timedelta(days=neon_sync.BODY_RETENTION_DAYS),)])
+        self.assertNotIn("sector.stories", sent)  # no sector.db → schema skipped
 
 
 class SqlTest(unittest.TestCase):

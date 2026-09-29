@@ -22,8 +22,8 @@ Decided 25 September 2026.
 
 - **`src/enricher.py`** runs after every digest post, as its own process, from `deploy/run-digest.sh`. It can't delay a digest, and a failure only prints `WARN: enrich failed`.
 - **Pass 1, fetch.** Every story first seen in the last 2 days without a `story_details` row gets its body. A failed fetch still gets a row (`body_status='failed'`), so it isn't retried.
-- **Pass 2, tag.** Untagged stories go to OpenAI 10 at a time, with 4 calls in parallel. Each batch is saved as it lands. A failed call leaves its stories untagged for the next run.
-- **Healthcare check first.** The model answers `healthcare: true/false`, and the digest's own lexicon gate (`topicality.is_healthcare`, on title, summary and body) can veto a yes. A non-healthcare story is `not_healthcare`, tier C, with no facts. In the first live test the model alone filed 26 non-healthcare IPOs (NSE, steel, fintech) under Venture & IPO; with the check, none got through.
+- **Pass 2, tag.** Untagged stories from the last 30 days go to OpenAI 10 at a time, with 4 calls in parallel. Each batch is saved as it lands. A failed call leaves its stories untagged, and a later run retries them, so an OpenAI outage of up to 30 days heals on its own.
+- **Healthcare check first.** The model answers `healthcare: true/false`, and, when the article body was fetched, the digest's own lexicon gate (`topicality.is_healthcare`, on title, summary and body) can veto a yes. Without a body the model decides alone: a title like "Ultrahuman raises $12M Series B" has no healthcare word for the lexicon to find. A non-healthcare story is `not_healthcare`, tier C, with no facts. In the first live test the model alone filed 26 non-healthcare IPOs (NSE, steel, fintech) under Venture & IPO; with the check, none got through.
 - **Every story gets the same common labels:** `category` (one of the 8, `other_healthcare`, or `not_healthcare`), `magnitude` (S/A/B/C, the ranker's own rubric, so "biggest" means what it means in the digest), `companies`, `geo`, and a two-sentence `summary`.
 - **Each category also gets its own facts**, stored as JSON in `facts`, so a story only has the fields its kind of news has. Defined in `enricher.CATEGORY_FIELDS`:
 
@@ -46,7 +46,7 @@ Decided 25 September 2026.
 
 ### Rollout
 
-1. Merge. Jenkins deploys in about 100 seconds. Nothing new to install: no dependency, no unit file, no env var.
+1. Add `DATABASE_URL` (Neon, direct connection) to the agent secret, then merge. Jenkins deploys in about 100 seconds and installs the one new dependency, `psycopg[binary]`, from `requirements.txt`. No new unit file.
 2. The next digest run (India 02:20 UTC or US 11:50 UTC) enriches the last 2 days automatically.
 3. Check the `run_done` line in `data/logs/enrich_<date>.jsonl`.
 4. Backfill 30 days. Run it between digest runs, so the two don't compete for the DB:

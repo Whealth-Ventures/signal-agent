@@ -32,16 +32,19 @@ cd "$REPO"
 .venv/bin/python src/sharepoint_sync.py
 
 echo ">> running digest geo=$GEO (post-at ${DIGEST_POST_AT:-immediate})"
+# Deliberately unguarded: a crashed digest (e.g. OpenAI down, which posts its
+# own alert) stops the script here, so the enricher can't post a second alert
+# in the same channel. Don't add `|| true` without rethinking that.
 .venv/bin/python src/main.py --geo "$GEO" --post-at "${DIGEST_POST_AT:-}"
 
 # Article bodies + Q&A tags for the stories this run added (src/enricher.py).
 # After the post, so it can never delay a digest; before the backup, so the
-# backup carries them. Never fatal.
-.venv/bin/python src/enricher.py --geo "$GEO" || echo "WARN: enrich failed"
+# backup carries them. Never fatal; capped so it can't eat into the backup.
+timeout 20m .venv/bin/python src/enricher.py --geo "$GEO" || echo "WARN: enrich failed"
 
 # One-way copy into Neon for live browsing (src/neon_sync.py). Never fatal;
 # skipped when DATABASE_URL isn't set.
-.venv/bin/python src/neon_sync.py || echo "WARN: neon sync failed"
+timeout 5m .venv/bin/python src/neon_sync.py || echo "WARN: neon sync failed"
 
 # Backup runs ONCE per day, on the India (or legacy 'both') pass — not again on
 # the later US pass. Non-fatal.

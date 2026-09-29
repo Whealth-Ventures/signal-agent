@@ -129,6 +129,33 @@ class EnricherTest(unittest.TestCase):
         self.assertEqual(second["tagged"], 2)
         self.assertTrue(all(r["tagged_at"] for r in self._details().values()))
 
+    def test_failed_fetch_is_judged_by_the_model_not_the_lexicon(self):
+        # No healthcare stem in title or summary, and no body: the lexicon would
+        # veto it, but a failed fetch leaves too little text to judge.
+        storage.upsert_story(Story(
+            id="u", canonical_url="https://ex.com/u", canonical_title="Ultrahuman raises $12M Series B",
+            canonical_summary="", published_at=_TS, relevance_score=0.5,
+        ), conn=self.conn)
+        self.conn.commit()
+        entry = {"id": "u", "healthcare": True, "category": "venture_ipo", "magnitude": "A",
+                 "facts": {"event": "funding_round", "amount_usd": 1.2e7}}
+        enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY, entry]), fetch=self._fetch)
+        u = self._details()["u"]
+        self.assertEqual((u["body_status"], u["category"], u["magnitude"]), ("failed", "venture_ipo", "A"))
+
+    def test_an_untagged_story_is_retried_after_the_fetch_window(self):
+        # Fetched 10 days ago, never tagged (say, a long OpenAI outage).
+        storage.save_story_body("old", "Hospital body.", conn=self.conn)
+        self.conn.commit()
+        entry = {**GOOD, "id": "old"}
+        enricher.run(days=2, conn=self.conn, client=_FakeClient([GOOD, MESSY, entry]), fetch=self._fetch)
+        self.assertEqual(self._details()["old"]["category"], "venture_ipo")
+        self.assertNotIn("https://ex.com/old", self.fetched[0])  # retried, not re-fetched
+
+    def test_company_names_are_capped(self):
+        t = enricher._clean({"healthcare": True, "companies": ["x" * 500]}, None)
+        self.assertEqual(len(t["companies"][0]), 120)
+
     def test_every_category_has_fields_and_the_prompt_lists_them(self):
         prompt = enricher._system_prompt()
         for b in config.PRIORITY_BUCKETS:
