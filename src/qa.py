@@ -166,7 +166,8 @@ def search_stories(
     sort: str = "importance", limit: int = 15,
 ) -> list[dict]:
     """Filter values the model got wrong are ignored rather than failing the
-    search, so a bad enum never costs the whole answer.
+    search, so a bad enum never costs the whole answer. Deal-size bounds are
+    the exception: a bad one raises.
 
     Stories about the same event from different outlets are merged into one
     result (the most important one, with the others as more_links): in the
@@ -200,11 +201,18 @@ def search_stories(
     if min_magnitude in enricher.MAGNITUDES:
         where.append("instr('SABC', d.magnitude) BETWEEN 1 AND ?")
         params.append("SABC".index(min_magnitude) + 1)
-    for bound, op in ((min_amount, ">="), (max_amount, "<=")):
-        if (money := enricher.parse_money(bound)):
-            where.append(f"json_extract(d.facts, '$.amount_usd') BETWEEN ? AND ? "
-                         f"AND json_extract(d.facts, '$.amount_usd') {op} ?")
-            params += [enricher.MIN_DEAL_USD, enricher.MAX_DEAL_USD, money[0]]
+    for name, bound, op in (("min_amount", min_amount, ">="), ("max_amount", max_amount, "<=")):
+        if bound is None:
+            continue
+        # Unlike the other filters, a bad bound fails the call: ignoring it
+        # would return unfiltered deals the model then presents as filtered.
+        if not (money := enricher.parse_money(bound)):
+            raise ValueError(f"{name} not understood: {bound!r}. Use unit one of "
+                             f"{', '.join(u for u in enricher.MONEY_UNITS if u)}, a currency code, "
+                             "and a total of at least $10,000")
+        where.append(f"json_extract(d.facts, '$.amount_usd') BETWEEN ? AND ? "
+                     f"AND json_extract(d.facts, '$.amount_usd') {op} ?")
+        params += [enricher.MIN_DEAL_USD, enricher.MAX_DEAL_USD, money[0]]
     for term in (query or "").split()[:3]:
         where.append("(s.canonical_title LIKE ? OR d.summary LIKE ? "
                      "OR s.canonical_summary LIKE ? OR d.body LIKE ?)")
@@ -341,7 +349,7 @@ def keep_known_links(text: str, allowed: set[str]) -> str:
 
 
 _CLOSING_OFFER = re.compile(
-    r"(?:(?:\n\s*)+|(?<=[.!?])[ \t]+)"  # its own line, or the last paragraph's last sentence
+    r"(?:(?:\n\s*)+|(?<=[.!?*])[ \t]+)"  # its own line, or the last paragraph's last sentence
     r"(Let me know|If you'?d like|If you want|Would you like|Feel free)[^\n]*\s*$", re.IGNORECASE)
 
 
