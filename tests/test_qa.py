@@ -93,6 +93,22 @@ class SearchTest(_Archive):
         self.assertIn("nse", self.ids(include_not_healthcare=True, limit=25))
         self.assertEqual(self.ids(category="not_healthcare"), ["nse"])
 
+    def test_deal_size_bounds_convert_the_users_currency(self):
+        cr200 = {"value": 200, "unit": "crore", "currency": "INR"}  # ~$22.7M
+        self.assertEqual(self.ids(geo="India", max_amount=cr200), ["seed"])  # $300M Eclat out
+        self.assertEqual(self.ids(min_amount=cr200), ["adarx", "eclat", "old"])  # no-amount FDA out
+        self.assertEqual(self.ids(min_amount={"value": 1, "unit": "million", "currency": "USD"},
+                                  max_amount={"value": 5, "unit": "million", "currency": "USD"}), ["seed"])
+        # A bound it can't read fails the call, so the model retries rather
+        # than presenting unfiltered deals as filtered.
+        for bad in ({"value": "lots"}, {"value": 200, "unit": "cr", "currency": "INR"},
+                    {"value": 5, "unit": "lakh", "currency": "INR"}):  # last is under $10k
+            with self.assertRaises(ValueError):
+                self.ids(max_amount=bad)
+        out = json.loads(qa._dispatch(self.conn, "search_stories", {"max_amount": {"value": 200, "unit": "cr",
+                                                                    "currency": "INR"}}, set()))
+        self.assertIn("max_amount not understood", out["error"])
+
     def test_query_company_and_bad_values(self):
         self.assertEqual(self.ids(query="lirafugratinib"), ["fda"])
         self.assertEqual(self.ids(company="Eclat"), ["eclat"])
@@ -228,6 +244,9 @@ class AnswerTest(_Archive):
     def test_closing_offer_is_dropped(self):
         self.assertEqual(qa._house_style("ADARx led.\n\nLet me know if you want more."), "ADARx led.")
         self.assertEqual(qa._house_style("Let me know is a phrase.\nADARx led."), "Let me know is a phrase.\nADARx led.")
+        self.assertEqual(qa._house_style("None above $50M. If you want all rounds, let me know."), "None above $50M.")
+        self.assertEqual(qa._house_style("- **Disha raised \u20b944 Cr.** Would you like more?"),
+                         "- **Disha raised \u20b944 Cr.**")
 
     def test_bad_tool_arguments_cost_one_call_not_the_answer(self):
         out = qa._dispatch(self.conn, "search_stories", {"limit": "lots"}, set())

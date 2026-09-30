@@ -1,5 +1,15 @@
 # Signal Agent — Release Notes
 
+## Questions with a deal-size limit now answer correctly (2026-09-30)
+
+**"Funding rounds up to ₹200 Cr" or "IPOs over $50M" now return only deals in that range.**
+
+- Before, a $40M round (about ₹350 Cr) showed up under "up to ₹200 Cr".
+- You can give the limit in any currency. The agent converts it to US dollars itself before searching.
+- Deals whose size wasn't reported are left out of these answers, and the answer says so.
+- Answers no longer end with "let me know if you'd like more".
+
+
 ## Ask Signal Agent questions in Slack (2026-09-29)
 
 **Mention `@signal_agent` with a question, or DM it, and it answers from the news archive in a thread.**

@@ -114,6 +114,25 @@ Setup steps are in [2026-09-29-qa-bot-setup.md](2026-09-29-qa-bot-setup.md).
   4. Reinstall the app to the workspace.
   5. Add `SLACK_APP_TOKEN` to the agent secret in Secrets Manager.
 
+### Deal-size filter: self-review before merge (30 September 2026)
+
+PR #21 adds `min_amount` / `max_amount` to `search_stories`, after the bot listed Marengo's $40M round (about ₹350 Cr) under "up to ₹200 Cr". A critical pass over the first cut found 1 real problem, now fixed.
+
+| # | Problem | Fix |
+|---|---|---|
+| 1 | **A bound the code couldn't read was silently dropped, bringing the Marengo bug back.** `enricher.parse_money` returns None for a unit outside `MONEY_UNITS` (`cr`, `crores`) or a total under $10k. The enums in the tool schema are advisory, because tools aren't sent in strict mode. On the local archive, `max_amount {200, cr, INR}` returned all 10 Indian rounds instead of 7. | `search_stories` raises `ValueError` for a bound it can't read. `_dispatch` hands that back as a tool error, so the model corrects the bound and searches again. Other bad filter values are still ignored. |
+| 2 | **A closing offer right after bold text survived.** `_CLOSING_OFFER` only matched after `.`, `!` or `?`, not after `**`. | Added `*` to the lookbehind. |
+
+Checked, no change needed:
+
+- **An exact-boundary deal is kept.** Lavni's ₹200 Cr fund and a ₹200 Cr bound go through the same formula, so they compare equal under `<=`.
+- **Excluding deals with no amount costs little.** 6 of 56 funding rounds in the local copy (11%) have no amount. The prompt tells the model to say so.
+
+Deliberately not done:
+
+- **Accepting unit aliases** (`cr`, `mn`, `bn`, `lac`). The error path already covers them and any other misspelling. Aliases alone would still drop a new typo silently.
+- **A valuation filter.** Nobody has asked for it. Add it the same way if "companies valued over $1B" comes up.
+
 ## Cost (OpenAI list prices; check the pricing page)
 
 | Item | Estimate |
