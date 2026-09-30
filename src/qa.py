@@ -48,8 +48,18 @@ MERGE_WINDOW_DAYS = 10
 
 _SEARCH_ARGS = {
     "query", "category", "events", "geo", "company", "published_after",
-    "published_before", "min_magnitude", "include_not_healthcare", "sort", "limit",
+    "published_before", "min_magnitude", "min_amount", "max_amount",
+    "include_not_healthcare", "sort", "limit",
 }
+
+# A deal-size bound as the user said it; code converts it to USD, so the
+# model never does currency maths (it once kept a $40M round under "up to
+# ₹200 Cr").
+_MONEY_BOUND = {"type": "object", "additionalProperties": False,
+                "required": ["value", "unit", "currency"], "properties": {
+                    "value": {"type": "number"},
+                    "unit": {"type": "string", "enum": list(enricher.MONEY_UNITS)},
+                    "currency": {"type": "string", "enum": list(enricher.PER_USD)}}}
 
 TOOLS = [
     {"type": "function", "function": {
@@ -76,6 +86,13 @@ TOOLS = [
             "published_before": {"type": "string", "description": "YYYY-MM-DD, exclusive."},
             "min_magnitude": {"type": "string", "enum": list(enricher.MAGNITUDES), "description": (
                 "S is biggest. 'A' returns S and A.")},
+            "min_amount": {**_MONEY_BOUND, "description": (
+                "Deal size at least this, in the user's own words and currency, e.g. "
+                "{\"value\": 200, \"unit\": \"crore\", \"currency\": \"INR\"}. "
+                "Stories with no stated amount are left out.")},
+            "max_amount": {**_MONEY_BOUND, "description": (
+                "Deal size at most this, same shape as min_amount. Stories with no "
+                "stated amount are left out.")},
             "include_not_healthcare": {"type": "boolean", "description": (
                 "Only when the user explicitly asks about non-healthcare news.")},
             "sort": {"type": "string", "enum": ["importance", "recent"], "description": (
@@ -144,7 +161,8 @@ def search_stories(
     conn: sqlite3.Connection, *, query: str | None = None, category: str | None = None,
     events: list[str] | str | None = None, geo: str | None = None, company: str | None = None,
     published_after: str | None = None, published_before: str | None = None,
-    min_magnitude: str | None = None, include_not_healthcare: bool = False,
+    min_magnitude: str | None = None, min_amount: dict | None = None,
+    max_amount: dict | None = None, include_not_healthcare: bool = False,
     sort: str = "importance", limit: int = 15,
 ) -> list[dict]:
     """Filter values the model got wrong are ignored rather than failing the
@@ -153,9 +171,7 @@ def search_stories(
     Stories about the same event from different outlets are merged into one
     result (the most important one, with the others as more_links): in the
     first live test the model listed ADARx's IPO twice despite being told to
-    merge. Same event = same first word of the lead company + category + event.
-    ponytail: name-prefix match, e.g. two unrelated rounds by one company in
-    one window would merge; add a story-embedding check if that shows up."""
+    merge. See _merge_same_event."""
     where, params = ["d.tagged_at IS NOT NULL"], []
     if category in enricher._categories():
         where.append("d.category = ?")
@@ -184,6 +200,11 @@ def search_stories(
     if min_magnitude in enricher.MAGNITUDES:
         where.append("instr('SABC', d.magnitude) BETWEEN 1 AND ?")
         params.append("SABC".index(min_magnitude) + 1)
+    for bound, op in ((min_amount, ">="), (max_amount, "<=")):
+        if (money := enricher.parse_money(bound)):
+            where.append(f"json_extract(d.facts, '$.amount_usd') BETWEEN ? AND ? "
+                         f"AND json_extract(d.facts, '$.amount_usd') {op} ?")
+            params += [enricher.MIN_DEAL_USD, enricher.MAX_DEAL_USD, money[0]]
     for term in (query or "").split()[:3]:
         where.append("(s.canonical_title LIKE ? OR d.summary LIKE ? "
                      "OR s.canonical_summary LIKE ? OR d.body LIKE ?)")
@@ -320,7 +341,8 @@ def keep_known_links(text: str, allowed: set[str]) -> str:
 
 
 _CLOSING_OFFER = re.compile(
-    r"(\n\s*)+(Let me know|If you'?d like|Would you like|Feel free)[^\n]*\s*$", re.IGNORECASE)
+    r"(?:(?:\n\s*)+|(?<=[.!?])[ \t]+)"  # its own line, or the last paragraph's last sentence
+    r"(Let me know|If you'?d like|If you want|Would you like|Feel free)[^\n]*\s*$", re.IGNORECASE)
 
 
 def _house_style(text: str) -> str:
