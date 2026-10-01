@@ -1,25 +1,43 @@
-# [patch] PROD Release: Q&A bot filters by deal size, converted to USD in code
+# [minor] PROD Release: Q&A bot finds stories by topic, not just exact words
 
-**Deal-size questions ("rounds up to ₹200 Cr") now filter in the search, not in the model's head.** No ticket. This came from the first question a teammate asked on 30 September 2026. The bot listed Marengo Asia Hospitals' $40M round (about ₹350 Cr) under "up to ₹200 Cr".
+**`search_stories` gets an `about` field that matches a topic by meaning, using the embeddings every story already has.** No ticket. This is the "semantic search" item from the plan's "Later" list ([docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md)).
+
+## Why
+
+`query` is an exact-word match (`LIKE` on title, summaries and body). A topic question misses stories that use other words: "hospital cyberattacks" doesn't find "ransomware" or "data breach".
 
 ## What changes
 
-- **`search_stories` takes `min_amount` / `max_amount`** in [src/qa.py](src/qa.py).
-  - Each is `{value, unit, currency}`, as the user said it, e.g. `{200, crore, INR}`.
-  - Code converts it with the existing `enricher.parse_money`, then filters on `amount_usd`. The model never does currency maths.
-  - A bound excludes stories with no stated amount, and stored amounts outside $10k to $1T (a units slip).
-  - A bound it can't read (a unit like `cr`, or a total under $10k) fails the tool call with an error, so the model corrects it and searches again. Other bad filter values are still ignored, but a dropped deal-size bound would show unfiltered deals as filtered.
-- **Prompt** ([prompts/qa_system.md](prompts/qa_system.md)): pass the limit as said, don't convert it, and mention in one line that undisclosed deals are left out.
-- **Closing offers:** the style filter also drops a "let me know" / "if you want" sentence that ends the last paragraph, including one right after bold text. Before, it only caught one on its own line.
-- Stale docstring on `search_stories` updated (merging is embedding-based since PR #20).
+- **`about` in [src/qa.py](src/qa.py).**
+  - The topic is embedded with `config.EMBEDDING_MODEL`, the same model as the stored story vectors (`stories.embedding`, written by the digest).
+  - Every story that passes the other filters gets a cosine score. Stories under `ABOUT_MIN_SIMILARITY = 0.35` are dropped, and the rest are ordered closest first.
+  - **The closest matches decide which stories come back; `sort` only orders them.** In a live test, sorting every match by date first let loose matches crowd out close ones, and "hospital cyberattacks" missed the Veradigm breach.
+  - `sort` gains `relevance`, the default when `about` is set. Without `about`, nothing changes: same SQL, same order, same limit.
+- **Threshold, measured on 1 October 2026** over 2,267 labelled stories:
+  - On-topic stories scored 0.40 to 0.69.
+  - Off-topic probes topped out at 0.28 ("football transfer news") and 0.32 ("cryptocurrency prices").
+- **Coverage:** all 3,053 labelled stories on prod have an embedding, so nothing needs backfilling.
+- **Cost and speed:**
+  - One embeddings call per topic search, effectively free at text-embedding-3-small prices.
+  - An unfiltered topic search takes about 150 ms. That's fine until roughly 100k stories (`ponytail:` note in `_about`).
+- **Prompt** ([prompts/qa_system.md](prompts/qa_system.md)):
+  - Topics go in `about`, exact names in `query`. When nothing is found, the bot tries `about` instead of `query`.
+  - A "biggest" list uses no `min_magnitude`. In testing, the model added `min_magnitude: S` itself, got one result, and leaked "S-magnitude" into the answer.
 
 ## Tested
 
-- `tests/test_qa.py`: ₹200 Cr max drops a $300M deal; min drops no-amount stories; a USD range; unreadable bounds (`cr`, under $10k, non-numeric) raise and come back as a tool error; mid-paragraph and after-bold closing offers.
-- Full suite: 358 passed. The 2 `test_config` failures only happen locally, because there's no `.env`.
-- Live against a local copy of the archive, with Gaurav's exact question: the search sent `max_amount {200, crore, INR}`. That returned 7 deals from ₹7.1 Cr to ₹200 Cr, with no Marengo and the note about undisclosed deals.
-- "Indian funding rounds this month above $50M" correctly returned none. The only bigger items are a filing and two fund raises.
-- Self-review findings and what was deliberately left out: [docs/2026-09-25-news-archive-plan.md](docs/2026-09-25-news-archive-plan.md), "Deal-size filter: self-review before merge".
+- `tests/test_qa.py` `AboutTest`:
+  - closest first, with off-topic and no-embedding stories dropped
+  - `sort` reorders the matches, and never trades a close match for a newer loose one
+  - other filters still apply
+  - `_dispatch` passes the embedder, and `about` without one is a tool error
+- Full suite: 363 passed. The 2 `test_config` failures only happen locally, because there's no `.env`.
+- Live against a local copy of the archive:
+  - "Weight-loss drug pricing": the Lilly/Novo Medicare stories, matched by `about`.
+  - "Hospital cyberattacks or patient data breaches": the Veradigm and Aesto Health breaches, after the "closest matches decide" fix.
+  - "Latest on nurse shortages": 5 on-topic stories, newest first.
+  - "Biggest AI in healthcare funding rounds in September": Angle Health $600M, Anew Labs $290M, Tandem Health $100M, then Implicity and Evvy at $40M. This was after the `min_magnitude` prompt fix.
+  - "Biggest healthcare IPO stories this month": unchanged. That question uses filters only, with no `about`.
 
 ## Deploy
 

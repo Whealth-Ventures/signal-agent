@@ -141,6 +141,47 @@ class SearchTest(_Archive):
         self.assertIsNone(qa.get_story(self.conn, "nope"))
 
 
+class AboutTest(_Archive):
+    """`about` matches a topic by meaning: stories within the similarity floor,
+    closest first by default; stories without an embedding never match."""
+    TOPIC = [1, 0, 0, 0]
+
+    def setUp(self) -> None:
+        super().setUp()
+        conn = storage.connect(config.DB_PATH)
+        # cos to TOPIC: 1.0, 0.6, 0.0
+        _add(conn, "on", "Lilly obesity pill pricing", "2026-09-20", "other_healthcare", {}, ["Eli Lilly"],
+             [1, 0, 0, 0], mag="B")
+        _add(conn, "near", "Novo cuts Wegovy price", "2026-09-25", "other_healthcare", {}, ["Novo Nordisk"],
+             [0.6, 0, 0.8, 0], mag="S")
+        _add(conn, "off", "Hospital ransomware attack", "2026-09-22", "other_healthcare", {}, ["Acme"],
+             [0, 1, 0, 0], mag="S")
+        conn.close()
+        self.embed = lambda text: self.TOPIC
+
+    def about(self, **kw) -> list[str]:
+        return [s["id"] for s in qa.search_stories(self.conn, about="obesity drug pricing", embed=self.embed, **kw)]
+
+    def test_closest_first_and_off_topic_dropped(self):
+        self.assertEqual(self.about(), ["on", "near"])  # STORIES fixtures have no embedding: never match
+
+    def test_explicit_sort_reorders_the_matches(self):
+        self.assertEqual(self.about(sort="importance"), ["near", "on"])
+        self.assertEqual(self.about(sort="recent"), ["near", "on"])
+
+    def test_sort_never_trades_a_close_match_for_a_newer_loose_one(self):
+        self.assertEqual(self.about(sort="recent", limit=1), ["on"])  # "near" is newer but looser
+
+    def test_filters_still_apply(self):
+        self.assertEqual(self.about(company="Lilly"), ["on"])
+
+    def test_dispatch_passes_the_embedder(self):
+        out = json.loads(qa._dispatch(self.conn, "search_stories", {"about": "obesity"}, set(), embed=self.embed))
+        self.assertEqual([s["id"] for s in out["stories"]], ["on", "near"])
+        out = json.loads(qa._dispatch(self.conn, "search_stories", {"about": "obesity"}, set()))
+        self.assertIn("about needs an embedder", out["error"])
+
+
 class MergeTest(_Archive):
     """One event told by several outlets merges; different news never does,
     even when it shares a company's first word, a company, or a label."""
