@@ -5,7 +5,8 @@ own. The model gets two fixed tools over agent.db, opened read-only, and never
 writes SQL:
 
   search_stories  filter by category / event / geo / company / dates /
-                  magnitude, keyword-match title + summaries + article body
+                  magnitude / deal size, keyword-match title + summaries +
+                  article body, or match a topic by meaning (`about`)
   get_story       one story's labels and article text
 
 Links are checked on the way out: a URL in the answer that no tool call
@@ -45,9 +46,15 @@ _EVENT_FAMILY = {"ipo_filing": "ipo"}
 # with the labels (same category and event family) and the dates.
 MERGE_SIMILARITY = 0.70
 MERGE_WINDOW_DAYS = 10
+# `about` topic search: cosine between the topic and each story's digest
+# embedding. Measured on 1 October 2026 over 2,267 labelled stories:
+# on-topic stories scored 0.40 to 0.69 ("cancer drug approvals" top 0.69,
+# "nurse staffing shortage" 0.57), while off-topic probes topped out at 0.28
+# ("football transfer news") and 0.32 ("cryptocurrency prices").
+ABOUT_MIN_SIMILARITY = 0.35
 
 _SEARCH_ARGS = {
-    "query", "category", "events", "geo", "company", "published_after",
+    "about", "query", "category", "events", "geo", "company", "published_after",
     "published_before", "min_magnitude", "min_amount", "max_amount",
     "include_not_healthcare", "sort", "limit",
 }
@@ -66,12 +73,16 @@ TOOLS = [
         "name": "search_stories",
         "description": (
             "Search the labelled healthcare news archive. Filters combine with AND. "
-            "Returns up to `limit` events, most important first: title, url, published "
+            "Returns up to `limit` events in `sort` order: title, url, published "
             "date, category, event, magnitude, geo, amount (as the article states it, "
             "with USD in brackets), amount_usd (for comparing), valuation, companies, a "
             "two-sentence summary, and more_links (other outlets covering the same event)."
         ),
         "parameters": {"type": "object", "additionalProperties": False, "properties": {
+            "about": {"type": "string", "description": (
+                "A topic or theme in plain words, matched by meaning, so related wording "
+                "is found too: e.g. \"GLP-1 drug pricing\", \"nurse shortages\", "
+                "\"hospital cyberattacks\". Use it for topics; use query for exact names.")},
             "query": {"type": "string", "description": (
                 "1 to 3 words that must ALL appear in the story (company, drug, product "
                 "or person names). Leave empty when the filters already express the question.")},
@@ -95,8 +106,10 @@ TOOLS = [
                 "stated amount are left out.")},
             "include_not_healthcare": {"type": "boolean", "description": (
                 "Only when the user explicitly asks about non-healthcare news.")},
-            "sort": {"type": "string", "enum": ["importance", "recent"], "description": (
-                "importance = magnitude, then deal size (default); recent = newest first.")},
+            "sort": {"type": "string", "enum": ["relevance", "importance", "recent"], "description": (
+                "relevance = closest to `about` (the default when about is set); importance = "
+                "magnitude, then deal size (the default otherwise); recent = newest first. "
+                "With about, the closest matches are picked first and sort only orders them.")},
             "limit": {"type": "integer", "minimum": 1, "maximum": SEARCH_LIMIT_MAX},
         }},
     }},
@@ -158,12 +171,13 @@ FROM story_details d JOIN stories s ON s.id = d.story_id"""
 
 
 def search_stories(
-    conn: sqlite3.Connection, *, query: str | None = None, category: str | None = None,
+    conn: sqlite3.Connection, *, about: str | None = None, query: str | None = None,
+    category: str | None = None,
     events: list[str] | str | None = None, geo: str | None = None, company: str | None = None,
     published_after: str | None = None, published_before: str | None = None,
     min_magnitude: str | None = None, min_amount: dict | None = None,
     max_amount: dict | None = None, include_not_healthcare: bool = False,
-    sort: str = "importance", limit: int = 15,
+    sort: str | None = None, limit: int = 15, embed=None,
 ) -> list[dict]:
     """Filter values the model got wrong are ignored rather than failing the
     search, so a bad enum never costs the whole answer. Deal-size bounds are
@@ -172,7 +186,10 @@ def search_stories(
     Stories about the same event from different outlets are merged into one
     result (the most important one, with the others as more_links): in the
     first live test the model listed ADARx's IPO twice despite being told to
-    merge. See _merge_same_event."""
+    merge. See _merge_same_event.
+
+    `about` needs `embed` (text -> vector, same model as the stored story
+    embeddings)."""
     where, params = ["d.tagged_at IS NOT NULL"], []
     if category in enricher._categories():
         where.append("d.category = ?")
@@ -223,9 +240,42 @@ def search_stories(
              f"{enricher.MIN_DEAL_USD} AND {enricher.MAX_DEAL_USD} "
              "THEN json_extract(d.facts, '$.amount_usd') END DESC, s.published_at DESC")
     limit = max(1, min(int(limit or 15), SEARCH_LIMIT_MAX))
-    # Over-fetch so merging duplicates still leaves `limit` distinct events.
-    sql = f"{_SELECT} WHERE {' AND '.join(where)} ORDER BY {order} LIMIT {limit * 4}"
-    return _merge_same_event(conn, [_row(r) for r in conn.execute(sql, params)], limit)
+    sql = f"{_SELECT} WHERE {' AND '.join(where)} ORDER BY {order}"
+    about = str(about or "").strip()
+    if not about:
+        # Over-fetch so merging duplicates still leaves `limit` distinct events.
+        rows = [_row(r) for r in conn.execute(f"{sql} LIMIT {limit * 4}", params)]
+        return _merge_same_event(conn, rows, limit)
+    if embed is None:
+        raise ValueError("about needs an embedder")
+    # The closest matches decide WHICH stories; sort only orders them. Sorting
+    # all matches by date first let loose matches crowd out close ones: in a
+    # live test "hospital cyberattacks" by recency missed the Veradigm breach.
+    rows = _about(conn, [_row(r) for r in conn.execute(sql, params)], embed(about))
+    leaders = _merge_same_event(conn, rows[: limit * 4], limit)
+    if sort in ("importance", "recent"):
+        leaders.sort(key=lambda r: r["published"], reverse=True)
+    if sort == "importance":
+        leaders.sort(key=lambda r: ({"S": 0, "A": 1, "B": 2, "C": 3}.get(r["magnitude"], 9),
+                                    -(r["amount_usd"] or 0)))
+    return leaders
+
+
+def _about(conn: sqlite3.Connection, rows: list[dict], vec: list[float]) -> list[dict]:
+    """The rows within ABOUT_MIN_SIMILARITY of the topic, closest first. A
+    story with no stored embedding can't match (prod had none missing on 1
+    October 2026).
+    ponytail: scores every filtered story per search, ~150 ms unfiltered
+    over 2,267 stories; add a vector index if the archive passes ~100k."""
+    q = np.asarray(vec, dtype=np.float32)
+    q /= float(np.linalg.norm(q)) or 1.0
+    sims = {}
+    for sid, v in storage.load_story_embeddings([r["id"] for r in rows], conn=conn).items():
+        a = np.asarray(v, dtype=np.float32)
+        if (n := float(np.linalg.norm(a))):
+            sims[sid] = float(a @ q) / n
+    kept = [r for r in rows if sims.get(r["id"], -1.0) >= ABOUT_MIN_SIMILARITY]
+    return sorted(kept, key=lambda r: -sims[r["id"]])
 
 
 def _iso_date(v: object) -> str | None:
@@ -283,10 +333,12 @@ def get_story(conn: sqlite3.Connection, story_id: str) -> dict | None:
 
 def _dispatch(
     conn: sqlite3.Connection, name: str, args: dict, seen_urls: set[str], covers_from: str = "",
+    embed=None,
 ) -> str:
     try:
         if name == "search_stories":
-            stories = search_stories(conn, **{k: v for k, v in args.items() if k in _SEARCH_ARGS})
+            stories = search_stories(conn, **{k: v for k, v in args.items() if k in _SEARCH_ARGS},
+                                     embed=embed)
         elif name == "get_story":
             story = get_story(conn, str(args.get("id", "")))
             stories = [story] if story else []
@@ -364,6 +416,9 @@ def answer(question: str, history: list[dict] | None = None, *, client=None) -> 
     """(answer text in markdown, usage). Raises on an OpenAI failure so the
     caller can tell the user; tool errors are handled inside the loop."""
     client = client or OpenAI(api_key=config.OPENAI_API_KEY, max_retries=3, timeout=90)
+
+    def embed(text: str) -> list[float]:  # for `about`; same model as the stored story vectors
+        return client.embeddings.create(model=config.EMBEDDING_MODEL, input=[text]).data[0].embedding
     usage = {"rounds": 0, "tool_calls": 0, "in": 0, "out": 0}
     # Links in the bot's own earlier answers came from earlier searches, so a
     # follow-up may reuse them. Not links people posted: those aren't vetted.
@@ -401,7 +456,7 @@ def answer(question: str, history: list[dict] | None = None, *, client=None) -> 
                     args = {}
                 usage.setdefault("searches", []).append({"tool": tc.function.name, **args})
                 messages.append({"role": "tool", "tool_call_id": tc.id,
-                                 "content": _dispatch(conn, tc.function.name, args, seen, since)})
+                                 "content": _dispatch(conn, tc.function.name, args, seen, since, embed)})
         return ("I searched but couldn't settle on an answer. Try narrowing it to a "
                 "company, a category or a date range."), _priced(usage)
     finally:
