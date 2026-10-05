@@ -148,4 +148,4 @@ The same OpenAI key powers the digest's embeddings. If its credit runs out, the 
 
 - **Bedrock Claude in the W Health account (873448587721).** Enable Anthropic model access, and add `bedrock:InvokeModel` to the instance role in `infra/iam.tf`. It also gives the ranker a second vendor.
 - **`sector.db`.** Same enricher, pointed at the sector DB, once the daily DB works.
-- **Semantic search** over the embeddings already stored in `stories.embedding`, using numpy, which is already installed.
+- ~~**Semantic search**~~ shipped on 1 October 2026 as `search_stories(about=...)` (`feat/subhanu-qa-semantic-search`), over the embeddings already in `stories.embedding`.

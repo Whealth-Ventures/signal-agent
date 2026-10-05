@@ -1,5 +1,16 @@
 # Signal Agent — Release Notes
 
+## Ask about a topic, not just a name (2026-10-01)
+
+**Questions like "any news on hospital cyberattacks?" now find stories even when they use different words.**
+
+- Before, the bot searched for the exact words in the question. A story about a "ransomware attack" or a "data breach" was missed by "cyberattacks".
+- Now it matches by meaning, so it finds stories that use different words for the same topic.
+- In testing, "hospital cyberattacks" found the Veradigm and Aesto Health breaches, and "weight-loss drug pricing" found the Medicare GLP-1 coverage stories.
+- Unrelated questions ("football transfer news") still return nothing, rather than loosely related healthcare stories.
+- Lists of the biggest stories no longer get cut down to just one or two.
+
+
 ## Questions with a deal-size limit now answer correctly (2026-09-30)
 
 **"Funding rounds up to ₹200 Cr" or "IPOs over $50M" now return only deals in that range.**
