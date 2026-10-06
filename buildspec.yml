@@ -1,0 +1,48 @@
+version: 0.2
+
+# signal-agent CI: the agent's pytest suite and the admin typecheck + next build.
+# Started by the Jenkinsfile's "Tests + admin build (CodeBuild)" stage through
+# scripts/codebuild-run.sh, on the commit Jenkins checked out. These are the
+# commands the Jenkins controller used to run, unchanged; they moved here so
+# the chromadb pip install and next build no longer load the controller.
+#
+# No secrets, by design: the placeholders below are what tests/test_config.py
+# needs to see. inputs/ is not in the source (it is gitignored and the source is
+# `git archive HEAD`), so the default tuning.xlsx is built and the tests that
+# need the real SharePoint inputs skip themselves -- same as on Jenkins, whose
+# role cannot read the SharePoint secret either.
+#
+# Nothing built here is kept: the box builds its own .venv and .next at deploy.
+
+env:
+  shell: bash
+  variables:
+    OPENAI_API_KEY: ci-placeholder
+    PERPLEXITY_API_KEY: ci-placeholder
+    SLACK_WEBHOOK_URL: https://hooks.slack.com/services/CI/PLACEHOLDER/ci
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+      nodejs: 20
+
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        PY="$(command -v python3.11 || command -v python3)"
+        "$PY" -m venv .venv
+        . .venv/bin/activate
+        pip install --quiet --upgrade pip
+        pip install --quiet -r requirements.txt pytest
+        # config.py parses inputs/tuning.xlsx at import time, so *something*
+        # must be there or every test dies on import.
+        test -f inputs/tuning.xlsx || python scripts/build_default_tuning_xlsx.py
+        pytest -q
+      - |
+        set -euo pipefail
+        cd admin
+        npm ci --no-audit --no-fund
+        npm run typecheck
+        npm run build
