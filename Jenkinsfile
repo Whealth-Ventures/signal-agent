@@ -111,10 +111,12 @@ String slugFrom(String remoteUrl) {
 // signal-agent CI/CD — validate on every branch/PR, deploy on main via SSM.
 //
 // Requirements on the Jenkins node:
-//   - python3 (3.11 preferred), node 20, npm, aws CLI v2, jq
+//   - python3 (3.11 preferred; only for the SharePoint sync), aws CLI v2, jq.
+//     No node/npm: the tests and admin build run in CodeBuild (signal-agent-ci).
 //   - AWS access to the Whealth account (873448587721): attach the Terraform
 //     output `jenkins_deploy_policy_arn` to the Jenkins instance role, OR bind a
 //     credentials pair with id 'aws-whealth' (uncomment the withAWS/withCredentials).
+//     Starting signal-agent-ci needs the whealth-jenkins-codebuild-trigger policy.
 //
 // Deploy = SSM Run Command -> the box pulls this exact commit from GitHub,
 // builds, and restarts services. No artifact copy; the box is the build host.
@@ -232,33 +234,43 @@ there rather than re-cutting a version that already shipped.'''
     }
 
 
-    stage('Agent — tests') {
+    // The tests and the admin typecheck + build run in AWS CodeBuild (project
+    // signal-agent-ci), not on this controller: the chromadb pip install and
+    // `next build` were the heavy part of every build here. buildspec.yml has the
+    // same commands, placeholders included, and no secrets.
+    // scripts/codebuild-run.sh zips HEAD (git archive), starts the build on the
+    // controller's instance role and exits non-zero when it fails, so this stage
+    // still gates the bump and the deploy below. Nothing comes back from it.
+    stage('Tests + admin build (CodeBuild)') {
       // The stored artifact passed these tests when it was cut; re-running them
       // against main's CURRENT source proves nothing about it.
       when { expression { env.ROLLBACK != 'true' } }
-      environment {
-        // tests/test_config.py preflights that a configured env exists (on a
-        // dev machine that's the real .env). CI has no secrets by design —
-        // real values live in Secrets Manager and reach the box at deploy
-        // time — so provide correctly-shaped placeholders here.
-        OPENAI_API_KEY     = 'ci-placeholder'
-        PERPLEXITY_API_KEY = 'ci-placeholder'
-        SLACK_WEBHOOK_URL  = 'https://hooks.slack.com/services/CI/PLACEHOLDER/ci'
+      steps {
+        sh 'scripts/codebuild-run.sh signal-agent-ci'
       }
+    }
+
+    // Stays on Jenkins: inputs/ is not in git, and what this writes into the
+    // workspace is tarred into the release by 'Deploy (main)'. CodeBuild cannot
+    // do it (its workspace is thrown away, and it gets no secrets). A small venv
+    // with only the sync's and the bootstrap's imports; the full
+    // requirements.txt is CodeBuild's now. Main only: a branch build packages
+    // nothing, so there the output has no reader since the tests moved.
+    stage('SharePoint inputs') {
+      when { allOf { branch 'main'; expression { env.ROLLBACK != 'true' } } }
       steps {
         sh '''
           set -eu
           PY="$(command -v python3.11 || command -v python3)"
+          # .venv: the name the deploy tarball already excludes.
           "$PY" -m venv .venv
           . .venv/bin/activate
           pip install --quiet --upgrade pip
-          pip install --quiet -r requirements.txt pytest
+          pip install --quiet 'httpx>=0.27' 'python-dotenv>=1.0' 'openpyxl>=3.1'
 
           # inputs/ is NOT in git — SharePoint owns it. Pull the same
-          # SHAREPOINT_* credentials the box uses so CI tests against the real,
-          # current inputs. Best-effort: if the Jenkins role can't read the
-          # secret, the sync no-ops and the input-dependent tests skip
-          # themselves (the skip reason says so) rather than failing the build.
+          # SHAREPOINT_* credentials the box uses. Best-effort: if the Jenkins
+          # role can't read the secret, the sync no-ops.
           SECRET_JSON="$(aws secretsmanager get-secret-value --region "$AWS_REGION" \
               --secret-id "$PROJECT/$APP_ENV/agent-env" \
               --query SecretString --output text 2>/dev/null || echo '{}')"
@@ -271,29 +283,13 @@ there rather than re-cutting a version that already shipped.'''
           unset SECRET_JSON
           python src/sharepoint_sync.py
 
-          # config.py parses inputs/tuning.xlsx at import time, so *something*
-          # must be there or every test dies on import. Bootstrap code defaults
-          # only if the sync didn't provide one.
+          # Bootstrap code defaults only if the sync didn't provide one. Kept
+          # so the release tarball carries the same inputs/ as before the move.
           test -f inputs/tuning.xlsx || python scripts/build_default_tuning_xlsx.py
-
-          pytest -q
         '''
       }
     }
 
-    stage('Admin — typecheck + build') {
-      when { expression { env.ROLLBACK != 'true' } }
-      steps {
-        dir('admin') {
-          sh '''
-            set -eu
-            npm ci --no-audit --no-fund
-            npm run typecheck
-            npm run build
-          '''
-        }
-      }
-    }
     // WH-313. Resolves the bump ONCE here so 'Bump version' below is pure arithmetic.
     //
     // Two ways in, deliberately:
